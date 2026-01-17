@@ -87,7 +87,9 @@ def fetch_live_data():
     fg_df = pd.DataFrame()
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -98,6 +100,9 @@ def fetch_live_data():
         fg_df.set_index('Date', inplace=True)
     except Exception as e:
         print(f"F&G Fetch Error: {e}")
+        # 실패 시 빈 DataFrame 반환하되, 인덱스 속성 오류 방지를 위해 형식 지정
+        fg_df = pd.DataFrame(columns=['FearGreed'])
+        fg_df.index = pd.to_datetime(fg_df.index)
         
     return data_dict, fg_df, vix_df
 
@@ -272,12 +277,22 @@ st.title("📈 ETF Golden Strategy Mobile")
 st.write("핸드폰으로 확인하는 자산 재배분 전략 대시보드")
 
 # 데이터 로딩
+# 데이터 로딩
+# 세션 상태 초기화
+if 'use_live' not in st.session_state:
+    st.session_state['use_live'] = False
+
 # 사이드바에 새로고침 버튼 추가
 if st.sidebar.button("🔄 데이터 최신화 (Live)"):
     st.cache_data.clear() # 캐시 삭제하여 강제 갱신
-    use_live = True
-else:
-    use_live = False
+    st.session_state['use_live'] = True
+    st.rerun() # 상태 반영을 위해 리런
+
+use_live = st.session_state['use_live']
+
+# Live 모드 사용 중임을 알리는 표시
+if use_live:
+    st.sidebar.success("✅ 실시간 데이터 사용 중")
 
 with st.spinner('데이터를 불러오는 중...'):
     # 라이브 모드일 경우 파일이 없어도 되므로 예외 처리 완화 가능하지만, 
@@ -322,6 +337,15 @@ end_date = st.sidebar.date_input("종료일", max_date, min_value=min_date, max_
 
 # 날짜 필터링 함수
 def filter_by_date(df, start, end):
+    if df is None or df.empty:
+        return df
+    # 인덱스가 날짜 형식이 아닐 경우 변환 시도
+    if not isinstance(df.index, pd.DatetimeIndex):
+        try:
+            df.index = pd.to_datetime(df.index)
+        except:
+            return df
+            
     return df[(df.index.date >= start) & (df.index.date <= end)]
 
 # 데이터 필터링 적용
@@ -329,10 +353,16 @@ filtered_data_dict = {t: filter_by_date(df, start_date, end_date) for t, df in d
 filtered_fg_df = filter_by_date(fg_df, start_date, end_date)
 filtered_vix_df = filter_by_date(vix_df, start_date, end_date)
 
-# 데이터가 비어있는지 확인
-if any(df.empty for df in filtered_data_dict.values()) or filtered_fg_df.empty or filtered_vix_df.empty:
-    st.warning("선택한 기간에 데이터가 충분하지 않습니다. 다른 기간을 선택해 주세요.")
+# 데이터 검증 (ETF 데이터는 필수, 보조지표는 선택)
+if any(df.empty for df in filtered_data_dict.values()):
+    st.error("주요 ETF 데이터(QQQ, QLD, TQQQ)를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.")
     st.stop()
+
+if filtered_fg_df.empty:
+    st.warning("⚠️ Fear & Greed 지수를 가져오지 못해 기본값(50)을 사용합니다.")
+
+if filtered_vix_df.empty:
+    st.warning("⚠️ VIX 지수를 가져오지 못해 기본값(15)을 사용합니다.")
 
 # 백테스팅 실행
 with st.spinner('백테스팅 계산 중...'):
