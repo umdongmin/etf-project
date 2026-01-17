@@ -44,8 +44,68 @@ def read_data(base_dir, filename):
             return pd.read_csv(path, index_col=0, parse_dates=True)
     return None
 
-@st.cache_data
-def load_all_data():
+# --- 라이브 데이터 페칭 로직 (Cloud 환경용) ---
+import yfinance as yf
+import requests
+import datetime
+
+def calculate_indicators(df):
+    """지표 계산 함수 (data_loader.py 로직 복사)"""
+    if 'Close' not in df.columns: return df
+    close_prices = pd.to_numeric(df['Close'], errors='coerce')
+    df['RSI'] = ta.rsi(close_prices, length=14)
+    macd = ta.macd(close_prices)
+    if macd is not None:
+        df = pd.concat([df, macd], axis=1)
+    return df
+
+def fetch_live_data():
+    """실시간 데이터 수집 함수"""
+    print("라이브 데이터 수집 시작...")
+    end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+    start_date = '2019-01-01'
+    
+    # 1. ETF 데이터
+    data_dict = {}
+    tickers = ['QQQ', 'QLD', 'TQQQ']
+    for ticker in tickers:
+        df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.loc[:, ~df.columns.duplicated()]
+        if not df.empty:
+            df = calculate_indicators(df)
+            data_dict[ticker] = df
+            
+    # 2. VIX 데이터
+    vix_df = yf.download('^VIX', start=start_date, end=end_date, progress=False)
+    if isinstance(vix_df.columns, pd.MultiIndex):
+        vix_df.columns = vix_df.columns.get_level_values(0)
+    vix_df = vix_df.loc[:, ~vix_df.columns.duplicated()]
+    
+    # 3. Fear & Greed 데이터
+    fg_df = pd.DataFrame()
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        series = data.get('fear_and_greed_historical', {}).get('data', [])
+        fg_df = pd.DataFrame(series)
+        fg_df['x'] = pd.to_datetime(fg_df['x'], unit='ms')
+        fg_df.rename(columns={'x': 'Date', 'y': 'FearGreed'}, inplace=True)
+        fg_df.set_index('Date', inplace=True)
+    except Exception as e:
+        print(f"F&G Fetch Error: {e}")
+        
+    return data_dict, fg_df, vix_df
+
+@st.cache_data(ttl=3600) # 1시간 캐시
+def load_all_data(use_live=False):
+    if use_live:
+        return fetch_live_data()
+        
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir = os.path.dirname(script_dir)
     
@@ -212,8 +272,17 @@ st.title("📈 ETF Golden Strategy Mobile")
 st.write("핸드폰으로 확인하는 자산 재배분 전략 대시보드")
 
 # 데이터 로딩
+# 사이드바에 새로고침 버튼 추가
+if st.sidebar.button("🔄 데이터 최신화 (Live)"):
+    st.cache_data.clear() # 캐시 삭제하여 강제 갱신
+    use_live = True
+else:
+    use_live = False
+
 with st.spinner('데이터를 불러오는 중...'):
-    data_dict, fg_df, vix_df = load_all_data()
+    # 라이브 모드일 경우 파일이 없어도 되므로 예외 처리 완화 가능하지만, 
+    # 일단 기존 로직 유지하되 우선순위 둠
+    data_dict, fg_df, vix_df = load_all_data(use_live=use_live)
 
 if not data_dict:
     st.error("데이터 파일을 찾을 수 없습니다. c:\\TestCode 경로에 데이터가 있는지 확인해주세요.")
