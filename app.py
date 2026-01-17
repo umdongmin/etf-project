@@ -259,7 +259,12 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
             'Signal': signal_state,
             'Asset': asset_label,
             'Lev_Weight': current_target_lev,
-            f'{base_asset}_Weight': 1.0 - current_target_lev
+            f'{base_asset}_Weight': 1.0 - current_target_lev,
+            'RSI': rsi,
+            'FG': fg,
+            'VIX': vix,
+            'MACD': macd_val,
+            'Signal_Line': signal_line
         })
         
     return pd.DataFrame(history).set_index('Date')
@@ -399,6 +404,16 @@ st.markdown(f"""
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+# 보조지표 표시
+k_col1, k_col2 = st.columns(2)
+with k_col1:
+    st.metric("RSI (14)", f"{latest_row['RSI']:.1f}")
+    st.metric("MACD", f"{latest_row['MACD']:.2f}", delta=f"{latest_row['MACD']-latest_row['Signal_Line']:.2f} (Gap)")
+with k_col2:
+    st.metric("Fear & Greed", f"{latest_row['FG']:.0f}")
+    st.metric("VIX", f"{latest_row['VIX']:.1f}")
+
 st.write("")
 
 # 지표 계산
