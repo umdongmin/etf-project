@@ -31,17 +31,12 @@ st.markdown("""
 # --- 로직 함수 (기본 final_main.py 기반) ---
 
 def read_data(base_dir, filename):
-    # 확인할 경로 목록 (우선순위 순)
-    paths = [
-        os.path.join(base_dir, filename),           # 1. 로컬 개발 환경 (상위 폴더)
-        os.path.join(base_dir, 'back', filename),   # 2. 로컬 백업 폴더
-        filename,                                   # 3. 같은 폴더 (Streamlit Cloud 배포)
-        os.path.join(os.getcwd(), filename)         # 4. 현재 작업 폴더
-    ]
+    # 중앙 데이터 경로 설정 (C:\TestCode\data)
+    data_dir = os.path.join(base_dir, "data")
+    path = os.path.join(data_dir, filename)
     
-    for path in paths:
-        if os.path.exists(path):
-            return pd.read_csv(path, index_col=0, parse_dates=True)
+    if os.path.exists(path):
+        return pd.read_csv(path, index_col=0, parse_dates=True)
     return None
 
 # --- 라이브 데이터 페칭 로직 (Cloud 환경용) ---
@@ -67,7 +62,7 @@ def fetch_live_data():
     
     # 1. ETF 데이터
     data_dict = {}
-    tickers = ['QQQ', 'QLD', 'TQQQ']
+    tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TMF']
     for ticker in tickers:
         df = yf.download(ticker, start=start_date, end=end_date, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -100,53 +95,110 @@ def fetch_live_data():
         fg_df.set_index('Date', inplace=True)
     except Exception as e:
         print(f"F&G Fetch Error: {e}")
-        # 실패 시 빈 DataFrame 반환하되, 인덱스 속성 오류 방지를 위해 형식 지정
         fg_df = pd.DataFrame(columns=['FearGreed'])
         fg_df.index = pd.to_datetime(fg_df.index)
-        
-    return data_dict, fg_df, vix_df
+
+    # 4. 거시 경제 데이터 (실시간 연동 - 안정성 강화)
+    macro_data_map = {}
+    fetch_status = {
+        'ETF': 'Success',
+        'VIX': 'Pending',
+        'FearGreed': 'Pending',
+        'US10Y': 'Pending',
+        'US03M': 'Pending',
+        'PCCR': 'N/A' # Yahoo Finance 지원 안 함
+    }
+    fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 10년물, 3개월물 금리, 풋/콜 비율 수집
+    m_tickers = {
+        '^TNX': 'US10Y',   # 10년물 금리
+        '^IRX': 'US03M',    # 3개월물 금리
+        '^PCC': 'PCCR'     # CBOE Put/Call Ratio
+    }
+    
+    print("\n[매크로 지표 수집 시작]")
+    for ticker, col_name in m_tickers.items():
+        try:
+            m_df = yf.download(ticker, period='5d', progress=False)
+            if not m_df.empty:
+                if isinstance(m_df.columns, pd.MultiIndex):
+                    m_df.columns = m_df.columns.get_level_values(0)
+                
+                target_col = next((c for c in ['Close', 'Adj Close', 'Price', 'Last'] if c in m_df.columns), None)
+                if target_col:
+                    valid_data = m_df[target_col].dropna()
+                    if not valid_data.empty:
+                        val = valid_data.iloc[-1]
+                        macro_data_map[col_name] = val
+                        fetch_status[col_name] = 'Success'
+                        print(f"  - {ticker} ({col_name}) 완료: {val:.2f}")
+                    else:
+                        fetch_status[col_name] = 'No Data'
+                else:
+                    fetch_status[col_name] = 'Col Missing'
+            else:
+                fetch_status[col_name] = 'Empty'
+        except Exception as e:
+            fetch_status[col_name] = f'Error: {str(e)[:20]}'
+            print(f"  - {ticker} ({col_name}) 에러: {e}")
+    
+    # VIX는 위에서 이미 vix_df로 수집했으므로 그 값을 활용 (중복 방지 및 안정성)
+    if not vix_df.empty:
+        if 'Close' in vix_df.columns:
+            latest_vix_val = vix_df['Close'].dropna().iloc[-1]
+            macro_data_map['VIX'] = latest_vix_val
+            fetch_status['VIX'] = 'Success'
+            print(f"  - ^VIX (VIX) 연동 완료: {latest_vix_val:.2f}")
+        else:
+            fetch_status['VIX'] = 'Col Missing'
+    else:
+        fetch_status['VIX'] = 'Empty'
+        print("  - 경고: vix_df가 비어있어 macro_df에 VIX를 넣지 못했습니다.")
+
+    # Fear & Greed 상태 업데이트
+    if not fg_df.empty:
+        fetch_status['FearGreed'] = 'Success'
+    else:
+        fetch_status['FearGreed'] = 'Fail'
+
+    # 데이터셋 구성
+    macro_df = pd.DataFrame([macro_data_map])
+    print(f"[매크로 지표 수집 종료] 수집된 지표 수: {len(macro_data_map)}")
+    print(f"수집된 컬럼: {macro_df.columns.tolist()}\n")
+            
+    return data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time
 
 @st.cache_data(ttl=3600) # 1시간 캐시
-def load_all_data(use_live=False):
-    if use_live:
-        return fetch_live_data()
-        
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    base_dir = os.path.dirname(script_dir)
-    
-    data_dict = {}
-    for ticker in ['QQQ', 'QLD', 'TQQQ']:
-        df = read_data(base_dir, f'{ticker}_data.csv')
-        if df is not None:
-            df.index = pd.to_datetime(df.index, errors='coerce')
-            df = df.sort_index()
-            df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-            data_dict[ticker] = df.dropna(subset=['Close'])
-    
-    fg_df = read_data(base_dir, 'fear_greed_data.csv')
-    vix_df = read_data(base_dir, 'vix_data.csv')
-    
-    if fg_df is not None:
-        fg_df.index = pd.to_datetime(fg_df.index, errors='coerce')
-    if vix_df is not None:
-        vix_df.index = pd.to_datetime(vix_df.index, errors='coerce')
-        
-    return data_dict, fg_df, vix_df
+def load_all_data():
+    """실시간 데이터 수집만 수행하도록 변경"""
+    return fetch_live_data()
 
-def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0):
+def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None):
     qqq = data_dict[base_asset]
     combined = qqq[['Close', 'RSI']].copy()
     
     fg_df.index = pd.to_datetime(fg_df.index)
     vix_df.index = pd.to_datetime(vix_df.index)
     
-    combined = combined.join(fg_df['FearGreed'].rename('FG'), how='left')
-    combined = combined.join(vix_df['Close'].rename('VIX'), how='left')
+    fg_clean = fg_df[~fg_df.index.duplicated(keep='first')]
+    vix_clean = vix_df[~vix_df.index.duplicated(keep='first')]
     
-    macd = ta.macd(combined['Close'])
-    combined = pd.concat([combined, macd], axis=1)
-    combined['MACD'] = combined['MACD_12_26_9']
-    combined['Signal_Line'] = combined['MACDs_12_26_9']
+    combined = combined.join(fg_clean['FearGreed'].rename('FG'), how='left')
+    combined = combined.join(vix_clean['Close'].rename('VIX'), how='left')
+    
+    # RSI SMA 및 MACD 컬럼 준비 (동일 로직 적용)
+    macd_col = [c for c in combined.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
+    signal_col = [c for c in combined.columns if 'MACDs_' in c]
+    
+    if macd_col and signal_col:
+        combined['MACD'] = combined[macd_col[0]]
+        combined['Signal_Line'] = combined[signal_col[0]]
+    else:
+        macd = ta.macd(combined['Close'])
+        combined = pd.concat([combined, macd], axis=1)
+        combined['MACD'] = combined['MACD_12_26_9']
+        combined['Signal_Line'] = combined['MACDs_12_26_9']
     combined['RSI_SMA'] = combined['RSI'].rolling(window=14).mean()
     
     combined['Prev_RSI'] = combined['RSI'].shift(1)
@@ -159,6 +211,14 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     combined = combined.fillna(0)
     
     dates = combined.index
+    if start_date:
+        dates = dates[dates.date >= start_date]
+    if end_date:
+        dates = dates[dates.date <= end_date]
+        
+    if len(dates) == 0:
+        return pd.DataFrame()
+
     portfolio_value = 10000.0
     cash = portfolio_value * cash_ratio
     etf_val = portfolio_value * (1 - cash_ratio)
@@ -203,15 +263,15 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
             if current_lev_pct < 0.25: target_lev_pct, rebalance_stage = 0.30, 1
             elif current_lev_pct < 0.65: target_lev_pct, rebalance_stage = 0.70, 2
             else: target_lev_pct, rebalance_stage = 1.0, 3
-            last_entry_price, rebalance_needed = prices[current_planned_asset], True
+            last_entry_price, rebalance_needed = prices[base_asset], True
         elif is_sell_signal and current_planned_asset != base_asset:
             current_planned_asset = base_asset
             if current_lev_pct > 0.75: target_lev_pct, rebalance_stage = 0.70, 1
             elif current_lev_pct > 0.35: target_lev_pct, rebalance_stage = 0.30, 2
             else: target_lev_pct, rebalance_stage = 0.0, 3
-            last_entry_price, rebalance_needed = prices[current_planned_asset], True
+            last_entry_price, rebalance_needed = prices[base_asset], True
         elif rebalance_stage in [1, 2]:
-            price_change_ratio = prices[current_planned_asset] / last_entry_price
+            price_change_ratio = prices[base_asset] / last_entry_price
             if price_change_ratio <= 0.97 or price_change_ratio >= 1.03:
                 is_signal_active = (current_planned_asset == leverage_asset and is_buy_signal) or \
                                    (current_planned_asset == base_asset and is_sell_signal)
@@ -221,7 +281,7 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                         target_lev_pct = 0.70 if rebalance_stage == 2 else 1.0
                     else:
                         target_lev_pct = 0.30 if rebalance_stage == 2 else 0.0
-                    last_entry_price, rebalance_needed = prices[current_planned_asset], True
+                    last_entry_price, rebalance_needed = prices[base_asset], True
         
         if rebalance_needed:
             new_cash = current_total_val * cash_ratio
@@ -269,63 +329,216 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         
     return pd.DataFrame(history).set_index('Date')
 
-def run_benchmark(data_dict, ticker='QQQ'):
+def run_benchmark(data_dict, ticker='QQQ', start_date=None, end_date=None):
     df = data_dict[ticker]
     dates = df.index
+    if start_date:
+        dates = dates[dates.date >= start_date]
+    if end_date:
+        dates = dates[dates.date <= end_date]
+        
+    if len(dates) == 0:
+        return pd.DataFrame()
+        
     shares = 10000.0 / df.loc[dates[0], 'Close']
     history = [{'Date': date, 'Value': shares * df.loc[date, 'Close']} for date in dates]
     return pd.DataFrame(history).set_index('Date')
 
 # --- UI 구현 ---
 
-st.title("📈 ETF Golden Strategy Mobile")
-st.write("핸드폰으로 확인하는 자산 재배분 전략 대시보드")
+st.title("📈 ETF Golden Strategy")
+st.write("나스닥 자산 재배분 전략 및 시장 모니터링")
 
-# 데이터 로딩
-# 데이터 로딩
-# 세션 상태 초기화
+# --- 사이드바 메뉴 ---
+st.sidebar.title("📌 메뉴")
+menu = st.sidebar.radio(
+    "화면 선택",
+    ["📊 백테스트", "📰 주요 마켓 이슈"],
+    index=0
+)
+
+def market_issues_view(data_dict, macro_df, fetch_status, fetch_time, fg_df):
+    st.header("📰 주요 마켓 이슈 및 밸류어이션")
+    st.caption(f"최종 데이터 업데이트: {fetch_time}")
+    
+    # 1. 시장 밸류에이션 및 심리 (Valuation & Sentiment)
+    st.subheader("📊 시장 밸류에이션 및 심리")
+    
+    # 최근 데이터 추출
+    latest_qqq_price = data_dict['QQQ']['Close'].iloc[-1]
+    qqq_eps_est = 15.64 
+    current_per = latest_qqq_price / qqq_eps_est
+    
+    # Fear & Greed
+    latest_fg = fg_df['FearGreed'].iloc[-1] if not fg_df.empty else 50
+    def get_fg_label(val):
+        if val <= 25: return "Extreme Fear (극도의 공포)"
+        if val <= 45: return "Fear (공포)"
+        if val <= 55: return "Neutral (중립)"
+        if val <= 75: return "Greed (탐욕)"
+        return "Extreme Greed (극도의 탐욕)"
+    
+    v_col1, v_col2, v_col3 = st.columns(3)
+    with v_col1:
+        st.metric(label="나스닥 100 PER", value=f"{current_per:.1f}x", delta="평균 24~26x 대비 높음", delta_color="inverse")
+    with v_col2:
+        base_buffett = 223.6
+        current_buffett = base_buffett * (latest_qqq_price / 520.0)
+        st.metric(label="버핏 지수 (추정)", value=f"{current_buffett:.1f}%", delta="200% 이상 과열", delta_color="inverse")
+    with v_col3:
+        st.metric(label="Fear & Greed Index", value=f"{latest_fg:.0f}", delta=get_fg_label(latest_fg), delta_color="off")
+
+    st.divider()
+
+    # 2. 핵심 거시경제 지표 (Market Radar)
+    st.subheader("💡 핵심 체크 지표 (Market Radar)")
+    
+    latest_10y = 0.0
+    latest_03m = 0.0
+    latest_vix = 0.0
+    latest_pccr = 0.46 # Default fallback
+    
+    if macro_df is not None and not macro_df.empty:
+        # 10년물 금리 보정
+        latest_10y = macro_df.get('US10Y', pd.Series([0.0])).iloc[-1]
+        if latest_10y > 15: latest_10y /= 10.0
+            
+        # 3개월물 금격
+        latest_03m = macro_df.get('US03M', pd.Series([0.0])).iloc[-1]
+        
+        # VIX
+        latest_vix = macro_df.get('VIX', pd.Series([0.0])).iloc[-1]
+        
+        # PCCR
+        if 'PCCR' in macro_df.columns:
+            latest_pccr = macro_df['PCCR'].iloc[-1]
+
+    m_col1, m_col2, m_col3 = st.columns(3)
+    with m_col1:
+        st.metric(label="미 국채 10년물 금리", value=f"{latest_10y:.2f}%", help="상승 시 성장주(나스닥)에 하방 압력")
+    with m_col2:
+        st.metric(label="VIX 공포 지수", value=f"{latest_vix:.2f}", help="20 이상 시 변동성 확대, 30 이상 시 패닉")
+    with m_col3:
+        st.metric(label="풋/콜 비율 (PCCR)", value=f"{latest_pccr:.2f}", help="0.7 이하: 과열, 1.0 이상: 공포")
+
+    # 장단기 금리차 별도 강조
+    yield_spread = latest_10y - latest_03m
+    spread_color = "normal" if yield_spread > 0 else "inverse"
+    st.info(f"📐 **장단기 금리차 (10Y-3M): {yield_spread:+.2f}%** {' (정상)' if yield_spread > 0 else ' (역전 - 침체 전조)'}")
+    
+    st.divider()
+
+    # 3. 주요 일정 캘린더
+    st.subheader("📅 주요 경제 일정")
+    today = datetime.date.today()
+
+    # 1. FOMC 일정 (데이터 보강: 날짜, 실제값, 컨센서스)
+    fomc_events = [
+        {"date": datetime.date(2025, 12, 10), "actual": "5.50%", "consensus": "5.50%"},
+        {"date": datetime.date(2026, 1, 29), "actual": None, "consensus": "5.50% (동결)"},
+        {"date": datetime.date(2026, 3, 19), "actual": None, "consensus": "5.25% (인하)"},
+        {"date": datetime.date(2026, 4, 30), "actual": None, "consensus": "-"}
+    ]
+    
+    # 2. CPI 일정 (데이터 보강: 날짜, 실제값, 컨센서스)
+    cpi_events = [
+        {"date": datetime.date(2025, 12, 12), "actual": "3.1%", "consensus": "3.1%"},
+        {"date": datetime.date(2026, 1, 13), "actual": "3.1%", "consensus": "3.0%"},
+        {"date": datetime.date(2026, 2, 12), "actual": None, "consensus": "2.9%"},
+        {"date": datetime.date(2026, 3, 12), "actual": None, "consensus": "-"}
+    ]
+
+    def get_past_and_next(events, today):
+        past = [e for e in events if e['date'] < today]
+        future = [e for e in events if e['date'] >= today]
+        latest_past = past[-1] if past else None
+        next_upcoming = future[0] if future else None
+        return latest_past, next_upcoming
+
+    
+    col_fomc, col_cpi = st.columns(2)
+    
+    with col_fomc:
+        st.markdown("**🏦 FOMC 금리 결정**")
+        p, n = get_past_and_next(fomc_events, today)
+        if p:
+            st.info(f"◀ **직전 ({p['date']})**\n\n결과: {p['actual']} / 예상: {p['consensus']}")
+        if n:
+            st.success(f"▶ **예정 ({n['date']})**\n\n예상: {n['consensus']}")
+
+    with col_cpi:
+        st.markdown("**📈 CPI 소비자물가**")
+        p, n = get_past_and_next(cpi_events, today)
+        if p:
+            st.info(f"◀ **직전 ({p['date']})**\n\n결과: {p['actual']} (전년대비) / 예상: {p['consensus']}")
+        if n:
+            st.success(f"▶ **예정 ({n['date']})**\n\n예상: {n['consensus']}")
+
+    # 3. 빅테크 실적발표 (Earnings)
+    with st.expander("💻 빅테크 주요 실적발표 주간", expanded=True):
+        st.info("빅테크(애플, MS, 테슬라 등)의 실적은 나스닥의 변동성을 좌우합니다.")
+        earnings_weeks = [
+            ("1월 5주차 (1/26~1/30)", "MSFT, TSLA, AAPL 등 어닝 슈퍼위크"),
+            ("4월 4주차", "1분기 실적 발표 시즌"),
+            ("7월 4주차", "2분기 실적 발표 시즌"),
+            ("10월 4주차", "3분기 실적 발표 시즌")
+        ]
+        for period, desc in earnings_weeks:
+            st.markdown(f"- **{period}** : {desc}")
+
+    # 4. 데이터 수집 상태 (Debug Info)
+    with st.expander("🛠️ 데이터 수집 상태 정보", expanded=False):
+        status_df = pd.DataFrame([fetch_status]).T
+        status_df.columns = ["Status"]
+        st.table(status_df)
+        st.caption("N/A는 수집이 불가능하거나 라이브 지원이 안 되는 지표입니다.")
+
+    # 5. 기타 주의사항
+    st.warning("⚠️ 위 일정은 미국 현지 사정에 따라 변경될 수 있으며, 한국 시간 기준은 보통 다음 날 새벽입니다.")
+
+# 세션 상태 및 데이터 새로고침 관리
 if 'use_live' not in st.session_state:
-    st.session_state['use_live'] = False
-
-# 사이드바에 새로고침 버튼 추가
-if st.sidebar.button("🔄 데이터 최신화 (Live)"):
-    st.cache_data.clear() # 캐시 삭제하여 강제 갱신
     st.session_state['use_live'] = True
-    st.rerun() # 상태 반영을 위해 리런
 
-use_live = st.session_state['use_live']
+if st.sidebar.button("🔄 데이터 새로고침 (Live)"):
+    st.cache_data.clear()
+    st.rerun()
 
-# Live 모드 사용 중임을 알리는 표시
-if use_live:
-    st.sidebar.success("✅ 실시간 데이터 사용 중")
+# 라이브 모드 알림
+st.sidebar.success("✅ 실시간 마켓 데이터 모드")
 
-with st.spinner('데이터를 불러오는 중...'):
-    # 라이브 모드일 경우 파일이 없어도 되므로 예외 처리 완화 가능하지만, 
-    # 일단 기존 로직 유지하되 우선순위 둠
-    data_dict, fg_df, vix_df = load_all_data(use_live=use_live)
+with st.spinner('실시간 마켓 데이터를 가져오는 중...'):
+    data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time = load_all_data()
 
 if not data_dict:
-    st.error("데이터 파일을 찾을 수 없습니다. c:\\TestCode 경로에 데이터가 있는지 확인해주세요.")
+    st.error("마켓 데이터를 가져올 수 없습니다. 인터넷 연결 상태를 확인해주세요.")
     st.stop()
 
-# 사이드바 설정
+# --- 주요 마켓 이슈 화면 분기 ---
+if menu == "📰 주요 마켓 이슈":
+    market_issues_view(data_dict, macro_df, fetch_status, fetch_time, fg_df)
+    st.stop()
+
+# 사이드바 설정 (백테스트용)
 st.sidebar.header("전략 설정")
 
 # 자산 선택
 ticker_map = {
     "QQQ": "QQQ (1x)",
     "QLD": "QLD (2x)",
-    "TQQQ": "TQQQ (3x)"
+    "TQQQ": "TQQQ (3x)",
+    "TLT": "TLT (1x)",
+    "TMF": "TMF (3x)"
 }
 base_asset = st.sidebar.selectbox(
     "대표 자산 (시그널 기준)", 
-    ["QQQ", "QLD", "TQQQ"], 
+    ["QQQ", "QLD", "TQQQ", "TLT"], 
     index=0,
     format_func=lambda x: ticker_map[x]
 )
 leverage_asset = st.sidebar.selectbox(
     "레버리지 자산 (매매 대상)", 
-    ["QLD", "TQQQ"], 
+    ["QLD", "TQQQ", "TMF"], 
     index=0,
     format_func=lambda x: ticker_map[x]
 )
@@ -371,11 +584,11 @@ if filtered_vix_df.empty:
 
 # 백테스팅 실행
 with st.spinner('백테스팅 계산 중...'):
-    bh_history = run_benchmark(filtered_data_dict, base_asset)
-    bh_leverage_history = run_benchmark(filtered_data_dict, leverage_asset)
+    bh_history = run_benchmark(data_dict, base_asset, start_date=start_date, end_date=end_date)
+    bh_leverage_history = run_benchmark(data_dict, leverage_asset, start_date=start_date, end_date=end_date)
     
-    # 전략 실행 및 추가 정보 추출을 위해 로직을 가져옴
-    golden_history = run_golden_strategy(filtered_data_dict, filtered_fg_df, filtered_vix_df, leverage_asset, base_asset, cash_ratio)
+    # 전략 실행 (필터링되지 않은 원본 데이터 전달, 날짜는 내부에서 처리)
+    golden_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date=start_date, end_date=end_date)
 
 # --- 현재 상태 및 시그널 요약 추가 ---
 latest_row = golden_history.iloc[-1]

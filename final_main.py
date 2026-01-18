@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import os
 from backtest import calculate_metrics
 
-def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0):
+def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0, start_date=None, end_date=None):
     """
     RSI, F&G, VIX를 결합한 'Golden Combination' 전략을 실행합니다.
     - 매수(leverage_asset): RSI <= 35 OR RSI Golden Cross 등
@@ -17,12 +17,15 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     qqq = data_dict[base_asset]
     combined = qqq[['Close', 'RSI']].copy()
     
-    # Fear & Greed 및 VIX 데이터의 인덱스를 QQQ와 동일하게 맞춤 (날짜 포맷 정규화)
+    # Fear & Greed 및 VIX 데이터의 인덱스를 QQQ와 동일하게 맞춤 (날짜 포맷 정규화 및 중복 제거)
     fg_df.index = pd.to_datetime(fg_df.index)
     vix_df.index = pd.to_datetime(vix_df.index)
     
-    combined = combined.join(fg_df['FearGreed'].rename('FG'), how='left')
-    combined = combined.join(vix_df['Close'].rename('VIX'), how='left')
+    fg_clean = fg_df[~fg_df.index.duplicated(keep='first')]
+    vix_clean = vix_df[~vix_df.index.duplicated(keep='first')]
+    
+    combined = combined.join(fg_clean['FearGreed'].rename('FG'), how='left')
+    combined = combined.join(vix_clean['Close'].rename('VIX'), how='left')
     # RSI SMA 및 MACD 컬럼 준비
     # pandas_ta MACD 컬럼명 추정 (보통 MACD_12_26_9, MACDs_12_26_9, MACDh_12_26_9)
     macd_col = [c for c in combined.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
@@ -57,6 +60,15 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     print(f"가장 낮은 FG 값: {combined['FG'].min():.2f}, 가장 높은 FG 값: {combined['FG'].max():.2f}")
     
     dates = combined.index
+    if start_date:
+        dates = dates[dates >= pd.to_datetime(start_date)]
+    if end_date:
+        dates = dates[dates <= pd.to_datetime(end_date)]
+    
+    if len(dates) == 0:
+        print("경고: 선택한 기간에 해당하는 데이터가 없습니다.")
+        return pd.DataFrame(columns=['Date', 'Value', 'Asset']).set_index('Date')
+
     portfolio_value = 10000.0
     cash = portfolio_value * cash_ratio
     etf_val = portfolio_value * (1 - cash_ratio)
@@ -174,12 +186,12 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                     target_lev_pct = 0.0
                     rebalance_stage = 3
             
-            last_entry_price = prices[current_planned_asset]
+            last_entry_price = prices[base_asset]
             rebalance_needed = True
             
         # 추가 진입 조건 확인 (3% 상승 또는 하강 시 추가 진입)
         elif rebalance_stage in [1, 2]:
-            price_change_ratio = prices[current_planned_asset] / last_entry_price
+            price_change_ratio = prices[base_asset] / last_entry_price
             if price_change_ratio <= 0.97 or price_change_ratio >= 1.03:
                 # signal check 추가 (해당 방향의 신호가 유지되고 있는지 확인)
                 is_signal_active = (current_planned_asset == leverage_asset and is_buy_signal) or \
@@ -187,7 +199,7 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                 
                 if is_signal_active:
                     rebalance_stage += 1
-                    last_entry_price = prices[current_planned_asset]
+                    last_entry_price = prices[base_asset]
                     rebalance_needed = True
                     
                     # Stage 번호에 따라 목표 비중 결정
@@ -242,15 +254,22 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         
     return pd.DataFrame(history).set_index('Date')
 
-def run_benchmark(data_dict, ticker='QQQ', initial_capital=10000.0):
+def run_benchmark(data_dict, ticker='QQQ', initial_capital=10000.0, start_date=None, end_date=None):
     """
     단순 보유 (Buy & Hold) 전략을 실행합니다.
     시작일에 전액 매수 후 변동 없이 보유합니다.
     """
     df = data_dict[ticker]
     dates = df.index
+    if start_date:
+        dates = dates[dates >= pd.to_datetime(start_date)]
+    if end_date:
+        dates = dates[dates <= pd.to_datetime(end_date)]
+        
+    if len(dates) == 0:
+        return pd.DataFrame(columns=['Date', 'Value', 'Asset']).set_index('Date')
     
-    # 첫날 종가로 전액 매수 수량 계산
+    # 선택된 기간의 첫날 종가로 전액 매수 수량 계산
     shares = initial_capital / df.loc[dates[0], 'Close']
     
     history = []
@@ -269,22 +288,20 @@ if __name__ == "__main__":
     
     try:
         def read_data(filename):
-            # 확인할 경로 목록
-            paths = [
-                os.path.join(base_dir, filename),
-                os.path.join(base_dir, 'back', filename),
-                filename,
-                os.path.join(os.getcwd(), filename)
-            ]
-            for path in paths:
-                if os.path.exists(path):
-                    return pd.read_csv(path, index_col=0, parse_dates=True)
+            # 중앙 데이터 경로 설정 (C:\TestCode\data)
+            data_dir = os.path.join(base_dir, "data")
+            path = os.path.join(data_dir, filename)
+            
+            if os.path.exists(path):
+                return pd.read_csv(path, index_col=0, parse_dates=True)
             raise FileNotFoundError(f"{filename}을(를) 찾을 수 없습니다.")
 
         data_dict = {
             'QQQ': read_data('QQQ_data.csv'),
             'QLD': read_data('QLD_data.csv'),
-            'TQQQ': read_data('TQQQ_data.csv')
+            'TQQQ': read_data('TQQQ_data.csv'),
+            'TLT': read_data('TLT_data.csv'),
+            'TMF': read_data('TMF_data.csv')
         }
         print("ETF 데이터 로드 완료.")
         
@@ -307,14 +324,18 @@ if __name__ == "__main__":
         exit()
 
     print("백테스트 시작...")
+    # 테스트 기간 설정 (사용자 요청: 2019-01-02 ~ 2026-01-16)
+    s_date = '2019-01-02'
+    e_date = '2026-01-16'
+    
     # 1. 벤치마크 (QQQ 단순 보유)
-    bh_history = run_benchmark(data_dict, ticker='QQQ')
+    bh_history = run_benchmark(data_dict, ticker='QQQ', start_date=s_date, end_date=e_date)
     # 2. 벤치마크 (QLD 단순 보유)
-    bh_qld_history = run_benchmark(data_dict, ticker='QLD')
+    bh_qld_history = run_benchmark(data_dict, ticker='QLD', start_date=s_date, end_date=e_date)
     # 3. 벤치마크 (TQQQ 단순 보유)
-    bh_tqqq_history = run_benchmark(data_dict, ticker='TQQQ')
+    bh_tqqq_history = run_benchmark(data_dict, ticker='TQQQ', start_date=s_date, end_date=e_date)
     # 4. Golden Combination 전략 (QLD 사용)
-    golden_qld_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0)
+    golden_qld_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0, start_date=s_date, end_date=e_date)
     # 5. Golden Combination 전략 (TQQQ 사용)
     # golden_tqqq_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='TQQQ', cash_ratio=0)
     print("전략 실행 완료. 지표 계산 중...")
