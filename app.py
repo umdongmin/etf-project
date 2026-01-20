@@ -584,8 +584,10 @@ if filtered_vix_df.empty:
 
 # 백테스팅 실행
 with st.spinner('백테스팅 계산 중...'):
-    bh_history = run_benchmark(data_dict, base_asset, start_date=start_date, end_date=end_date)
-    bh_leverage_history = run_benchmark(data_dict, leverage_asset, start_date=start_date, end_date=end_date)
+    # 공통 벤치마크 계산 (QQQ, QLD, TQQQ)
+    bh_qqq_history = run_benchmark(data_dict, 'QQQ', start_date=start_date, end_date=end_date)
+    bh_qld_history = run_benchmark(data_dict, 'QLD', start_date=start_date, end_date=end_date)
+    bh_tqqq_history = run_benchmark(data_dict, 'TQQQ', start_date=start_date, end_date=end_date)
     
     # 전략 실행 (필터링되지 않은 원본 데이터 전달, 날짜는 내부에서 처리)
     golden_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date=start_date, end_date=end_date)
@@ -630,14 +632,17 @@ with k_col2:
 st.write("")
 
 # 지표 계산
-bh_metrics = calculate_metrics(bh_history.rename(columns={'Value': 'PortfolioValue'}))
+qqq_metrics = calculate_metrics(bh_qqq_history.rename(columns={'Value': 'PortfolioValue'}))
+qld_metrics = calculate_metrics(bh_qld_history.rename(columns={'Value': 'PortfolioValue'}))
+tqqq_metrics = calculate_metrics(bh_tqqq_history.rename(columns={'Value': 'PortfolioValue'}))
 golden_metrics = calculate_metrics(golden_history.rename(columns={'Value': 'PortfolioValue'}))
 
 # 메인 지표 표시 (3열)
 col1, col2, col3 = st.columns(3)
 with col1:
+    # 기본 벤치마크(QQQ) 대비 비교
     st.metric("누적 수익률", f"{golden_metrics['Cumulative Return']:.1%}", 
-              delta=f"{(golden_metrics['Cumulative Return'] - bh_metrics['Cumulative Return']):.1%}")
+              delta=f"{(golden_metrics['Cumulative Return'] - qqq_metrics['Cumulative Return']):.1%}")
 with col2:
     st.metric("CAGR (연간 성장률)", f"{golden_metrics['CAGR']:.1%}")
 with col3:
@@ -646,18 +651,23 @@ with col3:
 # 차트 시각화
 st.subheader("성과 비교 차트")
 fig, ax = plt.subplots(figsize=(10, 5))
-ax.plot(bh_history['Value'] / 10000, label=f'{base_asset} Buy & Hold', color='gray', alpha=0.5)
-ax.plot(bh_leverage_history['Value'] / 10000, label=f'{leverage_asset} Buy & Hold', color='#ff7f0e', alpha=0.5)
-ax.plot(golden_history['Value'] / 10000, label=f'Golden Strat ({leverage_asset})', color='#1f77b4', linewidth=2)
+ax.plot(bh_qqq_history['Value'] / 10000, label='Benchmark (QQQ)', color='gray', alpha=0.5)
+ax.plot(bh_qld_history['Value'] / 10000, label='Benchmark (QLD)', color='orange', alpha=0.5)
+ax.plot(bh_tqqq_history['Value'] / 10000, label='Benchmark (TQQQ)', color='red', alpha=0.5)
+ax.plot(golden_history['Value'] / 10000, label=f'Golden Strat ({leverage_asset})', color='blue', linewidth=2)
 ax.set_ylabel('Normalized Value')
 ax.legend()
 ax.grid(True, alpha=0.3)
 st.pyplot(fig)
 
-# 상세 데이터 표 (최근 10일)
-st.subheader("최근 성과 데이터")
-display_df = golden_history.tail(10).copy()
-display_df['Value'] = display_df['Value'].map('{:,.0f}'.format)
-st.table(display_df)
+# 상세 성과 데이터 (전략별 요약)
+st.subheader("전략 성과 요약")
+summary_data = [
+    {"전략": "Benchmark (QQQ)", "최종가치": f"{qqq_metrics['Final Value']:,.0f}", "수익률(ROI)": f"{qqq_metrics['Cumulative Return']:.2%}", "CAGR": f"{qqq_metrics['CAGR']:.2%}", "MDD": f"{qqq_metrics['MDD']:.2%}"},
+    {"전략": "Benchmark (QLD)", "최종가치": f"{qld_metrics['Final Value']:,.0f}", "수익률(ROI)": f"{qld_metrics['Cumulative Return']:.2%}", "CAGR": f"{qld_metrics['CAGR']:.2%}", "MDD": f"{qld_metrics['MDD']:.2%}"},
+    {"전략": "Benchmark (TQQQ)", "최종가치": f"{tqqq_metrics['Final Value']:,.0f}", "수익률(ROI)": f"{tqqq_metrics['Cumulative Return']:.2%}", "CAGR": f"{tqqq_metrics['CAGR']:.2%}", "MDD": f"{tqqq_metrics['MDD']:.2%}"},
+    {"전략": f"Golden Strat ({leverage_asset})", "최종가치": f"{golden_metrics['Final Value']:,.0f}", "수익률(ROI)": f"{golden_metrics['Cumulative Return']:.2%}", "CAGR": f"{golden_metrics['CAGR']:.2%}", "MDD": f"{golden_metrics['MDD']:.2%}"}
+]
+st.table(pd.DataFrame(summary_data).set_index("전략"))
 
 st.info("💡 팁: 핸드폰 브라우저 메뉴에서 '홈 화면에 추가'를 누르면 앱처럼 사용할 수 있습니다.")
