@@ -251,6 +251,16 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         sell_cond_3 = (prev_macd > prev_signal_line) and (macd_val < signal_line)
         is_sell_signal = sell_cond_1 or sell_cond_2 or sell_cond_3
         
+        # 신호 조건 로깅 (UI 표시용)
+        signal_conditions = []
+        if is_buy_signal:
+            if rsi < 35: signal_conditions.append(f"RSI < 35 ({rsi:.1f})")
+            if is_rsi_golden_cross and is_macd_improving and is_macd_below_signal: signal_conditions.append("RSI Golden Cross + MACD Improving")
+        if is_sell_signal:
+            if sell_cond_1: signal_conditions.append(f"RSI >= 70 & Declining ({rsi:.1f})")
+            if sell_cond_2: signal_conditions.append("MACD > Signal & Declining + RSI Dead Cross")
+            if sell_cond_3: signal_conditions.append("MACD Dead Cross")
+        
         current_total_val = cash + sum(holdings[t] * prices[t] for t in holdings)
         rebalance_needed = False
         
@@ -307,16 +317,23 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         # 시그널 상태 기록 (UI 표시용)
         # 시그널 상태 기록 (UI 표시용) - 비중 변화가 있을 때만 매수/매도 시그널 표시
         signal_state = "중립"
+        current_condition = "N/A"
+        
         if rebalance_needed:
             if current_planned_asset == leverage_asset:
                 signal_state = "매수"
             else:
                 signal_state = "매도"
-        
+            
+            # 신호 발생 시 조건 저장
+            if 'signal_conditions' in locals() and signal_conditions:
+                current_condition = " | ".join(signal_conditions)
+
         history.append({
             'Date': date, 
             'Value': current_total_val, 
             'Signal': signal_state,
+            'Condition': current_condition,
             'Asset': asset_label,
             'Lev_Weight': current_target_lev,
             f'{base_asset}_Weight': 1.0 - current_target_lev,
@@ -525,8 +542,8 @@ st.sidebar.header("전략 설정")
 # 자산 선택
 ticker_map = {
     "QQQ": "QQQ (1x)",
-    "QLD": "QLD (2x)",
-    "TQQQ": "TQQQ (3x)",
+    "QLD": "QLD (2x) 🌟",
+    "TQQQ": "TQQQ (3x) 🌟",
     "TLT": "TLT (1x)",
     "TMF": "TMF (3x)"
 }
@@ -620,14 +637,9 @@ st.markdown(f"""
     </div>
     """, unsafe_allow_html=True)
 
-# 보조지표 표시
-k_col1, k_col2 = st.columns(2)
-with k_col1:
-    st.metric("RSI (14)", f"{latest_row['RSI']:.1f}")
-    st.metric("MACD", f"{latest_row['MACD']:.2f}", delta=f"{latest_row['MACD']-latest_row['Signal_Line']:.2f} (Gap)")
-with k_col2:
-    st.metric("Fear & Greed", f"{latest_row['FG']:.0f}")
-    st.metric("VIX", f"{latest_row['VIX']:.1f}")
+# 매매 조건 표시 (지표 수치 대신 이유 표시)
+if latest_row.get('Condition', 'N/A') != 'N/A' and current_signal in ["매수", "매도"]:
+    st.info(f"📋 **체결 조건:** {latest_row['Condition']}")
 
 st.write("")
 
