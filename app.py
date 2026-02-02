@@ -11,6 +11,9 @@ import requests
 import datetime
 from backtest import calculate_metrics
 
+# Streamlit 설정은 가장 처음에 호출되어야 합니다 (데코레이터보다 먼저)
+st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="wide")
+
 # --- Core Logic Classes ---
 
 class DataService:
@@ -434,7 +437,6 @@ class GoldenStrategyApp:
         }
         
     def run(self):
-        st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="wide")
         st.title("📈 ETF Golden Strategy")
         
         # 사이드바 메뉴
