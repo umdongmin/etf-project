@@ -92,7 +92,7 @@ class DataService:
             'ETF': 'Success', 'VIX': 'Pending', 'FearGreed': 'Pending', 
             'US10Y': 'Pending', 'US03M': 'Pending', 'PCCR': 'N/A'
         }
-        m_tickers = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCC': 'PCCR'}
+        m_tickers = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCCR': 'PCCR'}
         
         for ticker, col_name in m_tickers.items():
             try:
@@ -295,8 +295,11 @@ class MarketView:
         l10y = macro_df.get('US10Y', pd.Series([0.0])).iloc[-1]
         if l10y > 15: l10y /= 10.0
         m1.metric("미 국채 10년물 금리", f"{l10y:.2f}%")
-        m2.metric("VIX 공포 지수", f"{macro_df.get('VIX', pd.Series([0.0])).iloc[-1]:.2f}")
-        m3.metric("풋/콜 비율 (PCCR)", f"{macro_df.get('PCCR', pd.Series([0.46])).iloc[-1]:.2f}")
+        m2.metric("VIX 공포 지수", f"{macro_df.get('VIX', pd.Series([15.0])).iloc[-1]:.2f}")
+        
+        pccr_val = macro_df.get('PCCR')
+        pccr_display = f"{pccr_val.iloc[-1]:.2f}" if pccr_val is not None and not pccr_val.empty else "N/A"
+        m3.metric("풋/콜 비율 (PCCR)", pccr_display)
         
         st.divider()
         # 3. 주요 일정 캘린더
