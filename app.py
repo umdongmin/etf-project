@@ -92,61 +92,54 @@ class DataService:
         
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TMF']
-        for ticker in tickers:
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            df = df.loc[:, ~df.columns.duplicated()]
-            if not df.empty:
-                df = cls.calculate_indicators(df)
-                data_dict[ticker] = df
-                
-        vix_df = yf.download('^VIX', start=start_date, end=end_date, progress=False)
-        if isinstance(vix_df.columns, pd.MultiIndex):
-            vix_df.columns = vix_df.columns.get_level_values(0)
-        vix_df = vix_df.loc[:, ~vix_df.columns.duplicated()]
-        
+        # [수정] 여러 번 호출하지 않고 한 번에 묶어서 다운로드 (Rate Limit 회피)
+        try:
+            full_data = yf.download(tickers + ['^VIX'], start=start_date, end=end_date, progress=False, group_by='ticker')
+            
+            for ticker in tickers:
+                if ticker in full_data and not full_data[ticker].empty:
+                    df = full_data[ticker].copy()
+                    df = cls.calculate_indicators(df)
+                    data_dict[ticker] = df
+            
+            vix_df = full_data['^VIX'].copy() if '^VIX' in full_data else pd.DataFrame()
+        except Exception as e:
+            print(f"Main Download Error: {e}")
+            vix_df = pd.DataFrame()
+
         fg_df = pd.DataFrame()
         try:
             url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
+            headers = {'User-Agent': 'Mozilla/5.0'}
             r = requests.get(url, headers=headers, timeout=10)
-            r.raise_for_status()
             data = r.json()
             series = data.get('fear_and_greed_historical', {}).get('data', [])
             fg_df = pd.DataFrame(series)
             fg_df['x'] = pd.to_datetime(fg_df['x'], unit='ms')
             fg_df.rename(columns={'x': 'Date', 'y': 'FearGreed'}, inplace=True)
             fg_df.set_index('Date', inplace=True)
-        except Exception as e:
-            print(f"F&G Fetch Error: {e}")
+        except:
             fg_df = pd.DataFrame(columns=['FearGreed'])
 
         macro_data_map = {}
-        fetch_status = {
-            'ETF': 'Success', 'VIX': 'Pending', 'FearGreed': 'Pending', 
-            'US10Y': 'Pending', 'US03M': 'Pending', 'PCCR': 'N/A'
-        }
-        m_tickers = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCCR': 'PCCR'}
+        fetch_status = {'ETF': 'Success', 'VIX': 'Pending', 'FearGreed': 'Pending', 'Macro': 'Pending'}
         
-        for ticker, col_name in m_tickers.items():
-            try:
-                m_df = yf.download(ticker, period='5d', progress=False)
-                if not m_df.empty:
-                    if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
-                    target_col = next((c for c in ['Close', 'Adj Close', 'Price', 'Last'] if c in m_df.columns), None)
-                    if target_col:
-                        val = m_df[target_col].dropna().iloc[-1]
-                        macro_data_map[col_name] = val
-                        fetch_status[col_name] = 'Success'
-            except: fetch_status[col_name] = 'Error'
+        # 매크로 지표도 한 번에 묶어서 다운로드
+        m_tickers_raw = ['^TNX', '^IRX', '^PCCR']
+        try:
+            m_data = yf.download(m_tickers_raw, period='5d', progress=False, group_by='ticker')
+            m_map = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCCR': 'PCCR'}
+            for t_raw, t_name in m_map.items():
+                if t_raw in m_data and not m_data[t_raw].empty:
+                    val = m_data[t_raw]['Close'].dropna().iloc[-1]
+                    macro_data_map[t_name] = val
+            fetch_status['Macro'] = 'Success'
+        except:
+            fetch_status['Macro'] = 'Error'
         
-        if not vix_df.empty and 'Close' in vix_df.columns:
+        if not vix_df.empty:
             macro_data_map['VIX'] = vix_df['Close'].dropna().iloc[-1]
             fetch_status['VIX'] = 'Success'
-        
         if not fg_df.empty: fetch_status['FearGreed'] = 'Success'
         
         macro_df = pd.DataFrame([macro_data_map])
@@ -403,7 +396,8 @@ class BacktestView:
         for k, v in bh_histories.items(): ax.plot(v['Value']/10000, label=k, alpha=0.5)
         ax.plot(golden_history['Value']/10000, label='Strategy', linewidth=2, color='blue')
         ax.legend(); ax.grid(True, alpha=0.3)
-        st.pyplot(fig)
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig) # 메모리 해제 보강
         
         st.subheader("전략 성과 요약")
         sum_df = pd.DataFrame([{"전략": k, "최종가치": f"{v['Final Value']:,.0f}", "수익률": f"{v['Cumulative Return']:.2%}", "CAGR": f"{v['CAGR']:.2%}", "MDD": f"{v['MDD']:.2%}"} for k, v in metrics.items()])
