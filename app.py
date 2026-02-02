@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import os
 import yfinance as yf
@@ -120,6 +122,7 @@ class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @staticmethod
     def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None):
+        if base_asset not in data_dict: return pd.DataFrame()
         qqq = data_dict[base_asset]
         combined = qqq[['Close', 'RSI']].copy()
         
@@ -271,12 +274,16 @@ class MarketView:
         st.caption(f"최종 데이터 업데이트: {fetch_time}")
         
         st.subheader("📊 시장 밸류에이션 및 심리")
-        latest_qqq = data_dict['QQQ']['Close'].iloc[-1]
         latest_fg = fg_df['FearGreed'].iloc[-1] if not fg_df.empty else 50
         
         v1, v2, v3 = st.columns(3)
-        v1.metric("나스닥 100 PER", f"{(latest_qqq / 15.64):.1f}x", delta="평균 24~26x 대비 높음", delta_color="inverse")
-        v2.metric("버핏 지수 (추정)", f"{(223.6 * (latest_qqq / 520.0)):.1f}%", delta="200% 이상 과열", delta_color="inverse")
+        if 'QQQ' in data_dict and not data_dict['QQQ'].empty:
+            latest_qqq = data_dict['QQQ']['Close'].iloc[-1]
+            v1.metric("나스닥 100 PER", f"{(latest_qqq / 15.64):.1f}x", delta="평균 24~26x 대비 높음", delta_color="inverse")
+            v2.metric("버핏 지수 (추정)", f"{(223.6 * (latest_qqq / 520.0)):.1f}%", delta="200% 이상 과열", delta_color="inverse")
+        else:
+            v1.metric("나스닥 100 PER", "N/A")
+            v2.metric("버핏 지수 (추정)", "N/A")
         v3.metric("Fear & Greed Index", f"{latest_fg:.0f}", delta="Sentiment", delta_color="off")
         
         st.divider()
@@ -482,5 +489,9 @@ class GoldenStrategyApp:
         st.info("💡 팁: '전략 분석기'에서 설정을 변경하면 즉시 백테스트 결과가 업데이트됩니다.")
 
 if __name__ == "__main__":
-    app = GoldenStrategyApp()
-    app.run()
+    try:
+        app = GoldenStrategyApp()
+        app.run()
+    except Exception as e:
+        st.error(f"❌ 애플리케이션 실행 중 오류가 발생했습니다: {e}")
+        st.exception(e)
