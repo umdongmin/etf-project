@@ -11,11 +11,11 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     """
     RSI, F&G, VIX를 결합한 'Golden Combination' 전략을 실행합니다.
     - 매수(leverage_asset): RSI <= 35 OR RSI Golden Cross 등
-    - 매도(QQQ복귀): RSI 및 MACD 과열 신호 등
+    - 매도(SOXX복귀): RSI 및 MACD 과열 신호 등
     """
     # 데이터 병합 (인덱스 정렬 보장)
-    qqq = data_dict[base_asset]
-    combined = qqq[['Close', 'RSI']].copy()
+    base_df = data_dict[base_asset]
+    combined = base_df[['Close', 'RSI']].copy()
     
     # Fear & Greed 및 VIX 데이터의 인덱스를 QQQ와 동일하게 맞춤 (날짜 포맷 정규화 및 중복 제거)
     fg_df.index = pd.to_datetime(fg_df.index)
@@ -44,6 +44,33 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     # RSI SMA 계산 (14일)
     combined['RSI_SMA'] = combined['RSI'].rolling(window=14).mean()
     
+    # 볼린저 밴드 추가 (20일, 2표준편차)
+    bbands = ta.bbands(combined['Close'], length=20, std=2)
+    if bbands is not None:
+        # 컬럼명 유연하게 매칭 (BBL_*, BBU_*)
+        l_col = [c for c in bbands.columns if c.startswith('BBL_')]
+        u_col = [c for c in bbands.columns if c.startswith('BBU_')]
+        if l_col and u_col:
+            combined['BB_Lower'] = bbands[l_col[0]]
+            combined['BB_Upper'] = bbands[u_col[0]]
+        else:
+            combined['BB_Lower'] = 0
+            combined['BB_Upper'] = 0
+    else:
+        combined['BB_Lower'] = 0
+        combined['BB_Upper'] = 0
+    
+    # Market Regime 지표 추가 (SMA50, SMA200)
+    combined['SMA50'] = ta.sma(combined['Close'], length=50)
+    combined['SMA200'] = ta.sma(combined['Close'], length=200)
+    # ADX 추가 (추세 강도 파악용)
+    adx = ta.adx(base_df['High'], base_df['Low'], base_df['Close'], length=14)
+    if adx is not None:
+        combined = pd.concat([combined, adx], axis=1)
+        combined['ADX'] = combined['ADX_14']
+    else:
+        combined['ADX'] = 25 # 기본값
+    
     # 이전 값 계산 (Shift)
     combined['Prev_RSI'] = combined['RSI'].shift(1)
     combined['Prev_RSI_SMA'] = combined['RSI_SMA'].shift(1)
@@ -56,8 +83,8 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     combined = combined.fillna(0) # 나머지 초기 NaN 0으로 채움
     
     # FG 값 변화 확인을 위한 샘플링 출력
-    print(f"\n최근 Fear & Greed 데이터 샘플:\n{combined['FG'].iloc[-5:].to_string()}")
-    print(f"가장 낮은 FG 값: {combined['FG'].min():.2f}, 가장 높은 FG 값: {combined['FG'].max():.2f}")
+    # print(f"\n최근 Fear & Greed 데이터 샘플:\n{combined['FG'].iloc[-5:].to_string()}")
+    # print(f"가장 낮은 FG 값: {combined['FG'].min():.2f}, 가장 높은 FG 값: {combined['FG'].max():.2f}")
     
     dates = combined.index
     if start_date:
@@ -79,7 +106,7 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
     last_entry_price = 0
     
     holdings = {t: 0.0 for t in data_dict.keys()}
-    holdings[base_asset] = etf_val / qqq.loc[dates[0], 'Close']
+    holdings[base_asset] = etf_val / base_df.loc[dates[0], 'Close']
     
     history = []
     
@@ -97,16 +124,81 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         prev_macd = row['Prev_MACD']
         prev_signal_line = row['Prev_Signal_Line']
         
-        # 1. 시그널 판단 (신규 조건 적용)
-        # 매수 조건: RSI Golden Cross(RSI가 SMA 상향 돌파) AND MACD 증가(전일비 상승) AND MACD < Signal Line(아직 음전 상태 등) - 또는 RSI < 35 (과매도 안전장치)
+        # 0. 시장 상황(Regime) 판단
+        sma50 = row.get('SMA50', 0)
+        sma200 = row.get('SMA200', 0)
+        adx_val = row.get('ADX', 0)
+        
+        regime = 'Sideways'
+        if not pd.isna(sma200) and not pd.isna(sma50):
+            is_bull = row['Close'] > sma200 and sma50 > sma200
+            is_bear = row['Close'] < sma200 and sma50 < sma200
+            
+            if adx_val < 20:
+                regime = 'Sideways'
+            elif is_bull:
+                regime = 'Bull'
+            elif is_bear:
+                regime = 'Bear'
+        
+        # 시장 상황에 따른 파라미터 조절 (최적화 결과가 있으면 로드, 없으면 기본값 사용)
+        opt_params = None
+        if os.path.exists('optimization_results.json'):
+            try:
+                import json
+                with open('optimization_results.json', 'r') as f:
+                    all_opt = json.load(f)
+                    curr_year = str(date.year)
+                    
+                    # 1. 우선순위: 해당 연도의 국면 최적값(Yearly)
+                    if "Yearly" in all_opt and curr_year in all_opt["Yearly"] and regime in all_opt["Yearly"][curr_year]:
+                        opt_params = all_opt["Yearly"][curr_year][regime]
+                    # 2. 보조순위: 전체 기간 통합 국면 최적값(Global)
+                    elif "Global" in all_opt and regime in all_opt["Global"]:
+                        opt_params = all_opt["Global"][regime]
+            except:
+                pass
+
+        # TEST 데이터 주석 시작
+        # 1. 시그널 임계값 (RSI, FG): JSON을 보지 않고 항상 기본값 사용 (사용자 요청)
+        # if regime == 'Bull':
+        #     buy_rsi_threshold, sell_rsi_threshold, buy_fg_threshold = 35, 75, 30
+        # elif regime == 'Bear':
+        #     buy_rsi_threshold, sell_rsi_threshold, buy_fg_threshold = 30, 65, 20
+        # else: # Sideways
+        #     buy_rsi_threshold, sell_rsi_threshold, buy_fg_threshold = 35, 70, 25
+
+        # # 2. 리밸런싱 임계값 (reb_threshold): JSON 최적화 결과가 있으면 로드, 없으면 기본값(0.03) 사용
+        # # 고도화: 매수(Buy)/매도(Sell) 및 상승(Up)/하락(Down) 분리
+        # if opt_params:
+        #     buy_reb_up = opt_params.get('buy_reb_up', 0.03)
+        #     buy_reb_down = opt_params.get('buy_reb_down', 0.03)
+        #     sell_reb_up = opt_params.get('sell_reb_up', 0.03)
+        #     sell_reb_down = opt_params.get('sell_reb_down', 0.03)
+        # else:
+        #     buy_reb_up = buy_reb_down = sell_reb_up = sell_reb_down = 0.03
+        # TEST 데이터 주석 끝
+        buy_reb_up = buy_reb_down = sell_reb_up = sell_reb_down = 0.03
+
+        
+        # 1. 시그널 판단 (신규 조건 + Regime 가중치)
+        price = row['Close']
+        bb_l, bb_u = row.get('BB_Lower', 0), row.get('BB_Upper', 0)
+        
         is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
         is_macd_improving = (macd_val > prev_macd)
         is_macd_below_signal = (macd_val < signal_line)
         
-        is_buy_signal = (is_rsi_golden_cross and is_macd_improving and is_macd_below_signal) or (rsi < 35)
+        # [신규] 볼린저 밴드 + RSI 매수 조건: 주가 <= 하단 밴드 AND RSI < 30
+        is_bb_rsi_buy = (price <= bb_l) and (rsi < 35)
         
-        # 매도 조건 (3가지 복합 조건)
-        # 1. RSI >= 70 AND RSI 하락 (고점 찍고 꺾임)
+        is_buy_signal = (is_rsi_golden_cross and is_macd_improving and is_macd_below_signal) or (rsi < 35) 
+        # or is_bb_rsi_buy
+        
+        # 매도 조건 (Regime별 RSI 기준 적용)
+        # [신규] 볼린저 밴드 + RSI 매도 조건: 주가 >= 상단 밴드 OR RSI > 70
+        is_bb_rsi_sell = (price >= bb_u) or (rsi > 70)
+        
         sell_cond_1 = (rsi >= 70) and (rsi < prev_rsi)
         
         # 2. MACD > Signal AND MACD 하락 AND RSI Dead Cross
@@ -117,7 +209,8 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
         is_macd_dead_cross = (prev_macd > prev_signal_line) and (macd_val < signal_line)
         sell_cond_3 = is_macd_dead_cross
         
-        is_sell_signal = sell_cond_1 or sell_cond_2 or sell_cond_3
+        is_sell_signal = sell_cond_1 or sell_cond_2 or sell_cond_3 
+        # or is_bb_rsi_sell
         
         # 신호 조건 로깅을 위한 변수
         signal_conditions = []
@@ -130,6 +223,8 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                 signal_conditions.append(f"RSI < 35 ({rsi:.1f})")
             if is_rsi_golden_cross and is_macd_improving and is_macd_below_signal:
                 signal_conditions.append(f"RSI Golden Cross + MACD Improving")
+            if is_bb_rsi_buy:
+                signal_conditions.append(f"BB Lower Touch + RSI < 30")
                 
         elif is_sell_signal:
             new_planned = base_asset
@@ -141,6 +236,8 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                 signal_conditions.append(f"MACD > Signal & Declining + RSI Dead Cross")
             if sell_cond_3:
                 signal_conditions.append(f"MACD Dead Cross")
+            if is_bb_rsi_sell:
+                signal_conditions.append(f"BB Upper Touch or RSI > 70")
                 
         else:
             new_planned = current_planned_asset
@@ -189,10 +286,18 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
             last_entry_price = prices[base_asset]
             rebalance_needed = True
             
-        # 추가 진입 조건 확인 (3% 상승 또는 하강 시 추가 진입)
+        # 추가 진입 조건 확인 (설정된 % 상승 또는 하강 시 추가 진입)
         elif rebalance_stage in [1, 2]:
             price_change_ratio = prices[base_asset] / last_entry_price
-            if price_change_ratio <= 0.97 or price_change_ratio >= 1.03:
+            
+            # 현재 상태(Buy/Sell)에 맞는 임계값 선택
+            if current_planned_asset == leverage_asset: # Buy State
+                curr_up, curr_down = buy_reb_up, buy_reb_down
+            else: # Sell State
+                curr_up, curr_down = sell_reb_up, sell_reb_down
+                
+            # 상향/하향 임계값을 각각 적용
+            if price_change_ratio <= (1 - curr_down) or price_change_ratio >= (1 + curr_up):
                 # signal check 추가 (해당 방향의 신호가 유지되고 있는지 확인)
                 is_signal_active = (current_planned_asset == leverage_asset and is_buy_signal) or \
                                    (current_planned_asset == base_asset and is_sell_signal)
@@ -218,17 +323,17 @@ def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_ass
                             target_lev_pct = 0.0
                         signal_type = "SELL"
                     
-                    if price_change_ratio <= 0.97:
-                        reason = "3% Price Drop"
+                    if price_change_ratio <= (1 - curr_down):
+                        reason = f"{curr_down*100:.1f}% Price Drop"
                     else:
-                        reason = "3% Price Rise"
+                        reason = f"{curr_up*100:.1f}% Price Rise"
                 
         # 리밸런싱 실행
         if rebalance_needed:
             condition_str = " | ".join(signal_conditions) if signal_conditions else "N/A"
-            print(f"[{date.date()}] {signal_type} ({reason}): Stage {rebalance_stage}, Target: {current_planned_asset}, Price: {prices[current_planned_asset]:.2f}, RSI: {rsi:.1f}, FG: {fg:.1f}, VIX: {vix:.1f}")
+            print(f"[{date.date()}] {signal_type} ({reason}) | Regime: {regime}: Stage {rebalance_stage}, Target: {current_planned_asset}, Price: {prices[current_planned_asset]:.2f}, RSI: {rsi:.1f}, FG: {fg:.1f}, VIX: {vix:.1f}")
             if signal_conditions:
-                print(f"            Conditions: {condition_str}")
+                 print(f"            Conditions: {condition_str}")
             
             new_cash = current_total_val * cash_ratio
             etf_funds = current_total_val * (1 - cash_ratio)
@@ -281,7 +386,7 @@ def run_benchmark(data_dict, ticker='QQQ', initial_capital=10000.0, start_date=N
     return pd.DataFrame(history).set_index('Date')
 
 if __name__ == "__main__":
-    print("데이터 로딩 시작...")
+    # print("데이터 로딩 시작...")
     # 스크립트 위치 기준 경로 설정
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir = os.path.dirname(script_dir)
@@ -303,7 +408,7 @@ if __name__ == "__main__":
             'TLT': read_data('TLT_data.csv'),
             'TMF': read_data('TMF_data.csv')
         }
-        print("ETF 데이터 로드 완료.")
+        # print("ETF 데이터 로드 완료.")
         
         # 데이터 정제 (숫자 변환 및 결측치 제거)
         for ticker, df in data_dict.items():
@@ -314,7 +419,7 @@ if __name__ == "__main__":
         
         fg_df = read_data('fear_greed_data.csv')
         vix_df = read_data('vix_data.csv')
-        print("보조 지표 데이터 로드 완료.")
+        # print("보조 지표 데이터 로드 완료.")
         
         # 보조 데이터도 날짜 변환
         fg_df.index = pd.to_datetime(fg_df.index, errors='coerce')
@@ -323,48 +428,61 @@ if __name__ == "__main__":
         print("데이터 파일이 없습니다. data_loader.py와 gen_mock_data.py를 먼저 실행해 주세요.")
         exit()
 
-    print("백테스트 시작...")
-    # 테스트 기간 설정 (사용자 요청: 2019-01-02 ~ 2026-01-16)
-    s_date = '2019-01-02'
-    e_date = '2026-01-16'
+    # print("백테스트 시작...")
+    years = range(2025, 2027)
     
-    # 1. 벤치마크 (QQQ 단순 보유)
-    bh_history = run_benchmark(data_dict, ticker='QQQ', start_date=s_date, end_date=e_date)
-    # 2. 벤치마크 (QLD 단순 보유)
-    bh_qld_history = run_benchmark(data_dict, ticker='QLD', start_date=s_date, end_date=e_date)
-    # 3. 벤치마크 (TQQQ 단순 보유)
-    bh_tqqq_history = run_benchmark(data_dict, ticker='TQQQ', start_date=s_date, end_date=e_date)
-    # 4. Golden Combination 전략 (QLD 사용)
-    golden_qld_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0, start_date=s_date, end_date=e_date)
-    # 5. Golden Combination 전략 (TQQQ 사용)
-    # golden_tqqq_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='TQQQ', cash_ratio=0)
-    print("전략 실행 완료. 지표 계산 중...")
+    annual_results = []
     
-    bh_metrics = calculate_metrics(bh_history.rename(columns={'Value': 'PortfolioValue'}))
-    qld_metrics = calculate_metrics(bh_qld_history.rename(columns={'Value': 'PortfolioValue'}))
-    tqqq_metrics = calculate_metrics(bh_tqqq_history.rename(columns={'Value': 'PortfolioValue'}))
-    gd_qld_metrics = calculate_metrics(golden_qld_history.rename(columns={'Value': 'PortfolioValue'}))
-    # gd_tqqq_metrics = calculate_metrics(golden_tqqq_history.rename(columns={'Value': 'PortfolioValue'}))
+    for year in years:
+        s_date = f"{year}-01-01"
+        e_date = f"{year}-12-31"
+        # print(f"\n{'='*20} {year}년 백테스트 {'='*20}")
+        
+        # 1. 벤치마크 (QQQ)
+        bh_history = run_benchmark(data_dict, ticker='QQQ', start_date=s_date, end_date=e_date)
+        # 2. Golden Combination 전략 (QLD 사용)
+        golden_history = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0, start_date=s_date, end_date=e_date)
+        
+        if not bh_history.empty and not golden_history.empty:
+            bh_metrics = calculate_metrics(bh_history.rename(columns={'Value': 'PortfolioValue'}))
+            gd_metrics = calculate_metrics(golden_history.rename(columns={'Value': 'PortfolioValue'}))
+            
+            annual_results.append({
+                'Year': year,
+                'QQQ_ROI': bh_metrics['Cumulative Return'],
+                'QQQ_MDD': bh_metrics['MDD'],
+                'Strategy_ROI': gd_metrics['Cumulative Return'],
+                'Strategy_MDD': gd_metrics['MDD']
+            })
+            
+            print(f"\n[{year} 결과 요약]")
+            print(f"Benchmark (QQQ): ROI {bh_metrics['Cumulative Return']:.2%}, MDD {bh_metrics['MDD']:.2%}")
+            print(f"Strategy (QLD):  ROI {gd_metrics['Cumulative Return']:.2%}, MDD {gd_metrics['MDD']:.2%}")
+
+    # 전체 기간 (2025-2026) 백테스트
+    # print(f"\n{'='*20} 전체 기간 (2025-2026) {'='*20}")
+    s_full = '2025-01-01'
+    e_full = '2026-12-31'
+    bh_full = run_benchmark(data_dict, ticker='QQQ', start_date=s_full, end_date=e_full)
+    gd_full = run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0, start_date=s_full, end_date=e_full)
     
-    print(f"{'전략':<25} | {'최종가치':>10} | {'수익률(ROI)':>10} | {'CAGR':>8} | {'MDD':>8}")
-    print("-" * 75)
-    print(f"{'Benchmark (QQQ)':<25} | {bh_metrics['Final Value']:>10.0f} | {bh_metrics['Cumulative Return']:>11.2%} | {bh_metrics['CAGR']:>8.2%} | {bh_metrics['MDD']:>8.2%}")
-    print(f"{'Benchmark (QLD)':<25} | {qld_metrics['Final Value']:>10.0f} | {qld_metrics['Cumulative Return']:>11.2%} | {qld_metrics['CAGR']:>8.2%} | {qld_metrics['MDD']:>8.2%}")
-    print(f"{'Benchmark (TQQQ)':<25} | {tqqq_metrics['Final Value']:>10.0f} | {tqqq_metrics['Cumulative Return']:>11.2%} | {tqqq_metrics['CAGR']:>8.2%} | {tqqq_metrics['MDD']:>8.2%}")
-    print(f"{'Golden Strat (QLD)':<25} | {gd_qld_metrics['Final Value']:>10.0f} | {gd_qld_metrics['Cumulative Return']:>11.2%} | {gd_qld_metrics['CAGR']:>8.2%} | {gd_qld_metrics['MDD']:>8.2%}")
-    # print(f"{'Golden Strat (TQQQ)':<25} | {gd_tqqq_metrics['Final Value']:>10.0f} | {gd_tqqq_metrics['Cumulative Return']:>11.2%} | {gd_tqqq_metrics['CAGR']:>8.2%} | {gd_tqqq_metrics['MDD']:>8.2%}")
+    full_bh_metrics = calculate_metrics(bh_full.rename(columns={'Value': 'PortfolioValue'}))
+    full_gd_metrics = calculate_metrics(gd_full.rename(columns={'Value': 'PortfolioValue'}))
     
-    # 시각화
+    print(f"\n[전체 기간 결과]")
+    print(f"{'전략':<20} | {'ROI':>10} | {'CAGR':>10} | {'MDD':>10}")
+    print("-" * 55)
+    print(f"{'QQQ Buy & Hold':<20} | {full_bh_metrics['Cumulative Return']:>10.2%} | {full_bh_metrics['CAGR']:>10.2%} | {full_bh_metrics['MDD']:>10.2%}")
+    print(f"{'Regime Strategy':<20} | {full_gd_metrics['Cumulative Return']:>10.2%} | {full_gd_metrics['CAGR']:>10.2%} | {full_gd_metrics['MDD']:>10.2%}")
+
+    # 시각화 저장
     plt.figure(figsize=(12, 7))
-    plt.plot(bh_history['Value'] / 10000, label='QQQ Buy & Hold', color='gray', alpha=0.5)
-    plt.plot(bh_qld_history['Value'] / 10000, label='QLD Buy & Hold', color='orange', alpha=0.5)
-    plt.plot(bh_tqqq_history['Value'] / 10000, label='TQQQ Buy & Hold', color='red', alpha=0.5)
-    plt.plot(golden_qld_history['Value'] / 10000, label='Golden Strategy (QLD)', color='blue', linewidth=2)
-    # plt.plot(golden_tqqq_history['Value'] / 10000, label='Golden Strategy (TQQQ)', color='green', linewidth=2)
-    plt.title('Final Strategy Performance Comparison')
+    plt.plot(bh_full['Value'] / bh_full['Value'].iloc[0], label='QQQ Buy & Hold', color='gray', alpha=0.5)
+    plt.plot(gd_full['Value'] / gd_full['Value'].iloc[0], label='Regime Strategy (QLD)', color='blue', linewidth=2)
+    plt.title('Strategy Performance Comparison (2015-2025)')
     plt.xlabel('Date')
-    plt.ylabel('Normalized Portfolio Value')
+    plt.ylabel('Normalized Value')
     plt.legend()
     plt.grid(True)
-    plt.savefig('final_strategy_result.png')
-    print("\n최종 전략 결과 차트가 final_strategy_result.png로 저장되었습니다.")
+    plt.savefig('regime_strategy_result.png')
+    print("\n최종 결과 차트가 regime_strategy_result.png로 저장되었습니다.")
