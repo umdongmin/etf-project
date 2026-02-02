@@ -1,4 +1,8 @@
 import streamlit as st
+
+# [중요] Streamlit 설정은 모든 출력 및 다른 라이브러리 실행보다 먼저 호출되어야 함
+st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="wide")
+
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
@@ -9,10 +13,43 @@ import os
 import yfinance as yf
 import requests
 import datetime
-from backtest import calculate_metrics
 
-# Streamlit 설정은 가장 처음에 호출되어야 합니다 (데코레이터보다 먼저)
-st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="wide")
+# --- Performance Metrics Logic (Merged from backtest.py) ---
+
+def calculate_metrics(history):
+    """성과 지표 계산 함수 (MDD, CAGR 등)"""
+    if history.empty:
+        return {'Final Value': 0, 'Cumulative Return': 0, 'CAGR': 0, 'MDD': 0}
+    
+    df = history.copy()
+    if 'PortfolioValue' not in df.columns and 'Value' in df.columns:
+        df.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+        
+    df['Daily_Return'] = df['PortfolioValue'].pct_change()
+    df['Cumulative_Return'] = (1 + df['Daily_Return']).cumprod() - 1
+    
+    # CAGR 계산
+    days = (df.index[-1] - df.index[0]).days
+    if days <= 0: return {'Final Value': df['PortfolioValue'].iloc[-1], 'Cumulative Return': 0, 'CAGR': 0, 'MDD': 0}
+    
+    years = days / 365.25
+    final_value = df['PortfolioValue'].iloc[-1]
+    initial_value = df.get('PortfolioValue', pd.Series([10000.0])).iloc[0]
+    if initial_value == 0: initial_value = 10000.0
+    
+    cagr = (final_value / initial_value) ** (1 / years) - 1
+    
+    # MDD 계산
+    df['Rolling_Max'] = df['PortfolioValue'].cummax()
+    df['Drawdown'] = df['PortfolioValue'] / df['Rolling_Max'] - 1
+    mdd = df['Drawdown'].min()
+    
+    return {
+        'Final Value': final_value,
+        'Cumulative Return': df['Cumulative_Return'].iloc[-1] if not df['Cumulative_Return'].empty else 0,
+        'CAGR': cagr,
+        'MDD': mdd
+    }
 
 # --- Core Logic Classes ---
 
