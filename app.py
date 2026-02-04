@@ -15,13 +15,34 @@ import requests
 import datetime
 import platform
 
+import matplotlib.font_manager as fm
+
 # 한글 폰트 설정 (운영체제별)
-if platform.system() == 'Windows':
-    plt.rcParams['font.family'] = 'Malgun Gothic'
-elif platform.system() == 'Darwin': # macOS
-    plt.rcParams['font.family'] = 'AppleGothic'
-else: # Linux
-    plt.rcParams['font.family'] = 'NanumGothic'
+def set_korean_font():
+    sys_name = platform.system()
+    if sys_name == 'Windows':
+        plt.rcParams['font.family'] = 'Malgun Gothic'
+    elif sys_name == 'Darwin': # macOS
+        plt.rcParams['font.family'] = 'AppleGothic'
+    else: # Linux (Streamlit Cloud 등)
+        # 나눔 폰트 설치 시도 확인 및 가용한 한글 폰트 탐색
+        available_fonts = [f.name for f in fm.fontManager.ttflist]
+        if 'NanumGothic' in available_fonts:
+            plt.rcParams['font.family'] = 'NanumGothic'
+        elif 'NanumBarunGothic' in available_fonts:
+            plt.rcParams['font.family'] = 'NanumBarunGothic'
+        elif 'DejaVu Sans' in available_fonts:
+            plt.rcParams['font.family'] = 'DejaVu Sans' # 최후의 보루
+        else:
+            # 폰트 경로 직접 탐색 (Debian/Ubuntu 계열)
+            nanum_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
+            if os.path.exists(nanum_path):
+                fm.fontManager.addfont(nanum_path)
+                plt.rcParams['font.family'] = 'NanumGothic'
+            else:
+                st.warning("⚠️ 차트 한글 폰트를 찾을 수 없습니다. 배포 환경에서 나눔 폰트 설치가 필요할 수 있습니다.")
+
+set_korean_font()
 plt.rcParams['axes.unicode_minus'] = False # 마이너스 기호 깨짐 방지
 
 # --- Performance Metrics Logic (Merged from backtest.py) ---
