@@ -13,6 +13,16 @@ import os
 import yfinance as yf
 import requests
 import datetime
+import platform
+
+# 한글 폰트 설정 (운영체제별)
+if platform.system() == 'Windows':
+    plt.rcParams['font.family'] = 'Malgun Gothic'
+elif platform.system() == 'Darwin': # macOS
+    plt.rcParams['font.family'] = 'AppleGothic'
+else: # Linux
+    plt.rcParams['font.family'] = 'NanumGothic'
+plt.rcParams['axes.unicode_minus'] = False # 마이너스 기호 깨짐 방지
 
 # --- Performance Metrics Logic (Merged from backtest.py) ---
 
@@ -128,7 +138,7 @@ class DataService:
     def fetch_live_data(cls):
         print("라이브 데이터 수집 시작...")
         end_date = datetime.datetime.now().strftime('%Y-%m-%d')
-        start_date = '2019-01-01'
+        start_date = '2010-01-01'
         
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TMF']
@@ -227,7 +237,16 @@ class StrategyEngine:
         combined['VIX'] = combined['VIX'].ffill().fillna(15)
         combined = combined.fillna(0)
         
+        # [신규] 자산 상장일 고려: 모든 자산의 실제 데이터가 존재하는 날부터 시작
+        leverage_df = data_dict.get(leverage_asset, pd.DataFrame())
+        
+        # [수정] dropna()를 사용하여 실제 데이터가 있는 날짜 탐색
+        b_min = base_df.dropna(subset=['Close']).index.min()
+        l_min = leverage_df.dropna(subset=['Close']).index.min() if not leverage_df.empty else b_min
+        common_start = max(b_min, l_min)
+        
         dates = combined.index
+        dates = dates[dates >= common_start]
         if start_date: dates = dates[dates.date >= start_date]
         if end_date: dates = dates[dates.date <= end_date]
         if len(dates) == 0: return pd.DataFrame()
@@ -248,11 +267,20 @@ class StrategyEngine:
             
             # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
             if trade_at == "익일 시가" and pending_rebalance is not None:
-                # 오늘 시가(Open)로 체결
-                trade_prices = {t: data_dict[t].loc[date, 'Open'] if 'Open' in data_dict[t].columns else data_dict[t].loc[date, 'Close'] for t in data_dict.keys()}
+                # 오늘 시가(Open)로 체결 (데이터가 없는 경우 종가로 대체, 그것도 없으면 건너뜀)
+                try:
+                    trade_prices = {}
+                    for t in [base_asset, leverage_asset]:
+                        if date in data_dict[t].index:
+                            trade_prices[t] = data_dict[t].loc[date, 'Open'] if 'Open' in data_dict[t].columns else data_dict[t].loc[date, 'Close']
+                        else:
+                            trade_prices[t] = data_dict[t]['Close'].asof(date)
+                except:
+                    # 데이터 부재 시 체결 지연
+                    continue
                 
                 # 거래 시점의 자산 가치 재계산
-                current_total_val = cash + sum(holdings[t] * trade_prices[t] for t in holdings)
+                current_total_val = cash + sum(holdings[t] * trade_prices[t] for t in holdings if t in trade_prices)
                 cash = current_total_val * cash_ratio
                 etf_funds = current_total_val * (1 - cash_ratio)
                 
@@ -312,8 +340,12 @@ class StrategyEngine:
                 is_sell_signal = sell_cond_1 or sell_cond_2 or sell_cond_3
                 b_up, b_down, s_up, s_down = 0.03, -0.03, 0.03, -0.03
 
-            prices = {t: data_dict[t].loc[date, 'Close'] for t in data_dict.keys()}
-            current_total_val = cash + sum(holdings[t] * prices[t] for t in holdings)
+            # 현재 가격 추출 (전략 실행용)
+            try:
+                prices = {t: data_dict[t].loc[date, 'Close'] for t in [base_asset, leverage_asset]}
+            except KeyError:
+                continue # 현재 날짜에 자산 데이터가 없으면 건너뜀
+            current_total_val = cash + sum(holdings[t] * prices[t] for t in holdings if t in prices)
             rebalance_needed = False
             
             # [수정] 변수 초기화 (에러 방지)
@@ -371,11 +403,15 @@ class StrategyEngine:
     @staticmethod
     def run_benchmark(data_dict, ticker, start_date, end_date):
         if ticker not in data_dict: return pd.DataFrame()
-        df = data_dict[ticker]
+        df = data_dict[ticker].copy()
+        
+        # [수정] 데이터 공백(NaN) 제거 및 유효 범위 한정
+        df = df.dropna(subset=['Close'])
         dates = df.index
         if start_date: dates = dates[dates.date >= start_date]
         if end_date: dates = dates[dates.date <= end_date]
         if len(dates) == 0: return pd.DataFrame()
+        
         shares = 10000.0 / df.loc[dates[0], 'Close']
         history = [{'Date': date, 'Value': shares * df.loc[date, 'Close']} for date in dates]
         return pd.DataFrame(history).set_index('Date')
@@ -479,6 +515,10 @@ class BacktestView:
     """백테스트 결과 표시 UI 구성 클래스"""
     @staticmethod
     def render_results(golden_history, bh_histories, base_asset, leverage_asset):
+        if golden_history.empty:
+            st.warning("⚠️ 선택하신 기간에 대한 백테스트 결과가 없습니다. (자산 상장일 이전이거나 데이터 수집 오류)")
+            return
+            
         latest = golden_history.iloc[-1]
         st.subheader(f"📍 상태 요약 ({latest.name.date()})")
         
@@ -650,6 +690,324 @@ class BacktestView:
         probs_above = (sim_data[-1, :] > last_val).mean()
         st.info(f"💡 분석 결과: 향후 1년 뒤 자산이 현재(${last_val:,.0f})보다 높을 확률은 약 **{probs_above:.1%}** 입니다.")
 
+class HistoryLabView:
+    """역사적 마켓 랩 화면 UI 구성 클래스"""
+    
+    EVENTS = {
+        2010: "플래시 크래시, 유럽 재정 위기 시작",
+        2011: "미국 국가신용등급 강등, 그리스 디폴트 우려",
+        2012: "유로존 붕괴 위기 고조, 페이스북 IPO",
+        2013: "테이퍼 탠트럼 (긴축 발작), 양적완화 축소 논의",
+        2014: "유가 급락, 알리바바 역대 최대 IPO",
+        2015: "중국 증시 폭락, 미국 7년 만의 금리 인상",
+        2016: "브렉시트 투표, 트럼프 대통령 당선",
+        2017: "FAANG 주도 기술주 랠리, 비트코인 열풍",
+        2018: "미중 무역 전쟁, 연준의 지속적 금리 인상",
+        2019: "장단기 금리 역전, 레포 금리 급등",
+        2020: "코로나19 팬데믹, 사상 최대 유동성 공급",
+        2021: "포스트 팬데믹 인플레이션 시작, 공급망 병목",
+        2022: "40년 만의 고물가, 공격적 금리 인상 (Bear Market)",
+        2023: "SVB 은행 파산 위기, 생성형 AI (ChatGPT) 열풍",
+        2024: "AI 반도체 잭팟, 금리 인하 기대감 형성"
+    }
+
+    @staticmethod
+    def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params):
+        st.header("📜 역사적 마켓 랩 (Historical Market Lab)")
+        st.caption("2010년부터 현재까지의 시장 역사를 전략적 관점에서 분석합니다.")
+        
+        # 전체 기간 데이터 확보
+        start_date = datetime.date(2010, 1, 1)
+        end_date = datetime.date.today()
+        
+        with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
+            golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, 0, start_date, end_date, params, trade_at)
+            bh_qqq = StrategyEngine.run_benchmark(data_dict, "QQQ", start_date, end_date)
+            bh_qld = StrategyEngine.run_benchmark(data_dict, "QLD", start_date, end_date)
+            bh_tqqq = StrategyEngine.run_benchmark(data_dict, "TQQQ", start_date, end_date)
+            
+        if golden_history.empty:
+            st.warning("분석할 데이터가 충분하지 않습니다.")
+            return
+
+        # 실제 시뮬레이션 시작일 표시
+        actual_start = golden_history.index.min().date()
+        if actual_start > start_date:
+            st.info(f"ℹ️ {leverage_asset} 등의 자산 상장일 관계로 분석이 **{actual_start}**부터 시작되었습니다.")
+        
+        # [추가] 벤치마크 누락 경고
+        missingbench = [t for t in ["QQQ", "QLD", "TQQQ"] if t not in data_dict]
+        if missingbench:
+            st.warning(f"⚠️ {', '.join(missingbench)} 데이터 수집 오류로 일부 벤치마크 정보가 표시되지 않을 수 있습니다.")
+
+        tab1, tab2, tab3, tab4 = st.tabs(["📅 연도별 성과 & 이벤트", "🇺🇸 미 대선 주기 분석", "🗳️ 중간선거 주기", "🍂 월별 계절성"])
+        
+        with tab1:
+            HistoryLabView.render_yearly_table(golden_history, bh_qqq, bh_qld, bh_tqqq)
+            
+        with tab2:
+            HistoryLabView.render_election_cycle(golden_history, bh_qqq)
+            
+        with tab3:
+            HistoryLabView.render_midterm_analysis(golden_history, bh_qqq)
+
+        with tab4:
+            HistoryLabView.render_seasonality(golden_history, bh_qqq)
+
+    @staticmethod
+    def render_yearly_table(s_h, b_qqq, b_qld, b_tqqq):
+        st.subheader("연도별 성과 및 리스크 분석")
+        
+        def calculate_mdd(series):
+            s = series.dropna()
+            if s.empty: return 0
+            roll_max = s.cummax()
+            dd = (s - roll_max) / roll_max
+            return dd.min()
+
+        years = sorted(s_h.index.year.unique())
+        data = []
+        
+        for y in years:
+            # 해당 연도 데이터 슬라이싱
+            s_y = s_h[s_h.index.year == y]['Value']
+            q_y = b_qqq[b_qqq.index.year == y]['Value']
+            l_y = b_qld[b_qld.index.year == y]['Value']
+            t_y = b_tqqq[b_tqqq.index.year == y]['Value']
+
+            # 수익률 계산 (연초 대비 혹은 전년 말 대비)
+            # 여기서는 단순화를 위해 해당 연도 내의 (최종/최초 - 1) 사용
+            # 실제로는 resample().pct_change() 가 더 정확할 수 있음
+            def get_ret(ser):
+                s = ser.dropna()
+                if s.empty or len(s) < 2: return 0
+                return (s.iloc[-1] / s.iloc[0] - 1) * 100
+
+            s_ret = get_ret(s_y)
+            q_ret = get_ret(q_y)
+            l_ret = get_ret(l_y)
+            t_ret = get_ret(t_y)
+            
+            s_mdd = calculate_mdd(s_y) * 100
+            q_mdd = calculate_mdd(q_y) * 100
+            l_mdd = calculate_mdd(l_y) * 100
+            t_mdd = calculate_mdd(t_y) * 100
+            event = HistoryLabView.EVENTS.get(y, "-")
+            
+            data.append({
+                "연도": f"{y}년",
+                "전략 수익": f"{s_ret:+.1f}%",
+                "QQQ 수익": f"{q_ret:+.1f}%",
+                "QLD 수익": f"{l_ret:+.1f}%",
+                "TQQQ 수익": f"{t_ret:+.1f}%",
+                "전략 MDD": f"{s_mdd:.1f}%",
+                "QQQ MDD": f"{q_mdd:.1f}%",
+                "QLD MDD": f"{l_mdd:.1f}%",
+                "TQQQ MDD": f"{t_mdd:.1f}%",
+                "주요 이벤트": event
+            })
+            
+        df = pd.DataFrame(data).set_index("연도")
+        
+        # 스타일링 함수 정의
+        def style_returns(val):
+            try:
+                num = float(val.replace('%','').replace('+',''))
+                color = '#00c853' if num >= 0 else '#ff1744' # 초록(양수), 빨강(음수)
+                return f'color: {color}; font-weight: bold;'
+            except:
+                return ''
+
+        def style_mdd(val):
+            try:
+                if isinstance(val, str):
+                    num_str = val.replace('%','')
+                    if 'nan' in num_str.lower(): return ''
+                    num = float(num_str)
+                else:
+                    num = float(val)
+                
+                if np.isnan(num): return ''
+                
+                # MDD는 낮을수록(음수 폭이 클수록) 더 진한 빨강계열 배경
+                alpha = min(abs(num)/50.0, 1.0) * 0.4
+                return f'background-color: rgba(255, 23, 68, {alpha});'
+            except:
+                return ''
+
+        styled_df = df.style.applymap(style_returns, subset=[c for c in df.columns if "수익" in c])\
+                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c])
+        
+        st.dataframe(styled_df, use_container_width=True, height=520)
+
+        # 하단 요약 (연평균 수익률, 누적 수익률)
+        st.divider()
+        st.markdown("### 📊 전체 기간 통합 요약 (2010~현재)")
+        
+        def get_summary(ser, name):
+            if ser.empty: return None
+            total_ret = (ser.iloc[-1] / 10000.0 - 1) * 100
+            years_count = (ser.index[-1] - ser.index[0]).days / 365.25
+            cagr = ((ser.iloc[-1] / 10000.0) ** (1/years_count) - 1) * 100 if years_count > 0 else 0
+            mdd = calculate_mdd(ser) * 100
+            return {"구분": name, "누적 수익률": f"{total_ret:+.1f}%", "연평균(CAGR)": f"{cagr:.1f}%", "최대낙폭(MDD)": f"{mdd:.1f}%"}
+
+        summary_data = [
+            get_summary(s_h['Value'], "내 전략 🔥"),
+            get_summary(b_qqq['Value'], "나스닥100(1x)"),
+            get_summary(b_qld['Value'], "QLD(2x)"),
+            get_summary(b_tqqq['Value'], "TQQQ(3x)")
+        ]
+        
+        summary_df = pd.DataFrame([s for s in summary_data if s]).set_index("구분")
+        st.dataframe(summary_df, use_container_width=True)
+
+    @staticmethod
+    def render_election_cycle(strategy_hist, bench_hist):
+        st.subheader("미 대통령 임기 주기별 평균 성과 (Strategy vs QQQ)")
+        st.caption("대선 1년차(취임)부터 4년차(대선)까지의 전략과 시장(QQQ) 성과를 비교합니다.")
+        
+        def get_cycle_data(hist, col_name):
+            s_y = hist['Value'].resample('Y').last()
+            s_ret = s_y.pct_change()
+            if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
+            df = s_ret.to_frame(name=col_name)
+            df['YearType'] = [(year - 2009) % 4 + 1 for year in df.index.year]
+            return df.groupby('YearType')[col_name].mean() * 100
+
+        s_avg = get_cycle_data(strategy_hist, 'Strategy')
+        b_avg = get_cycle_data(bench_hist, 'QQQ')
+        
+        order = [1, 2, 3, 4]
+        plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg}).reindex(order)
+        plot_df.index = [f"{i}년차" for i in order]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        plot_df.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
+        ax.set_title("Strategy vs QQQ by Election Cycle Year")
+        ax.set_ylabel("Average Annual Return (%)")
+        ax.axhline(0, color='black', linewidth=0.8)
+        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        
+        # 값 표시
+        for i in range(len(plot_df)):
+            ax.text(i - 0.15, plot_df.iloc[i, 0] + 1, f"{plot_df.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
+            ax.text(i + 0.15, plot_df.iloc[i, 1] + 1, f"{plot_df.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
+            
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig)
+        
+        st.markdown("""
+        *   **1년차 (취임)**: 신정부 정책 기대감 반영
+        *   **2년차 (중간선거)**: 중간선거 해, 불확실성과 불만 표출로 변동성 심화 구간
+        *   **3년차 (상승가속)**: 전통적으로 가장 강력한 랠리가 발생하는 해 (재선 목적 부양책)
+        *   **4년차 (대선)**: 대선 당일 전후 불확실성 해소 및 랠리
+        """)
+
+    @staticmethod
+    def render_midterm_analysis(strategy_hist, bench_hist):
+        st.subheader("중간선거 주기 집중 분석 (Strategy vs QQQ)")
+        st.caption("중간선거 해(2년차)의 전략과 시장 성과를 직접 비교합니다.")
+        
+        def process_midterm(hist, col_name):
+            s_y = hist['Value'].resample('Y').last()
+            s_ret = s_y.pct_change()
+            if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
+            df = s_ret.to_frame(name=col_name)
+            df['IsMidterm'] = [((y - 2009) % 4 + 1) == 2 for y in df.index.year]
+            return df
+
+        s_df = process_midterm(strategy_hist, 'Strategy')
+        b_df = process_midterm(bench_hist, 'QQQ')
+        
+        # 1. 중간선거 vs 비중간선거 평균 수익률 비교
+        s_avg = s_df.groupby('IsMidterm')['Strategy'].mean() * 100
+        b_avg = b_df.groupby('IsMidterm')['QQQ'].mean() * 100
+        avg_comp = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg})
+        avg_comp.index = ["비중간선거", "중간선거"]
+        
+        # 2. 역대 중간선거 연도별 개별 성과
+        s_mid = s_df[s_df['IsMidterm']].copy()
+        s_mid['Year'] = s_mid.index.year
+        b_mid = b_df[b_df['IsMidterm']].copy()
+        b_mid['Year'] = b_mid.index.year
+        
+        mid_yearly = pd.merge(s_mid[['Year', 'Strategy']], b_mid[['Year', 'QQQ']], on='Year')
+        mid_yearly = mid_yearly.set_index('Year') * 100
+
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            st.write("**평균 성과 비교**")
+            fig, ax = plt.subplots(figsize=(6, 8))
+            avg_comp.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
+            ax.set_ylabel("Avg Annual Return (%)")
+            
+            for i in range(len(avg_comp)):
+                ax.text(i - 0.15, avg_comp.iloc[i, 0] + (0.5 if avg_comp.iloc[i, 0] >= 0 else -1.5), f"{avg_comp.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
+                ax.text(i + 0.15, avg_comp.iloc[i, 1] + (0.5 if avg_comp.iloc[i, 1] >= 0 else -1.5), f"{avg_comp.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
+                
+            st.pyplot(fig, clear_figure=True)
+            plt.close(fig)
+            
+        with col2:
+            st.write("**역대 중간선거 연도별 성과 비교**")
+            fig, ax = plt.subplots(figsize=(10, 5))
+            mid_yearly.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
+            ax.axhline(0, color='black', linewidth=0.8)
+            ax.set_ylabel("Annual Return (%)")
+            ax.set_xticklabels([f"{y}년" for y in mid_yearly.index], rotation=0)
+            
+            for i in range(len(mid_yearly)):
+                ax.text(i - 0.15, mid_yearly.iloc[i, 0] + (1 if mid_yearly.iloc[i, 0] >= 0 else -3), f"{mid_yearly.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
+                ax.text(i + 0.15, mid_yearly.iloc[i, 1] + (1 if mid_yearly.iloc[i, 1] >= 0 else -3), f"{mid_yearly.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
+                
+            st.pyplot(fig, clear_figure=True)
+            plt.close(fig)
+
+    @staticmethod
+    def render_seasonality(strategy_hist, bench_hist):
+        st.subheader("지난 15년간의 월별 평균 수익률 & 승률 (vs QQQ)")
+        
+        def get_monthly_stats(hist):
+            returns = hist['Value'].pct_change().dropna()
+            df_rets = returns.to_frame(name='Return')
+            df_rets['Month'] = df_rets.index.month
+            avg = df_rets.groupby('Month')['Return'].mean() * 100 * 21
+            win = df_rets.groupby('Month')['Return'].apply(lambda x: (x > 0).mean()) * 100
+            return avg, win
+
+        s_avg, s_win = get_monthly_stats(strategy_hist)
+        b_avg, _ = get_monthly_stats(bench_hist)
+        
+        plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg})
+        
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        
+        # 월간 수익률 막대 (그룹형)
+        plot_df.plot(kind='bar', ax=ax1, color=['#00c853', '#66b3ff'], alpha=0.7)
+        ax1.set_ylabel("Avg Monthly Return (%)", color='black')
+        ax1.set_xticks(range(12))
+        ax1.set_xticklabels([f"{m}월" for m in range(1, 13)], rotation=0)
+        ax1.axhline(0, color='black', linewidth=0.8)
+        
+        # 전략 승률 라인
+        ax2 = ax1.twinx()
+        ax2.plot(range(12), s_win.values, color='#ff1744', marker='o', linewidth=2.5, label='내 전략 승률')
+        ax2.set_ylabel("Strategy Win Rate (%)", color='#ff1744')
+        ax2.set_ylim(40, 70)
+        
+        # 범례 합치기
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        
+        ax1.set_title("Strategy vs QQQ Seasonality Analysis")
+        ax1.grid(axis='y', linestyle='--', alpha=0.3)
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig)
+        
+        st.info("💡 **전략의 파란색/초록색 막대**가 QQQ보다 높다면, 해당 월에 시장 대비 초과 수익을 내는 경향이 있음을 의미합니다.")
+
 class TesterView:
     """전략 분석기 입력 UI 구성 클래스"""
     @staticmethod
@@ -721,7 +1079,7 @@ class GoldenStrategyApp:
         st.title("📈 ETF Golden Strategy")
         
         # 사이드바 메뉴
-        menu = st.sidebar.radio("📌 메뉴", ["📊 백테스트", "🧪 전략 분석기", "📰 주요 마켓 이슈"])
+        menu = st.sidebar.radio("📌 메뉴", ["📊 백테스트", "🧪 전략 분석기", "📜 역사적 마켓 랩", "📰 주요 마켓 이슈"])
         if st.sidebar.button("🔄 데이터 새로고침 (Live)"):
             st.cache_data.clear()
             st.rerun()
@@ -734,11 +1092,6 @@ class GoldenStrategyApp:
             st.error("데이터 로드 실패")
             st.stop()
         
-        # 마켓 이슈 화면
-        if menu == "📰 주요 마켓 이슈":
-            MarketView.render(data_dict, macro_df, fetch_status, fetch_time, fg_df)
-            st.stop()
-            
         # 백테스트 및 전략 분석기 공통 설정
         st.sidebar.header("전략 및 기간 설정")
         base_asset = st.sidebar.selectbox("기준 자산 (시그널)", ["QQQ", "QLD", "TQQQ"], index=0, format_func=lambda x: self.ticker_map[x])
@@ -747,6 +1100,16 @@ class GoldenStrategyApp:
         
         # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
         trade_at = st.sidebar.radio("매매 시점 선택", ["종가", "익일 시가"], index=0, horizontal=True)
+
+        # 마켓 이슈 화면
+        if menu == "📰 주요 마켓 이슈":
+            MarketView.render(data_dict, macro_df, fetch_status, fetch_time, fg_df)
+            st.stop()
+
+        # [신규] 역사적 마켓 랩 화면 처리
+        if menu == "📜 역사적 마켓 랩":
+            HistoryLabView.render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, st.session_state.get('current_params'))
+            st.stop()
         
         if 'QQQ' in data_dict:
             min_d = data_dict['QQQ'].index.min().date()
@@ -755,29 +1118,40 @@ class GoldenStrategyApp:
             st.error("⚠️ 데이터를 불러올 수 없습니다. 잠시 후 다시 시도해 주세요.")
             st.stop()
 
-        # [신규] 연 단위 기간 선택
+        # [신규] 연 단위 기간 선택 및 동기화 로직
         current_year = datetime.date.today().year
-        year_options = ["직접 설정"] + [str(y) for y in range(current_year, 2018, -1)]
+        year_options = ["직접 설정"] + [str(y) for y in range(current_year, 2009, -1)]
+        
+        # 초기 세션 상태 설정
+        if 'prev_year_choice' not in st.session_state:
+            st.session_state.prev_year_choice = "직접 설정"
+        if 'start_d_input' not in st.session_state:
+            st.session_state['start_d_input'] = datetime.date(2025, 1, 1) if min_d <= datetime.date(2025, 1, 1) else min_d
+        if 'end_d_input' not in st.session_state:
+            st.session_state['end_d_input'] = max_d
+            
         selected_year = st.sidebar.selectbox("📅 기간 퀵 선택 (연 단위)", year_options, index=0)
 
-        # 시작/종료일 초기값 설정 (연도 선택 시 자동 업데이트)
-        if selected_year != "직접 설정":
-            start_default = datetime.date(int(selected_year), 1, 1)
-            end_default = datetime.date(int(selected_year), 12, 31)
-            # 데이터 범위를 벗어나지 않도록 보정
-            if start_default < min_d: start_default = min_d
-            if end_default > max_d: end_default = max_d
-        else:
-            start_default = datetime.date(2025, 1, 1) if min_d <= datetime.date(2025, 1, 1) else min_d
-            end_default = max_d
+        # 연도 선택이 변경된 경우 위젯의 키 값을 직접 업데이트
+        if selected_year != st.session_state.prev_year_choice:
+            if selected_year != "직접 설정":
+                y = int(selected_year)
+                new_s = datetime.date(y, 1, 1)
+                new_e = datetime.date(y, 12, 31)
+                # 데이터 유효 범위 보정
+                st.session_state['start_d_input'] = max(new_s, min_d)
+                st.session_state['end_d_input'] = min(new_e, max_d)
+            st.session_state.prev_year_choice = selected_year
 
-        start_d = st.sidebar.date_input("시작일", start_default)
-        end_d = st.sidebar.date_input("종료일", end_default)
+        # 위젯 호출 (key를 지정하면 session_state의 해당 키 값이 value로 사용됨)
+        start_d = st.sidebar.date_input("시작일", key="start_d_input")
+        end_d = st.sidebar.date_input("종료일", key="end_d_input")
         
-        params = None
+        params = st.session_state.get('current_params')
         if menu == "🧪 전략 분석기":
             st.header("🧪 전략 분석기")
             params = TesterView.render_config()
+            st.session_state.current_params = params
             
         # 핵심 실행부
         with st.spinner('백테스팅 계산 중...'):
