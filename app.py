@@ -769,11 +769,19 @@ class HistoryLabView:
         data = []
         
         for y in years:
-            # 해당 연도 데이터 슬라이싱
-            s_y = s_h[s_h.index.year == y]['Value']
-            q_y = b_qqq[b_qqq.index.year == y]['Value']
-            l_y = b_qld[b_qld.index.year == y]['Value']
-            t_y = b_tqqq[b_tqqq.index.year == y]['Value']
+            # 해당 연도 데이터 슬라이싱 (안전한 접근을 위해 helper 정의)
+            def safe_get_yearly(df, year):
+                if df.empty or 'Value' not in df.columns or not isinstance(df.index, pd.DatetimeIndex):
+                    return pd.Series(dtype='float64')
+                try:
+                    return df[df.index.year == year]['Value']
+                except:
+                    return pd.Series(dtype='float64')
+
+            s_y = safe_get_yearly(s_h, y)
+            q_y = safe_get_yearly(b_qqq, y)
+            l_y = safe_get_yearly(b_qld, y)
+            t_y = safe_get_yearly(b_tqqq, y)
 
             # 수익률 계산 (연초 대비 혹은 전년 말 대비)
             # 여기서는 단순화를 위해 해당 연도 내의 (최종/최초 - 1) 사용
@@ -868,18 +876,24 @@ class HistoryLabView:
         st.caption("대선 1년차(취임)부터 4년차(대선)까지의 전략과 시장(QQQ) 성과를 비교합니다.")
         
         def get_cycle_data(hist, col_name):
-            s_y = hist['Value'].resample('Y').last()
-            s_ret = s_y.pct_change()
-            if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
-            df = s_ret.to_frame(name=col_name)
-            df['YearType'] = [(year - 2009) % 4 + 1 for year in df.index.year]
-            return df.groupby('YearType')[col_name].mean() * 100
+            if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
+                return pd.Series(dtype='float64')
+            try:
+                s_y = hist['Value'].resample('Y').last()
+                s_ret = s_y.pct_change()
+                if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
+                df = s_ret.to_frame(name=col_name)
+                df['YearType'] = [(year - 2009) % 4 + 1 for year in df.index.year]
+                return df.groupby('YearType')[col_name].mean() * 100
+            except:
+                return pd.Series(dtype='float64')
 
         s_avg = get_cycle_data(strategy_hist, 'Strategy')
         b_avg = get_cycle_data(bench_hist, 'QQQ')
         
         order = [1, 2, 3, 4]
-        plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg}).reindex(order)
+        # b_avg가 비어있을 수 있으므로 대응
+        plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg}).reindex(order).fillna(0)
         plot_df.index = [f"{i}년차" for i in order]
 
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -910,12 +924,17 @@ class HistoryLabView:
         st.caption("중간선거 해(2년차)의 전략과 시장 성과를 직접 비교합니다.")
         
         def process_midterm(hist, col_name):
-            s_y = hist['Value'].resample('Y').last()
-            s_ret = s_y.pct_change()
-            if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
-            df = s_ret.to_frame(name=col_name)
-            df['IsMidterm'] = [((y - 2009) % 4 + 1) == 2 for y in df.index.year]
-            return df
+            if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
+                return pd.DataFrame(columns=[col_name, 'IsMidterm'])
+            try:
+                s_y = hist['Value'].resample('Y').last()
+                s_ret = s_y.pct_change()
+                if not s_y.empty: s_ret.iloc[0] = (s_y.iloc[0] / 10000.0 - 1)
+                df = s_ret.to_frame(name=col_name)
+                df['IsMidterm'] = [((y - 2009) % 4 + 1) == 2 for y in df.index.year]
+                return df
+            except:
+                return pd.DataFrame(columns=[col_name, 'IsMidterm'])
 
         s_df = process_midterm(strategy_hist, 'Strategy')
         b_df = process_midterm(bench_hist, 'QQQ')
@@ -969,12 +988,17 @@ class HistoryLabView:
         st.subheader("지난 15년간의 월별 평균 수익률 & 승률 (vs QQQ)")
         
         def get_monthly_stats(hist):
-            returns = hist['Value'].pct_change().dropna()
-            df_rets = returns.to_frame(name='Return')
-            df_rets['Month'] = df_rets.index.month
-            avg = df_rets.groupby('Month')['Return'].mean() * 100 * 21
-            win = df_rets.groupby('Month')['Return'].apply(lambda x: (x > 0).mean()) * 100
-            return avg, win
+            if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
+                return pd.Series(index=range(1, 13), data=0.0), pd.Series(index=range(1, 13), data=0.0)
+            try:
+                returns = hist['Value'].pct_change().dropna()
+                df_rets = returns.to_frame(name='Return')
+                df_rets['Month'] = df_rets.index.month
+                avg = df_rets.groupby('Month')['Return'].mean() * 100 * 21
+                win = df_rets.groupby('Month')['Return'].apply(lambda x: (x > 0).mean()) * 100
+                return avg, win
+            except:
+                return pd.Series(index=range(1, 13), data=0.0), pd.Series(index=range(1, 13), data=0.0)
 
         s_avg, s_win = get_monthly_stats(strategy_hist)
         b_avg, _ = get_monthly_stats(bench_hist)
