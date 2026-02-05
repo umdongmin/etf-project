@@ -162,7 +162,7 @@ class DataService:
         start_date = '2010-01-01'
         
         data_dict = {}
-        tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TMF']
+        tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
         # [수정] 여러 번 호출하지 않고 한 번에 묶어서 다운로드 (Rate Limit 회피)
         try:
             full_data = yf.download(tickers + ['^VIX'], start=start_date, end=end_date, progress=False, group_by='ticker')
@@ -170,6 +170,8 @@ class DataService:
             for ticker in tickers:
                 if ticker in full_data and not full_data[ticker].empty:
                     df = full_data[ticker].copy()
+                    # [수정] 결측치(NaN) 전파 방지를 위해 ffill/bfill 적용
+                    df = df.ffill().bfill() 
                     df = cls.calculate_indicators(df)
                     data_dict[ticker] = df
             
@@ -225,7 +227,7 @@ class DataService:
 class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @staticmethod
-    def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가"):
+    def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가", smart_params=None):
         if base_asset not in data_dict: return pd.DataFrame()
         base_df = data_dict[base_asset]
         combined = base_df[['Close', 'RSI']].copy()
@@ -275,8 +277,13 @@ class StrategyEngine:
         portfolio_value, cash = 10000.0, 10000.0 * cash_ratio
         current_planned_asset, rebalance_stage, last_entry_price = base_asset, 0, 0
         holdings = {t: 0.0 for t in data_dict.keys()}
-        # 첫날 진입 시점은 무시하고 초기 자산 설정 (백테스트 시작 시점)
-        holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / base_df.loc[dates[0], 'Close']
+        
+        # [수정] 첫날 가격이 NaN인 상황에 대비해 가장 빠른 유효가를 찾아 초기 주식 수 계산
+        initial_price = base_df['Close'].asof(dates[0])
+        if pd.isna(initial_price):
+            initial_price = base_df['Close'].dropna().iloc[0] if not base_df['Close'].dropna().empty else 1.0
+            
+        holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / initial_price
         history = []
         
         # [추가] 지연 실행용 상태 변수
@@ -290,12 +297,23 @@ class StrategyEngine:
             if trade_at == "익일 시가" and pending_rebalance is not None:
                 # 오늘 시가(Open)로 체결 (데이터가 없는 경우 종가로 대체, 그것도 없으면 건너뜀)
                 try:
+                    semi_group = ['SOXX', 'USD', 'SOXL']
+                    is_semi = (base_asset in semi_group or leverage_asset in semi_group)
+                    target_group = semi_group if is_semi else ['QQQ', 'QLD', 'TQQQ']
+                    
                     trade_prices = {}
-                    for t in [base_asset, leverage_asset]:
+                    # [수정] 모든 스위칭 후보 자산의 시가를 확보
+                    for t in list(set([base_asset, leverage_asset] + target_group)):
+                        if t not in data_dict: continue
                         if date in data_dict[t].index:
                             trade_prices[t] = data_dict[t].loc[date, 'Open'] if 'Open' in data_dict[t].columns else data_dict[t].loc[date, 'Close']
                         else:
                             trade_prices[t] = data_dict[t]['Close'].asof(date)
+                    
+                    # 필수 자산(현재 보유 중인 것 + 갈아탈 것)의 가격이 없으면 스킵
+                    required = [t for t, qty in holdings.items() if qty > 0] + [pending_rebalance['planned']]
+                    if any(t not in trade_prices or pd.isna(trade_prices[t]) for t in required):
+                        continue
                 except:
                     # 데이터 부재 시 체결 지연
                     continue
@@ -309,9 +327,15 @@ class StrategyEngine:
                 current_planned_asset = pending_rebalance['planned']
                 rebalance_stage = pending_rebalance['rebalance_stage']
                 
-                for t in holdings: holdings[t] = 0
-                holdings[leverage_asset] = (etf_funds * t_lev_pct) / trade_prices[leverage_asset]
-                holdings[base_asset] = (etf_funds * (1 - t_lev_pct)) / trade_prices[base_asset]
+                t_lev_asset, t_lev_pct = pending_rebalance['planned'], pending_rebalance['target_lev_pct']
+                for t in list(holdings.keys()): holdings[t] = 0
+                
+                # [수정] 자산 중복 오버라이트 방지 (동일 자산일 경우 100% 할당)
+                if t_lev_asset == base_asset:
+                    holdings[base_asset] = etf_funds / trade_prices[base_asset]
+                else:
+                    holdings[t_lev_asset] = (etf_funds * t_lev_pct) / trade_prices[t_lev_asset]
+                    holdings[base_asset] = (etf_funds * (1 - t_lev_pct)) / trade_prices[base_asset]
                 
                 last_entry_price = data_dict[base_asset].loc[date, 'Open']
                 pending_rebalance = None # 처리 완료
@@ -327,46 +351,135 @@ class StrategyEngine:
                 is_macd_dead_cross = (prev_macd > prev_signal_line) and (macd_val < signal_line)
                 
                 is_buy_signal = False
+                signal_reason = ""
                 for bp in params['buy_signals']:
                     cond, active = True, False
-                    if bp['rsi_val'] > 0: cond &= (rsi < bp['rsi_val']); active = True
-                    if bp['rsi_cross']: cond &= is_rsi_golden_cross; active = True
-                    if bp['rsi_inc']: cond &= (rsi > prev_rsi); active = True
-                    if bp['macd_inc']: cond &= (macd_val > prev_macd); active = True
-                    if bp['macd_signal_below']: cond &= (macd_val < signal_line); active = True
-                    if bp['macd_golden']: cond &= is_macd_golden_cross; active = True
-                    if bp['bb_lower']: cond &= (price <= bb_l); active = True
-                    if active and cond: is_buy_signal = True; break
+                    reasons = []
+                    if bp['rsi_val'] > 0: 
+                        cond &= (rsi < bp['rsi_val']); active = True
+                        reasons.append(f"RSI<{bp['rsi_val']}")
+                    if bp['rsi_cross']: 
+                        cond &= is_rsi_golden_cross; active = True
+                        reasons.append("RSI 골든크로스")
+                    if bp['rsi_inc']: 
+                        cond &= (rsi > prev_rsi); active = True
+                        reasons.append("RSI 상승")
+                    if bp['macd_inc']: 
+                        cond &= (macd_val > prev_macd); active = True
+                        reasons.append("MACD 상승")
+                    if bp['macd_signal_below']: 
+                        cond &= (macd_val < signal_line); active = True
+                        reasons.append("MACD 시그널 하단")
+                    if bp['macd_golden']: 
+                        cond &= is_macd_golden_cross; active = True
+                        reasons.append("MACD 골든크로스")
+                    if bp['bb_lower']: 
+                        cond &= (price <= bb_l); active = True
+                        reasons.append("BB 하단 터치")
+                    
+                    if active and cond: 
+                        is_buy_signal = True
+                        signal_reason = " / ".join(reasons)
+                        break
                 
                 is_sell_signal = False
                 for sp in params['sell_signals']:
                     cond, active = True, False
-                    if sp['rsi_val'] > 0: cond &= (rsi >= sp['rsi_val']); active = True
-                    if sp['rsi_dead']: cond &= is_rsi_dead_cross; active = True
-                    if sp['rsi_dec']: cond &= (rsi < prev_rsi); active = True
-                    if sp['macd_dec']: cond &= (macd_val < prev_macd); active = True
-                    if sp['macd_signal_above']: cond &= (macd_val > signal_line); active = True
-                    if sp['macd_dead']: cond &= is_macd_dead_cross; active = True
-                    if sp['bb_upper']: cond &= (price >= bb_u); active = True
-                    if active and cond: is_sell_signal = True; break
+                    reasons = []
+                    if sp['rsi_val'] > 0: 
+                        cond &= (rsi >= sp['rsi_val']); active = True
+                        reasons.append(f"RSI>={sp['rsi_val']}")
+                    if sp['rsi_dead']: 
+                        cond &= is_rsi_dead_cross; active = True
+                        reasons.append("RSI 데드크로스")
+                    if sp['rsi_dec']: 
+                        cond &= (rsi < prev_rsi); active = True
+                        reasons.append("RSI 하락")
+                    if sp['macd_dec']: 
+                        cond &= (macd_val < prev_macd); active = True
+                        reasons.append("MACD 하락")
+                    if sp['macd_signal_above']: 
+                        cond &= (macd_val > signal_line); active = True
+                        reasons.append("MACD 시그널 상단")
+                    if sp['macd_dead']: 
+                        cond &= is_macd_dead_cross; active = True
+                        reasons.append("MACD 데드크로스")
+                    if sp['bb_upper']: 
+                        cond &= (price >= bb_u); active = True
+                        reasons.append("BB 상단 터치")
+                    
+                    if active and cond: 
+                        is_sell_signal = True
+                        signal_reason = " / ".join(reasons)
+                        break
                 
                 b_up, b_down, s_up, s_down = params['buy_reb_up'], params['buy_reb_down'], params['sell_reb_up'], params['sell_reb_down']
             else:
                 is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
-                is_buy_signal = (is_rsi_golden_cross and (macd_val > prev_macd) and (macd_val < signal_line)) or (rsi < 35)
+                is_buy_signal = False
+                signal_reason = ""
+                if is_rsi_golden_cross and (macd_val > prev_macd) and (macd_val < signal_line):
+                    is_buy_signal = True
+                    signal_reason = "기본(RSI골든크로스+MACD상승)"
+                elif (rsi < 35):
+                    is_buy_signal = True
+                    signal_reason = "기본(RSI과매도)"
+                
                 sell_cond_1 = (rsi >= 70) and (rsi < prev_rsi)
                 is_rsi_dead_cross = (prev_rsi > prev_rsi_sma) and (rsi < rsi_sma)
                 sell_cond_2 = (macd_val > signal_line) and (macd_val < prev_macd) and is_rsi_dead_cross
                 sell_cond_3 = (prev_macd > prev_signal_line) and (macd_val < signal_line)
-                is_sell_signal = sell_cond_1 or sell_cond_2 or sell_cond_3
+                
+                is_sell_signal = False
+                if sell_cond_1: 
+                    is_sell_signal = True
+                    signal_reason = "기본(RSI과매수)"
+                elif sell_cond_2: 
+                    is_sell_signal = True
+                    signal_reason = "기본(RSI데드크로스+MACD)"
+                elif sell_cond_3: 
+                    is_sell_signal = True
+                    signal_reason = "기본(MACD데드크로스)"
+                
                 b_up, b_down, s_up, s_down = 0.03, -0.03, 0.03, -0.03
+
+            # [신규] 스마트 레버리지 자산 결정
+            effective_lev_asset = leverage_asset
+            if smart_params and smart_params.get('use_smart'):
+                semi_group = ['SOXX', 'USD', 'SOXL']
+                is_semi = (base_asset in semi_group or leverage_asset in semi_group)
+                target_group = semi_group if is_semi else ['QQQ', 'QLD', 'TQQQ']
+                
+                # 1단(Safe), 2단(Normal), 3단(Turbo)
+                if vix > smart_params.get('vix_exit', 32):
+                    effective_lev_asset = target_group[0]
+                    smart_reason = f"스마트(VIX대피:{vix:.1f})"
+                elif rsi < smart_params.get('rsi_turbo', 30):
+                    effective_lev_asset = target_group[2]
+                    smart_reason = f"스마트(RSI가속:{rsi:.1f})"
+                else:
+                    effective_lev_asset = target_group[1]
+                    smart_reason = "스마트(Normal)"
+            else:
+                smart_reason = ""
 
             # 현재 가격 추출 (전략 실행용)
             try:
-                prices = {t: data_dict[t].loc[date, 'Close'] for t in [base_asset, leverage_asset]}
-            except KeyError:
+                # [수정] 현재 보유 중인 자산들과 신호용 기준 자산, 그리고 타겟 자산의 가격을 확보
+                currently_holding = [t for t, qty in holdings.items() if qty > 0]
+                check_targets = list(set([base_asset, effective_lev_asset] + currently_holding))
+                prices = {t: data_dict[t].loc[date, 'Close'] for t in check_targets if t in data_dict}
+                
+                # 기준 자산 가격이 없으면 데이터 공백이므로 패스
+                if base_asset not in prices:
+                    continue
+                # 현재 보유한 주식의 가격 정보가 하나라도 누락되면 가치 평가가 불가능하므로 패스
+                if any(t not in prices for t in currently_holding):
+                    continue
+            except (KeyError, ValueError):
                 continue # 현재 날짜에 자산 데이터가 없으면 건너뜀
-            current_total_val = cash + sum(holdings[t] * prices[t] for t in holdings if t in prices)
+            
+            current_total_val = cash + sum(holdings.get(t, 0) * prices.get(t, 0) for t in holdings if t in prices)
             rebalance_needed = False
             
             # [수정] 변수 초기화 (에러 방지)
@@ -374,13 +487,18 @@ class StrategyEngine:
             new_stage = rebalance_stage
 
             etf_funds = current_total_val * (1 - cash_ratio)
-            current_lev_pct = (holdings[leverage_asset] * prices[leverage_asset]) / etf_funds if etf_funds > 0 else 0
+            # [수정] 모든 레버리지 후보 자산의 합산 비중 계산 (스마트 모드 대응)
+            lev_candidates = ['QLD', 'TQQQ', 'SOXL', 'USD', 'TMF']
+            current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
+            current_lev_pct = current_lev_funds / etf_funds if etf_funds > 0 else 0
             
-            if is_buy_signal and current_planned_asset != leverage_asset:
-                new_planned, rebalance_needed = leverage_asset, True
-                if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
-                elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
-                else: target_lev_pct, new_stage = 1.0, 3
+            if is_buy_signal and current_planned_asset != effective_lev_asset:
+                # [추가] 갈아탈 타겟 자산의 데이터가 오늘 있어야만 스위칭 가능
+                if effective_lev_asset in prices:
+                    new_planned, rebalance_needed = effective_lev_asset, True
+                    if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
+                    elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
+                    else: target_lev_pct, new_stage = 1.0, 3
             elif is_sell_signal and current_planned_asset != base_asset:
                 new_planned, rebalance_needed = base_asset, True
                 if current_lev_pct > 0.75: target_lev_pct, new_stage = 0.70, 1
@@ -400,19 +518,34 @@ class StrategyEngine:
                     cash = current_total_val * cash_ratio
                     etf_funds = current_total_val * (1 - cash_ratio)
                     current_planned_asset, rebalance_stage = new_planned, new_stage
-                    for t in holdings: holdings[t] = 0
-                    holdings[leverage_asset] = (etf_funds * target_lev_pct) / prices[leverage_asset]
-                    holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
+                    for t in list(holdings.keys()): holdings[t] = 0
+                    
+                    # [수정] 자산 중복 오버라이트 방지 (동일 자산일 경우 100% 할당)
+                    if effective_lev_asset == base_asset:
+                        holdings[base_asset] = etf_funds / prices[base_asset]
+                    else:
+                        holdings[effective_lev_asset] = (etf_funds * target_lev_pct) / prices[effective_lev_asset]
+                        holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
                     last_entry_price = price
                 else:
                     # 익일 시가 대기
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned}
 
-            curr_w = (0.30 if rebalance_stage == 1 else (0.70 if rebalance_stage == 2 else 1.0)) if current_planned_asset == leverage_asset else (0.70 if rebalance_stage == 1 else (0.30 if rebalance_stage == 2 else 0.0))
+            curr_w = (0.30 if rebalance_stage == 1 else (0.70 if rebalance_stage == 2 else 1.0)) if current_planned_asset in [leverage_asset, 'QQQ', 'TQQQ', 'SOXX', 'SOXL', 'USD'] and current_planned_asset != base_asset else (0.70 if rebalance_stage == 1 else (0.30 if rebalance_stage == 2 else 0.0))
             
             # 시각적 가독성을 위해 rebalance_needed 신호 발생 시점을 표시
-            # 익일 시가의 경우 대기 상태 진입 시점을 '매수/매도 대기', 실제 체결 시점을 표시할 수도 있으나 로직 단순화를 위해 신호 발생 기준으로 유지
-            trade_label = '매수' if rebalance_needed and (new_planned == leverage_asset or current_planned_asset == leverage_asset) else ('매도' if rebalance_needed else '중립')
+            if rebalance_needed:
+                if new_planned == base_asset:
+                    trade_label = f"매도: {signal_reason}"
+                else:
+                    reason_pre = f"{signal_reason}" if signal_reason else "추가 매수"
+                    trade_label = f"매수: {reason_pre}"
+                    if smart_params and smart_params.get('use_smart'):
+                        trade_label += f" [{smart_reason}]"
+            elif rebalance_stage in [1, 2]:
+                trade_label = f"진행중(S{rebalance_stage})"
+            else:
+                trade_label = "중립"
             
             history.append({
                 'Date': date, 'Value': current_total_val, 'Signal': trade_label,
@@ -543,7 +676,12 @@ class BacktestView:
         latest = golden_history.iloc[-1]
         st.subheader(f"📍 상태 요약 ({latest.name.date()})")
         
-        sig_color = "green" if latest['Signal'] == "매수" else ("red" if latest['Signal'] == "매도" else "gray")
+        sig = str(latest['Signal'])
+        if "매수" in sig: sig_color = "#e74c3c" # Red
+        elif "매도" in sig: sig_color = "#3498db" # Blue
+        elif "진행중" in sig: sig_color = "#f39c12" # Orange
+        else: sig_color = "#7f8c8d" # Gray (중립)
+        
         st.markdown(f'<div style="background-color:{sig_color}; padding:20px; border-radius:10px; text-align:center; color:white;">'
                     f'<h2 style="margin:0;">{latest["Signal"]} 상태</h2>'
                     f'<b>{leverage_asset} {latest["Lev_Weight"]:.0%}, {base_asset} {latest[f"{base_asset}_Weight"]:.0%}</b></div>', unsafe_allow_html=True)
@@ -590,6 +728,33 @@ class BacktestView:
         st.subheader("전략 성과 요약")
         sum_df = pd.DataFrame([{"전략": k, "수익률": f"{v['Cumulative Return']:.2%}", "CAGR": f"{v['CAGR']:.2%}", "MDD": f"{v['MDD']:.2%}", "Sharpe": f"{v['Sharpe']:.2f}", "MAR": f"{v['MAR']:.2f}", "승률": f"{v['Win_Rate']:.1%}", "손익비": f"{v['Profit_Factor']:.2f}"} for k, v in metrics.items()])
         st.table(sum_df.set_index("전략"))
+        
+        # [신규] 전체 거래 내역 확인 및 색상 강조
+        st.divider()
+        with st.expander("📝 전체 일별 상세 로그 확인 (시그널 포함)"):
+            def style_signal(row):
+                sig = str(row['Signal'])
+                # 배경색 및 텍스트색 결정
+                if "매수" in sig:
+                    return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
+                elif "매도" in sig:
+                    return ['background-color: rgba(52, 152, 219, 0.1); color: #3498db; font-weight: bold'] * len(row)
+                elif "진행중" in sig:
+                    return ['background-color: rgba(243, 156, 18, 0.05); color: #f39c12'] * len(row)
+                return [''] * len(row)
+
+            # 로그 데이터 가공
+            log_df = golden_history.copy()
+            log_df.index = log_df.index.date
+            
+            # 가독성을 위해 컬럼 순서 조정 및 정리
+            cols = ['Value', 'Signal', 'Lev_Weight', f'{base_asset}_Weight', 'RSI', 'MACD', 'VIX']
+            display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
+            
+            styled_log = display_df.style.apply(style_signal, axis=1)\
+                                  .format({'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', f'{base_asset}_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VIX': '{:.1f}'})
+            
+            st.dataframe(styled_log, use_container_width=True, height=600)
 
     @staticmethod
     def render_returns_heatmap(history):
@@ -733,7 +898,7 @@ class HistoryLabView:
     }
 
     @staticmethod
-    def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params):
+    def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params, smart_params=None):
         st.header("📜 역사적 마켓 랩 (Historical Market Lab)")
         st.caption("2010년부터 현재까지의 시장 역사를 전략적 관점에서 분석합니다.")
         
@@ -742,10 +907,16 @@ class HistoryLabView:
         end_date = datetime.date.today()
         
         with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
-            golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, 0, start_date, end_date, params, trade_at)
-            bh_qqq = StrategyEngine.run_benchmark(data_dict, "QQQ", start_date, end_date)
-            bh_qld = StrategyEngine.run_benchmark(data_dict, "QLD", start_date, end_date)
-            bh_tqqq = StrategyEngine.run_benchmark(data_dict, "TQQQ", start_date, end_date)
+            golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, 0, start_date, end_date, params, trade_at, smart_params=smart_params)
+            
+            # [수정] 섹터별 동적 벤치마크 로드 (나스닥 vs 반도체)
+            semi_group = ['SOXX', 'USD', 'SOXL']
+            is_semi = base_asset in semi_group or leverage_asset in semi_group
+            b1, b2, b3 = ("SOXX", "USD", "SOXL") if is_semi else ("QQQ", "QLD", "TQQQ")
+            
+            bh_1 = StrategyEngine.run_benchmark(data_dict, b1, start_date, end_date)
+            bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
+            bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
             
         if golden_history.empty:
             st.warning("분석할 데이터가 충분하지 않습니다.")
@@ -757,27 +928,27 @@ class HistoryLabView:
             st.info(f"ℹ️ {leverage_asset} 등의 자산 상장일 관계로 분석이 **{actual_start}**부터 시작되었습니다.")
         
         # [추가] 벤치마크 누락 경고
-        missingbench = [t for t in ["QQQ", "QLD", "TQQQ"] if t not in data_dict]
+        missingbench = [t for t in [b1, b2, b3] if t not in data_dict]
         if missingbench:
             st.warning(f"⚠️ {', '.join(missingbench)} 데이터 수집 오류로 일부 벤치마크 정보가 표시되지 않을 수 있습니다.")
 
         tab1, tab2, tab3, tab4 = st.tabs(["📅 연도별 성과 & 이벤트", "🇺🇸 미 대선 주기 분석", "🗳️ 중간선거 주기", "🍂 월별 계절성"])
         
         with tab1:
-            HistoryLabView.render_yearly_table(golden_history, bh_qqq, bh_qld, bh_tqqq)
+            HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
             
         with tab2:
-            HistoryLabView.render_election_cycle(golden_history, bh_qqq)
+            HistoryLabView.render_election_cycle(golden_history, bh_1, b_name=b1)
             
         with tab3:
-            HistoryLabView.render_midterm_analysis(golden_history, bh_qqq)
+            HistoryLabView.render_midterm_analysis(golden_history, bh_1, b_name=b1)
 
         with tab4:
-            HistoryLabView.render_seasonality(golden_history, bh_qqq)
+            HistoryLabView.render_seasonality(golden_history, bh_1, b_name=b1)
 
     @staticmethod
-    def render_yearly_table(s_h, b_qqq, b_qld, b_tqqq):
-        st.subheader("연도별 성과 및 리스크 분석")
+    def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ")):
+        st.subheader(f"연도별 성과 및 리스크 분석 (vs {b_names[0]}군)")
         
         def calculate_mdd(series):
             s = series.dropna()
@@ -800,9 +971,9 @@ class HistoryLabView:
                     return pd.Series(dtype='float64')
 
             s_y = safe_get_yearly(s_h, y)
-            q_y = safe_get_yearly(b_qqq, y)
-            l_y = safe_get_yearly(b_qld, y)
-            t_y = safe_get_yearly(b_tqqq, y)
+            q_y = safe_get_yearly(b1_h, y)
+            l_y = safe_get_yearly(b2_h, y)
+            t_y = safe_get_yearly(b3_h, y)
 
             # 수익률 계산 (연초 대비 혹은 전년 말 대비)
             # 여기서는 단순화를 위해 해당 연도 내의 (최종/최초 - 1) 사용
@@ -826,13 +997,13 @@ class HistoryLabView:
             data.append({
                 "연도": f"{y}년",
                 "전략 수익": f"{s_ret:+.1f}%",
-                "QQQ 수익": f"{q_ret:+.1f}%",
-                "QLD 수익": f"{l_ret:+.1f}%",
-                "TQQQ 수익": f"{t_ret:+.1f}%",
+                f"{b_names[0]} 수익": f"{q_ret:+.1f}%",
+                f"{b_names[1]} 수익": f"{l_ret:+.1f}%",
+                f"{b_names[2]} 수익": f"{t_ret:+.1f}%",
                 "전략 MDD": f"{s_mdd:.1f}%",
-                "QQQ MDD": f"{q_mdd:.1f}%",
-                "QLD MDD": f"{l_mdd:.1f}%",
-                "TQQQ MDD": f"{t_mdd:.1f}%",
+                f"{b_names[0]} MDD": f"{q_mdd:.1f}%",
+                f"{b_names[1]} MDD": f"{l_mdd:.1f}%",
+                f"{b_names[2]} MDD": f"{t_mdd:.1f}%",
                 "주요 이벤트": event
             })
             
@@ -883,18 +1054,18 @@ class HistoryLabView:
 
         summary_data = [
             get_summary(s_h['Value'], "내 전략 🔥"),
-            get_summary(b_qqq['Value'], "나스닥100(1x)"),
-            get_summary(b_qld['Value'], "QLD(2x)"),
-            get_summary(b_tqqq['Value'], "TQQQ(3x)")
+            get_summary(b1_h['Value'] if not b1_h.empty else pd.Series(), f"{b_names[0]}(1x)"),
+            get_summary(b2_h['Value'] if not b2_h.empty else pd.Series(), f"{b_names[1]}(2x)"),
+            get_summary(b3_h['Value'] if not b3_h.empty else pd.Series(), f"{b_names[2]}(3x)")
         ]
         
         summary_df = pd.DataFrame([s for s in summary_data if s]).set_index("구분")
         st.dataframe(summary_df, use_container_width=True)
 
     @staticmethod
-    def render_election_cycle(strategy_hist, bench_hist):
-        st.subheader("미 대통령 임기 주기별 평균 성과 (Strategy vs QQQ)")
-        st.caption("대선 1년차(취임)부터 4년차(대선)까지의 전략과 시장(QQQ) 성과를 비교합니다.")
+    def render_election_cycle(strategy_hist, bench_hist, b_name="QQQ"):
+        st.subheader(f"미 대통령 임기 주기별 평균 성과 (Strategy vs {b_name})")
+        st.caption(f"대선 1년차(취임)부터 4년차(대선)까지의 전략과 시장({b_name}) 성과를 비교합니다.")
         
         def get_cycle_data(hist, col_name):
             if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
@@ -909,8 +1080,8 @@ class HistoryLabView:
             except:
                 return pd.Series(dtype='float64')
 
-        s_avg = get_cycle_data(strategy_hist, 'Strategy')
-        b_avg = get_cycle_data(bench_hist, 'QQQ')
+        s_avg = get_cycle_data(strategy_hist, 'Strategy').reindex([1, 2, 3, 4], fill_value=0.0)
+        b_avg = get_cycle_data(bench_hist, 'QQQ').reindex([1, 2, 3, 4], fill_value=0.0)
         
         order = [1, 2, 3, 4]
         # b_avg가 비어있을 수 있으므로 대응
@@ -940,9 +1111,9 @@ class HistoryLabView:
         """)
 
     @staticmethod
-    def render_midterm_analysis(strategy_hist, bench_hist):
-        st.subheader("중간선거 주기 집중 분석 (Strategy vs QQQ)")
-        st.caption("중간선거 해(2년차)의 전략과 시장 성과를 직접 비교합니다.")
+    def render_midterm_analysis(strategy_hist, bench_hist, b_name="QQQ"):
+        st.subheader(f"중간선거 주기 집중 분석 (Strategy vs {b_name})")
+        st.caption(f"중간선거 해(2년차)의 전략과 시장({b_name}) 성과를 직접 비교합니다.")
         
         def process_midterm(hist, col_name):
             if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
@@ -958,12 +1129,14 @@ class HistoryLabView:
                 return pd.DataFrame(columns=[col_name, 'IsMidterm'])
 
         s_df = process_midterm(strategy_hist, 'Strategy')
-        b_df = process_midterm(bench_hist, 'QQQ')
+        b_df = process_midterm(bench_hist, b_name)
         
         # 1. 중간선거 vs 비중간선거 평균 수익률 비교
         s_avg = s_df.groupby('IsMidterm')['Strategy'].mean() * 100
-        b_avg = b_df.groupby('IsMidterm')['QQQ'].mean() * 100
-        avg_comp = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg})
+        b_avg = b_df.groupby('IsMidterm')[b_name].mean() * 100
+        
+        # [수정] 데이터가 부족해도 인덱스 갯수를 맞추기 위해 reindex 사용
+        avg_comp = pd.DataFrame({'내 전략': s_avg, f'시장({b_name})': b_avg}).reindex([False, True], fill_value=0.0)
         avg_comp.index = ["비중간선거", "중간선거"]
         
         # 2. 역대 중간선거 연도별 개별 성과
@@ -972,7 +1145,7 @@ class HistoryLabView:
         b_mid = b_df[b_df['IsMidterm']].copy()
         b_mid['Year'] = b_mid.index.year
         
-        mid_yearly = pd.merge(s_mid[['Year', 'Strategy']], b_mid[['Year', 'QQQ']], on='Year')
+        mid_yearly = pd.merge(s_mid[['Year', 'Strategy']], b_mid[['Year', b_name]], on='Year')
         mid_yearly = mid_yearly.set_index('Year') * 100
 
         col1, col2 = st.columns([1, 2])
@@ -990,9 +1163,9 @@ class HistoryLabView:
             plt.close(fig)
             
         with col2:
-            st.write("**역대 중간선거 연도별 성과 비교**")
+            st.write(f"**역대 중간선거 연도별 성과 비교 (vs {b_name})**")
             fig, ax = plt.subplots(figsize=(10, 5))
-            mid_yearly.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
+            mid_yearly.rename(columns={b_name: f'시장({b_name})'}).plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
             ax.axhline(0, color='black', linewidth=0.8)
             ax.set_ylabel("Annual Return (%)")
             ax.set_xticklabels([f"{y}년" for y in mid_yearly.index], rotation=0)
@@ -1005,21 +1178,24 @@ class HistoryLabView:
             plt.close(fig)
 
     @staticmethod
-    def render_seasonality(strategy_hist, bench_hist):
-        st.subheader("지난 15년간의 월별 평균 수익률 & 승률 (vs QQQ)")
+    def render_seasonality(strategy_hist, bench_hist, b_name="QQQ"):
+        st.subheader(f"지난 15년간의 월별 평균 수익률 & 승률 (vs {b_name})")
         
         def get_monthly_stats(hist):
+            full_months = range(1, 13)
             if hist.empty or 'Value' not in hist.columns or not isinstance(hist.index, pd.DatetimeIndex):
-                return pd.Series(index=range(1, 13), data=0.0), pd.Series(index=range(1, 13), data=0.0)
+                return pd.Series(index=full_months, data=0.0), pd.Series(index=full_months, data=0.0)
             try:
                 returns = hist['Value'].pct_change().dropna()
+                if returns.empty:
+                    return pd.Series(index=full_months, data=0.0), pd.Series(index=full_months, data=0.0)
                 df_rets = returns.to_frame(name='Return')
                 df_rets['Month'] = df_rets.index.month
                 avg = df_rets.groupby('Month')['Return'].mean() * 100 * 21
                 win = df_rets.groupby('Month')['Return'].apply(lambda x: (x > 0).mean()) * 100
-                return avg, win
+                return avg.reindex(full_months, fill_value=0.0), win.reindex(full_months, fill_value=0.0)
             except:
-                return pd.Series(index=range(1, 13), data=0.0), pd.Series(index=range(1, 13), data=0.0)
+                return pd.Series(index=full_months, data=0.0), pd.Series(index=full_months, data=0.0)
 
         s_avg, s_win = get_monthly_stats(strategy_hist)
         b_avg, _ = get_monthly_stats(bench_hist)
@@ -1046,7 +1222,7 @@ class HistoryLabView:
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
         
-        ax1.set_title("Strategy vs QQQ Seasonality Analysis")
+        ax1.set_title(f"Strategy vs {b_name} Seasonality Analysis")
         ax1.grid(axis='y', linestyle='--', alpha=0.3)
         st.pyplot(fig, clear_figure=True)
         plt.close(fig)
@@ -1116,8 +1292,9 @@ class GoldenStrategyApp:
     def __init__(self):
         # 자산 맵핑
         self.ticker_map = {
-            "QQQ": "QQQ (1x)", "QLD": "QLD (2x) 🌟", "TQQQ": "TQQQ (3x) 🌟",
-            "TLT": "TLT (1x)", "TMF": "TMF (3x)"
+            "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
+            "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
+            "TLT": "장기채 (TLT)", "TMF": "장기채 3배 (TMF)"
         }
         
     def run(self):
@@ -1139,10 +1316,21 @@ class GoldenStrategyApp:
         
         # 백테스트 및 전략 분석기 공통 설정
         st.sidebar.header("전략 및 기간 설정")
-        base_asset = st.sidebar.selectbox("기준 자산 (시그널)", ["QQQ", "QLD", "TQQQ"], index=0, format_func=lambda x: self.ticker_map[x])
-        leverage_asset = st.sidebar.selectbox("매매 대상 자산", ["QLD", "TQQQ", "TMF"], index=0, format_func=lambda x: self.ticker_map[x])
+        base_asset = st.sidebar.selectbox("기준 자산 (시그널)", ["QQQ", "QLD", "TQQQ", "SOXX", "USD", "SOXL"], index=0, format_func=lambda x: self.ticker_map[x])
+        leverage_asset = st.sidebar.selectbox("매매 대상 자산", ["QLD", "TQQQ", "USD", "SOXL", "TMF"], index=0, format_func=lambda x: self.ticker_map[x])
         cash_ratio = st.sidebar.slider("현금 비중 (%)", 0, 50, 0, step=5) / 100.0
         
+        # [신규] 스마트 레버리지 모드 설정
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🚀 스마트 레버리지")
+        use_smart = st.sidebar.checkbox("스마트 레버리지 모드 활성화", value=False, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
+        smart_params = {'use_smart': use_smart}
+        if use_smart:
+            v_exit = st.sidebar.slider("VIX 도망점 (Safety)", 20, 50, 32, help="이 VIX를 넘으면 1배 자산으로 도망칩니다.")
+            r_turbo = st.sidebar.slider("RSI 가속점 (Turbo)", 20, 40, 30, help="이 RSI보다 낮으면 3배 자산으로 승격합니다.")
+            smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
+        st.sidebar.markdown("---")
+
         # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
         trade_at = st.sidebar.radio("매매 시점 선택", ["종가", "익일 시가"], index=0, horizontal=True)
 
@@ -1153,7 +1341,7 @@ class GoldenStrategyApp:
 
         # [신규] 역사적 마켓 랩 화면 처리
         if menu == "📜 역사적 마켓 랩":
-            HistoryLabView.render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, st.session_state.get('current_params'))
+            HistoryLabView.render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, st.session_state.get('current_params'), smart_params=smart_params)
             st.stop()
         
         if 'QQQ' in data_dict:
@@ -1200,8 +1388,13 @@ class GoldenStrategyApp:
             
         # 핵심 실행부
         with st.spinner('백테스팅 계산 중...'):
-            bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in ['QQQ', 'QLD', 'TQQQ']}
-            golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_d, end_d, params, trade_at)
+            # [수정] 기준 자산 섹터에 따른 동적 벤치마크 그룹 설정
+            semi_group = ['SOXX', 'USD', 'SOXL']
+            is_semi_mode = base_asset in semi_group or leverage_asset in semi_group
+            bench_tickers = semi_group if is_semi_mode else ['QQQ', 'QLD', 'TQQQ']
+            
+            bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in bench_tickers}
+            golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_d, end_d, params, trade_at, smart_params=smart_params)
             
         # 결과 렌더링
         BacktestView.render_results(golden_history, bh_histories, base_asset, leverage_asset)
