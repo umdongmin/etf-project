@@ -158,7 +158,9 @@ class DataService:
     @classmethod
     def fetch_live_data(cls):
         print("라이브 데이터 수집 시작...")
-        end_date = datetime.datetime.now().strftime('%Y-%m-%d')
+        # [수정] 배포 서버(UTC)와 로컬(KST) 간의 날짜 차이 해결을 위해 KST(UTC+9) 강제 적용
+        now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+        end_date = now_kst.strftime('%Y-%m-%d')
         start_date = '2010-01-01'
         
         data_dict = {}
