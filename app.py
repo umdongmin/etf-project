@@ -13,6 +13,7 @@ import os
 import yfinance as yf
 import requests
 import datetime
+import matplotlib.dates as mdates
 import platform
 
 import matplotlib.font_manager as fm
@@ -255,7 +256,8 @@ class StrategyEngine:
             combined['MACD'], combined['Signal_Line'] = combined['MACD_12_26_9'], combined['MACDs_12_26_9']
         
         combined['RSI_SMA'] = combined['RSI'].rolling(window=14).mean()
-        for col in ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line']:
+        combined['SMA200'] = combined['Close'].rolling(window=200).mean()
+        for col in ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200']:
             combined[f'Prev_{col}'] = combined[col].shift(1)
         
         combined['FG'] = combined['FG'].ffill().fillna(50)
@@ -487,6 +489,10 @@ class StrategyEngine:
             # [수정] 변수 초기화 (에러 방지)
             new_planned = current_planned_asset
             new_stage = rebalance_stage
+            
+            # [신규] 첫 거래 기준가 초기화
+            if last_entry_price == 0:
+                last_entry_price = prices[base_asset]
 
             etf_funds = current_total_val * (1 - cash_ratio)
             # [수정] 모든 레버리지 후보 자산의 합산 비중 계산 (스마트 모드 대응)
@@ -494,25 +500,55 @@ class StrategyEngine:
             current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
             current_lev_pct = current_lev_funds / etf_funds if etf_funds > 0 else 0
             
-            if is_buy_signal and current_planned_asset != effective_lev_asset:
-                # [추가] 갈아탈 타겟 자산의 데이터가 오늘 있어야만 스위칭 가능
-                if effective_lev_asset in prices:
-                    new_planned, rebalance_needed = effective_lev_asset, True
-                    if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
-                    elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
-                    else: target_lev_pct, new_stage = 1.0, 3
+            # [수정] 자산/단계 결정 및 통합 가드 적용
+            rebalance_cause = "" # 매매 원인 저장
+            is_delayed = False # 지연 여부 플래그
+            delay_reason = ""
+            
+            # 가격 변동 체크 (기속 자산 기준)
+            price_change = prices[base_asset] / last_entry_price
+            price_trigger = (price_change >= 1 + b_up or price_change <= 1 + b_down) if current_planned_asset == leverage_asset else (price_change >= 1 + s_up or price_change <= 1 + s_down)
+            
+            if is_buy_signal and current_planned_asset != effective_lev_asset and effective_lev_asset in prices:
+                # 1. 자산 전환 시도 (매수 방향)
+                new_planned = effective_lev_asset
+                if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
+                elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
+                else: target_lev_pct, new_stage = 1.0, 3
+                rebalance_cause = "시그널"
+                rebalance_needed = True
             elif is_sell_signal and current_planned_asset != base_asset:
-                new_planned, rebalance_needed = base_asset, True
+                # 2. 자산 전환 시도 (매도 방향)
+                new_planned = base_asset
                 if current_lev_pct > 0.75: target_lev_pct, new_stage = 0.70, 1
                 elif current_lev_pct > 0.35: target_lev_pct, new_stage = 0.30, 2
                 else: target_lev_pct, new_stage = 0.0, 3
+                rebalance_cause = "시그널"
+                rebalance_needed = True
             elif rebalance_stage in [1, 2]:
-                price_change = prices[base_asset] / last_entry_price
-                trigger = (price_change >= 1 + b_up or price_change <= 1 + b_down) if current_planned_asset == leverage_asset else (price_change >= 1 + s_up or price_change <= 1 + s_down)
-                if trigger:
+                # 3. 동일 자산 내 추가 단계 진행 (가격 변동)
+                if price_trigger:
                     new_stage = rebalance_stage + 1
                     target_lev_pct = (0.70 if new_stage == 2 else 1.0) if current_planned_asset == leverage_asset else (0.30 if new_stage == 2 else 0.0)
-                    rebalance_needed = True # new_planned는 이미 초기화됨
+                    rebalance_cause = "가격조건"
+                    rebalance_needed = True
+
+            # [통합 가드] S2, S3 진입 시 리스크 관리 적용 (자산 전환 포함)
+            if rebalance_needed and new_stage > 1:
+                # 1. SMA200 방어막 체크
+                if current_planned_asset == leverage_asset and smart_params and smart_params.get('use_panic', False):
+                    sma200 = combined.loc[date, 'SMA200']
+                    if prices[base_asset] < sma200:
+                        target_rsi = smart_params.get('panic_rsi_s2', 30) if new_stage == 2 else smart_params.get('panic_rsi_s3', 25)
+                        if rsi > target_rsi:
+                            rebalance_needed, is_delayed, delay_reason = False, True, "MA200-RSI"
+                
+                # 2. 시그널 결합 옵션 체크
+                if rebalance_needed and smart_params and smart_params.get('couple_signal', False):
+                    # 결합 옵션 ON일 때는 [가격변동] AND [시그널]이 동시 충족되어야 함
+                    required_sig = is_buy_signal if current_planned_asset == leverage_asset else is_sell_signal
+                    if not (required_sig and price_trigger):
+                        rebalance_needed, is_delayed, delay_reason = False, True, "시그널결합"
 
             if rebalance_needed:
                 if trade_at == "종가":
@@ -528,31 +564,48 @@ class StrategyEngine:
                     else:
                         holdings[effective_lev_asset] = (etf_funds * target_lev_pct) / prices[effective_lev_asset]
                         holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
-                    last_entry_price = price
+                    last_entry_price = prices[base_asset]
                 else:
                     # 익일 시가 대기
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned}
 
-            curr_w = (0.30 if rebalance_stage == 1 else (0.70 if rebalance_stage == 2 else 1.0)) if current_planned_asset in [leverage_asset, 'QQQ', 'TQQQ', 'SOXX', 'SOXL', 'USD'] and current_planned_asset != base_asset else (0.70 if rebalance_stage == 1 else (0.30 if rebalance_stage == 2 else 0.0))
-            
-            # 시각적 가독성을 위해 rebalance_needed 신호 발생 시점을 표시
+            # 시각적 가독성을 위해 trade_label 설정
             if rebalance_needed:
-                if new_planned == base_asset:
-                    trade_label = f"매도: {signal_reason}"
+                prefix = "매도" if new_planned == base_asset else "매수"
+                reason = signal_reason if rebalance_cause == "시그널" else "가격조건"
+                trade_label = f"{prefix}(S{new_stage}): {reason}"
+                if smart_params and smart_params.get('use_smart') and new_planned != base_asset:
+                    trade_label += f" [{smart_reason}]"
+            elif is_delayed:
+                # [원복] 지연 원인 표시
+                if delay_reason == "MA200-RSI":
+                    trade_label = f"지연(MA200-RSI:{rsi:.1f})"
                 else:
-                    reason_pre = f"{signal_reason}" if signal_reason else "추가 매수"
-                    trade_label = f"매수: {reason_pre}"
-                    if smart_params and smart_params.get('use_smart'):
-                        trade_label += f" [{smart_reason}]"
+                    trade_label = f"지연(시그널결합)"
             elif rebalance_stage in [1, 2]:
                 trade_label = f"진행중(S{rebalance_stage})"
             else:
                 trade_label = "중립"
             
+            # [신규] 비중 계산 로직 (가독성 향상 및 에러 방지)
+            if current_planned_asset == base_asset:
+                # 매도 중 (base_asset으로 복귀 중)
+                curr_w = 0.70 if rebalance_stage == 1 else (0.30 if rebalance_stage == 2 else 0.0)
+            else:
+                # 매수 중 (leverage_asset으로 진입 중)
+                curr_w = 0.30 if rebalance_stage == 1 else (0.70 if rebalance_stage == 2 else 1.0)
+            
             history.append({
-                'Date': date, 'Value': current_total_val, 'Signal': trade_label,
+                'Date': date, 
+                'Close': prices[base_asset],
+                'Value': current_total_val, 
+                'Cash': cash,
+                'Trade_Label': trade_label,
                 'Asset': f"{current_planned_asset}(S{rebalance_stage})" if rebalance_stage < 3 else current_planned_asset,
-                'Lev_Weight': curr_w, f'{base_asset}_Weight': 1 - curr_w, 'RSI': rsi, 'FG': fg, 'VIX': vix, 'MACD': macd_val, 'Signal_Line': signal_line
+                'Lev_Weight': curr_w, 
+                f'{base_asset}_Weight': 1 - curr_w, 
+                'RSI': rsi, 'FG': fg, 'VIX': vix, 'MACD': macd_val, 'Signal_Line': signal_line,
+                'SMA200': combined.loc[date, 'SMA200']
             })
         return pd.DataFrame(history).set_index('Date')
 
@@ -678,14 +731,15 @@ class BacktestView:
         latest = golden_history.iloc[-1]
         st.subheader(f"📍 상태 요약 ({latest.name.date()})")
         
-        sig = str(latest['Signal'])
-        if "매수" in sig: sig_color = "#e74c3c" # Red
-        elif "매도" in sig: sig_color = "#3498db" # Blue
+        # [수정] Trade_Label 사용 (매도 우선 체크하여 과매수 오매칭 방지)
+        sig = str(latest['Trade_Label']) if 'Trade_Label' in latest else "중립"
+        if sig.startswith("매도"): sig_color = "#3498db" # Blue
+        elif sig.startswith("매수"): sig_color = "#e74c3c" # Red
         elif "진행중" in sig: sig_color = "#f39c12" # Orange
         else: sig_color = "#7f8c8d" # Gray (중립)
         
         st.markdown(f'<div style="background-color:{sig_color}; padding:20px; border-radius:10px; text-align:center; color:white;">'
-                    f'<h2 style="margin:0;">{latest["Signal"]} 상태</h2>'
+                    f'<h2 style="margin:0;">{sig} 상태</h2>'
                     f'<b>{leverage_asset} {latest["Lev_Weight"]:.0%}, {base_asset} {latest[f"{base_asset}_Weight"]:.0%}</b></div>', unsafe_allow_html=True)
         
         metrics = {k: calculate_metrics(v.rename(columns={'Value': 'PortfolioValue'})) for k, v in {**bh_histories, 'Strategy': golden_history}.items()}
@@ -720,8 +774,8 @@ class BacktestView:
         st.pyplot(fig, clear_figure=True)
         plt.close(fig)
         
-        # [신규] 월간 수익률 히트맵
-        BacktestView.render_returns_heatmap(golden_history)
+        # [신규] 월간 수익률 히트맵 (비교 기능 포함)
+        BacktestView.render_returns_heatmap(golden_history, bh_histories)
 
         # [신규] 몬테카를로 시뮬레이션
         BacktestView.render_monte_carlo(golden_history)
@@ -735,12 +789,12 @@ class BacktestView:
         st.divider()
         with st.expander("📝 전체 일별 상세 로그 확인 (시그널 포함)"):
             def style_signal(row):
-                sig = str(row['Signal'])
-                # 배경색 및 텍스트색 결정
-                if "매수" in sig:
-                    return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
-                elif "매도" in sig:
+                sig = str(row['Trade_Label']) if 'Trade_Label' in row else ""
+                # 배경색 및 텍스트색 결정 (매도 우선 체크하여 과매수 오매칭 방지)
+                if sig.startswith("매도"):
                     return ['background-color: rgba(52, 152, 219, 0.1); color: #3498db; font-weight: bold'] * len(row)
+                elif sig.startswith("매수"):
+                    return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
                 elif "진행중" in sig:
                     return ['background-color: rgba(243, 156, 18, 0.05); color: #f39c12'] * len(row)
                 return [''] * len(row)
@@ -750,7 +804,7 @@ class BacktestView:
             log_df.index = log_df.index.date
             
             # 가독성을 위해 컬럼 순서 조정 및 정리
-            cols = ['Value', 'Signal', 'Lev_Weight', f'{base_asset}_Weight', 'RSI', 'MACD', 'VIX']
+            cols = ['Value', 'Trade_Label', 'Asset', 'Lev_Weight', f'{base_asset}_Weight', 'RSI', 'MACD', 'VIX']
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
             styled_log = display_df.style.apply(style_signal, axis=1)\
@@ -759,82 +813,91 @@ class BacktestView:
             st.dataframe(styled_log, use_container_width=True, height=600)
 
     @staticmethod
-    def render_returns_heatmap(history):
-        """연도별/월별 수익률 히트맵 렌더링"""
+    def render_returns_heatmap(strategy_history, bh_histories):
+        """연도별/월별 수익률 히트맵 렌더링 (전략 vs 벤치마크 3단 통합)"""
         st.divider()
-        st.subheader("📅 월간 수익률 히트맵 (%)")
+        st.subheader("📅 월간 수익률 히트맵 비교 (%)")
         
-        if history.empty:
+        if strategy_history.empty:
             st.info("데이터가 충분하지 않습니다.")
             return
 
-        try:
-            # 1. 데이터 가공
-            # 월별 마지막 날 가치 추출
+        def get_heatmap_data(history):
+            if history.empty: return None
             monthly_val = history['Value'].resample('ME').last()
-            
-            # 첫 달의 시작 수익률 계산을 위해 초기 가고 가치(10000)를 앞에 추가
-            first_month_start = history['Value'].iloc[0] # 실제 백테스트 시작 시점의 가치
             initial_series = pd.Series([10000.0], index=[monthly_val.index[0] - pd.DateOffset(months=1)])
             monthly_combined = pd.concat([initial_series, monthly_val])
-            
-            # 월간 수익률 계산
             monthly_ret = monthly_combined.pct_change().dropna() * 100
             
-            # DataFrame화 및 연/월 분리
             df_ret = monthly_ret.to_frame(name='Return')
             df_ret['Year'] = df_ret.index.year
             df_ret['Month'] = df_ret.index.month
             
-            # 피벗 테이블 생성
             pivot = df_ret.pivot(index='Year', columns='Month', values='Return')
+            pivot = pivot.reindex(columns=range(1, 13))
             
-            # 연간 수익률 계산
             annual_ret = history['Value'].resample('YE').last().pct_change() * 100
-            # 첫 해의 경우 데이터 시작점 기준으로 계산
-            first_year = annual_ret.index[0].year
-            year_start_val = 10000.0
-            annual_ret.iloc[0] = (history['Value'].resample('YE').last().iloc[0] / year_start_val - 1) * 100
-            
+            annual_ret.iloc[0] = (history['Value'].resample('YE').last().iloc[0] / 10000.0 - 1) * 100
             pivot['Annual'] = annual_ret.values
+            return pivot
+
+        def plot_it(pivot, title, ax, is_diff=False):
+            vmin, vmax = (-10, 10) if not is_diff else (-5, 5)
+            cmap = 'RdYlGn' if not is_diff else 'PiYG'
             
-            # 시각화 (Matplotlib)
-            fig, ax = plt.subplots(figsize=(12, len(pivot) * 0.8 + 2))
-            
-            # 배경색 맵핑을 위한 정규화 (Red-Yellow-Green)
-            im = ax.imshow(pivot.iloc[:, :-1], cmap='RdYlGn', aspect='auto', vmin=-10, vmax=10)
-            
-            # 축 설정
+            im = ax.imshow(pivot.iloc[:, :-1], cmap=cmap, aspect='auto', vmin=vmin, vmax=vmax)
             ax.set_xticks(np.arange(12))
             ax.set_xticklabels(['1M', '2M', '3M', '4M', '5M', '6M', '7M', '8M', '9M', '10M', '11M', '12M'])
             ax.set_yticks(np.arange(len(pivot)))
             ax.set_yticklabels(pivot.index)
             
-            # 데이터 레이블 (숫자) 표시
             for i in range(len(pivot)):
-                # 월별 수익률
                 for j in range(12):
                     val = pivot.iloc[i, j]
                     if not np.isnan(val):
-                        color = 'white' if abs(val) > 5 else 'black'
-                        ax.text(j, i, f'{val:.1f}%', ha='center', va='center', color=color, fontsize=9)
-                
-                # 연간 수익률 (오른쪽 끝)
+                        color = 'white' if abs(val) > 7 else 'black'
+                        ax.text(j, i, f'{val:.1f}%', ha='center', va='center', color=color, fontsize=8)
                 ann_val = pivot.iloc[i, -1]
-                ax.text(12.2, i, f'{ann_val:.1f}%', ha='left', va='center', 
-                        weight='bold', color='blue' if ann_val > 0 else 'red', fontsize=10)
+                ax.text(12.2, i, f'{ann_val:.1f}%', ha='left', va='center', weight='bold', color='blue' if ann_val > 0 else 'red', fontsize=9)
             
-            ax.set_title("Strategy Monthly Returns Matrix", fontsize=14, pad=20)
-            # 깔끔하게 정리
+            ax.set_title(title, fontsize=12, pad=10, weight='bold')
             ax.spines[:].set_visible(False)
-            ax.set_xticks(np.arange(13)-0.5, minor=True)
-            ax.set_yticks(np.arange(len(pivot)+1)-0.5, minor=True)
-            ax.grid(which="minor", color="w", linestyle='-', linewidth=3)
+            ax.set_xticks(np.arange(13)-0.5, minor=True); ax.set_yticks(np.arange(len(pivot)+1)-0.5, minor=True)
+            ax.grid(which="minor", color="w", linestyle='-', linewidth=2)
             ax.tick_params(which="minor", bottom=False, left=False)
+
+        try:
+            b_name = list(bh_histories.keys())[0] if bh_histories else "Benchmark"
+            b_history = bh_histories[b_name] if bh_histories else pd.DataFrame()
+
+            s_pivot = get_heatmap_data(strategy_history)
+            b_pivot = get_heatmap_data(b_history)
             
+            if s_pivot is None:
+                st.info("데이터가 부족하여 차트를 그릴 수 없습니다.")
+                return
+
+            common_years = s_pivot.index.intersection(b_pivot.index) if b_pivot is not None else s_pivot.index
+            s_view = s_pivot.loc[common_years]
+            b_view = b_pivot.loc[common_years] if b_pivot is not None else None
+            
+            num_charts = 3 if b_view is not None else 1
+            fig, axes = plt.subplots(num_charts, 1, figsize=(12, (len(common_years) * 0.7 + 1.5) * num_charts))
+            if num_charts == 1: axes = [axes]
+            
+            plot_it(s_view, f"🔥 My Strategy Monthly Returns (%)", axes[0])
+            if b_view is not None:
+                plot_it(b_view, f"📊 Benchmark ({b_name}) Monthly Returns (%)", axes[1])
+                diff_view = s_view - b_view
+                plot_it(diff_view, "✨ Strategy Alpha (Strategy - Benchmark) (%)", axes[2], is_diff=True)
+            
+            plt.tight_layout(pad=3.0)
             st.pyplot(fig, clear_figure=True)
             plt.close(fig)
             
+            if b_view is not None:
+                st.caption(f"※ Alpha 매트릭스: [내 전략 수익률] - [{b_name} 수익률]. 양수(초록)일수록 시장 대비 초과 성과를 기록했음을 의미합니다.")
+
         except Exception as e:
             st.error(f"히트맵 생성 중 오류 발생: {e}")
 
@@ -929,6 +992,10 @@ class HistoryLabView:
         if actual_start > start_date:
             st.info(f"ℹ️ {leverage_asset} 등의 자산 상장일 관계로 분석이 **{actual_start}**부터 시작되었습니다.")
         
+        # 리스크 관리 설정 표시
+        if smart_params and smart_params.get('use_panic'):
+            st.info(f"🛡️ **하락장 대응 활성**: 주가 < SMA200일 때 2·3단계 매수를 RSI {smart_params.get('panic_rsi_s2', 30)}/{smart_params.get('panic_rsi_s3', 25)} 이하로 제한합니다.")
+        
         # [추가] 벤치마크 누락 경고
         missingbench = [t for t in [b1, b2, b3] if t not in data_dict]
         if missingbench:
@@ -994,6 +1061,13 @@ class HistoryLabView:
             q_mdd = calculate_mdd(q_y) * 100
             l_mdd = calculate_mdd(l_y) * 100
             t_mdd = calculate_mdd(t_y) * 100
+            
+            # [신규] 방어(Panic Mode) 발생 일수 계산
+            panic_days = 0
+            if 'Trade_Label' in s_h.columns:
+                s_y_full = s_h[s_h.index.year == y]
+                panic_days = s_y_full['Trade_Label'].str.contains("지연\(MA200", na=False).sum()
+            
             event = HistoryLabView.EVENTS.get(y, "-")
             
             data.append({
@@ -1001,11 +1075,9 @@ class HistoryLabView:
                 "전략 수익": f"{s_ret:+.1f}%",
                 f"{b_names[0]} 수익": f"{q_ret:+.1f}%",
                 f"{b_names[1]} 수익": f"{l_ret:+.1f}%",
-                f"{b_names[2]} 수익": f"{t_ret:+.1f}%",
                 "전략 MDD": f"{s_mdd:.1f}%",
                 f"{b_names[0]} MDD": f"{q_mdd:.1f}%",
-                f"{b_names[1]} MDD": f"{l_mdd:.1f}%",
-                f"{b_names[2]} MDD": f"{t_mdd:.1f}%",
+                "방어(일)": f"{panic_days}일" if panic_days > 0 else "-",
                 "주요 이벤트": event
             })
             
@@ -1037,8 +1109,13 @@ class HistoryLabView:
             except:
                 return ''
 
+        def style_panic(val):
+            if val == "-": return ''
+            return 'background-color: rgba(0, 200, 83, 0.2); color: #00c853; font-weight: bold;'
+
         styled_df = df.style.applymap(style_returns, subset=[c for c in df.columns if "수익" in c])\
-                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c])
+                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c])\
+                            .applymap(style_panic, subset=["방어(일)"])
         
         st.dataframe(styled_df, use_container_width=True, height=520)
 
@@ -1231,6 +1308,103 @@ class HistoryLabView:
         
         st.info("💡 **전략의 파란색/초록색 막대**가 QQQ보다 높다면, 해당 월에 시장 대비 초과 수익을 내는 경향이 있음을 의미합니다.")
 
+
+class ChartView:
+    """차트 통합 분석 화면 UI 구성 클래스"""
+    @staticmethod
+    def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params, smart_params=None):
+        st.header("📊 차트 통합 분석 (Indicator Correlation)")
+        st.caption("VIX, RSI, MACD와 가격 간의 상관관계를 시각적으로 분석하여 최적의 진입 시점을 도출합니다.")
+        
+        # 필터링 설정
+        c1, c2 = st.columns([1, 2])
+        current_year = datetime.date.today().year
+        selected_year = c1.selectbox("📅 분석 연도 선택", range(current_year, 2009, -1), index=0)
+        
+        start_date = datetime.date(selected_year, 1, 1)
+        end_date = datetime.date(selected_year, 12, 31)
+        
+        with st.spinner(f'{selected_year}년 데이터 분석 중...'):
+            history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, 0, start_date, end_date, params, trade_at, smart_params=smart_params)
+            
+        if history.empty:
+            st.warning(f"{selected_year}년에 해당하는 충분한 데이터가 없습니다.")
+            return
+
+        # 차트 생성 (3개 패널)
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
+        plt.subplots_adjust(hspace=0.1)
+        
+        # 1. 가격 차트 필드
+        ax1.plot(history.index, history['Close'], color='#66b3ff', label=f'{base_asset} Price', alpha=0.8, linewidth=1.5)
+        if 'SMA200' in history.columns:
+            ax1.plot(history.index, history['SMA200'], color='#f39c12', label='SMA200', alpha=0.6, linestyle='--')
+        ax1.set_title(f"{selected_year}년 {base_asset} 흐름 및 매매 시그널", fontsize=14, weight='bold')
+        ax1.set_ylabel("Price ($)")
+        ax1.grid(True, linestyle='--', alpha=0.4)
+        
+        # 매매 마커 표시
+        buy_points = history[history['Trade_Label'].str.contains('매수', na=False)]
+        sell_points = history[history['Trade_Label'].str.contains('매도', na=False)]
+        delay_points = history[history['Trade_Label'].str.contains('지연', na=False)]
+        
+        if not buy_points.empty:
+            ax1.scatter(buy_points.index, buy_points['Close'], marker='^', color='green', s=100, label='Buy (Stage)', zorder=5)
+        if not sell_points.empty:
+            ax1.scatter(sell_points.index, sell_points['Close'], marker='v', color='red', s=100, label='Sell (Stage)', zorder=5)
+        
+        # 지연 구간 하이라이트 (SMA200-RSI 제약)
+        has_delay = False
+        for idx in delay_points.index:
+            ax1.axvspan(idx, idx + datetime.timedelta(days=1), color='yellow', alpha=0.3, label='매수 지연(MA200-RSI)' if not has_delay else "")
+            has_delay = True
+
+        ax1.legend(loc='upper left', fontsize=9)
+
+        # 2. VIX 차트 필드
+        ax2.plot(history.index, history['VIX'], color='#ff9999', label='VIX Index', linewidth=1.5)
+        v_exit = smart_params.get('vix_exit', 32) if smart_params else 32
+        p_vix = smart_params.get('panic_vix', 35) if smart_params else 35
+        ax2.axhline(v_exit, color='red', linestyle='--', alpha=0.6, label=f'VIX Exit ({v_exit})')
+        ax2.axhline(p_vix, color='orange', linestyle='-', alpha=0.8, label=f'Panic Threshold ({p_vix})')
+        ax2.fill_between(history.index, history['VIX'], p_vix, where=(history['VIX'] >= p_vix), color='red', alpha=0.2)
+        ax2.set_ylabel("VIX")
+        ax2.grid(True, linestyle='--', alpha=0.4)
+        ax2.legend(loc='upper left', fontsize=9)
+
+        # 3. RSI 차트 필드
+        ax3.plot(history.index, history['RSI'], color='#9b59b6', label='RSI (14)', linewidth=1.2)
+        r_turbo = smart_params.get('rsi_turbo', 30) if smart_params else 30
+        p_r2 = smart_params.get('panic_rsi_s2', 30) if smart_params else 30
+        p_r3 = smart_params.get('panic_rsi_s3', 25) if smart_params else 25
+        
+        ax3.axhline(70, color='red', linestyle='--', alpha=0.4)
+        ax3.axhline(35, color='green', linestyle='--', alpha=0.4)
+        ax3.axhline(r_turbo, color='blue', linestyle='--', alpha=0.6, label=f'Turbo ({r_turbo})')
+        ax3.axhline(p_r3, color='purple', linestyle='-', alpha=0.8, label=f'Panic S3 ({p_r3})')
+        
+        ax3.fill_between(history.index, history['RSI'], 30, where=(history['RSI'] <= 30), color='green', alpha=0.1)
+        ax3.set_ylabel("RSI")
+        ax3.set_ylim(0, 100)
+        ax3.grid(True, linestyle='--', alpha=0.4)
+        ax3.legend(loc='upper left', fontsize=9)
+        
+        plt.setp(ax1.get_xticklabels(), visible=False)
+        plt.setp(ax2.get_xticklabels(), visible=False)
+        
+        # X축 날짜 포맷
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+        ax3.xaxis.set_major_locator(mdates.MonthLocator())
+        plt.xticks(rotation=45)
+
+        st.pyplot(fig, clear_figure=True)
+        plt.close(fig)
+        
+        # 상세 데이터 표
+        with st.expander("🔎 상세 시뮬레이션 데이터 보기"):
+            display_df = history[['Close', 'SMA200', 'VIX', 'RSI', 'MACD', 'Trade_Label']].copy()
+            st.dataframe(display_df, use_container_width=True)
+
 class TesterView:
     """전략 분석기 입력 UI 구성 클래스"""
     @staticmethod
@@ -1303,7 +1477,7 @@ class GoldenStrategyApp:
         st.title("📈 ETF Golden Strategy")
         
         # 사이드바 메뉴
-        menu = st.sidebar.radio("📌 메뉴", ["📊 백테스트", "🧪 전략 분석기", "📜 역사적 마켓 랩", "📰 주요 마켓 이슈"])
+        menu = st.sidebar.radio("📌 메뉴", ["📊 백테스트", "🧪 전략 분석기", "📊 차트 분석", "📜 역사적 마켓 랩", "📰 주요 마켓 이슈"])
         if st.sidebar.button("🔄 데이터 새로고침 (Live)"):
             st.cache_data.clear()
             st.rerun()
@@ -1325,12 +1499,27 @@ class GoldenStrategyApp:
         # [신규] 스마트 레버리지 모드 설정
         st.sidebar.markdown("---")
         st.sidebar.subheader("🚀 스마트 레버리지")
-        use_smart = st.sidebar.checkbox("스마트 레버리지 모드 활성화", value=False, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
-        smart_params = {'use_smart': use_smart}
+        use_smart = st.sidebar.checkbox("스마트 레버리지 활성화", value=False, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
+        
+        # [신규] 리스크 방어 모드 설정 (가변 RSI 매수 제한)
+        st.sidebar.subheader("🛡️ 리스크 관리")
+        use_panic = st.sidebar.checkbox("하락장 매수 제한", value=True, help="주가가 200일 이평선 아래일 때 추가 매수 조건을 강화합니다.")
+        couple_signal = st.sidebar.checkbox("추가 매매 시 시그널 결합", value=False, help="2·3단계 리밸런싱 시에도 가격 조건과 함께 보조지표 시그널이 충족되어야 합나다.")
+        
+        smart_params = {'use_smart': use_smart, 'use_panic': use_panic, 'couple_signal': couple_signal}
+        
         if use_smart:
-            v_exit = st.sidebar.slider("VIX 도망점 (Safety)", 20, 50, 32, help="이 VIX를 넘으면 1배 자산으로 도망칩니다.")
-            r_turbo = st.sidebar.slider("RSI 가속점 (Turbo)", 20, 40, 30, help="이 RSI보다 낮으면 3배 자산으로 승격합니다.")
-            smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
+            with st.sidebar.expander("가속/탈출 파라미터"):
+                v_exit = st.slider("VIX 도망점 (Safety)", 20, 50, 32)
+                r_turbo = st.slider("RSI 가속점 (Turbo)", 20, 40, 30)
+                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
+        
+        if use_panic:
+            with st.sidebar.expander("SMA200 방어 파라미터"):
+                st.caption("주가가 200일 이평선 하단일 때 적용")
+                p_r2 = st.slider("2단계 매수 RSI", 15, 40, 30)
+                p_r3 = st.slider("3단계 매수 RSI", 15, 40, 25)
+                smart_params.update({'panic_rsi_s2': p_r2, 'panic_rsi_s3': p_r3})
         st.sidebar.markdown("---")
 
         # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
@@ -1339,6 +1528,11 @@ class GoldenStrategyApp:
         # 마켓 이슈 화면
         if menu == "📰 주요 마켓 이슈":
             MarketView.render(data_dict, macro_df, fetch_status, fetch_time, fg_df)
+            st.stop()
+
+        # [신규] 차트 분석 화면 처리
+        if menu == "📊 차트 분석":
+            ChartView.render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, st.session_state.get('current_params'), smart_params=smart_params)
             st.stop()
 
         # [신규] 역사적 마켓 랩 화면 처리
@@ -1361,7 +1555,7 @@ class GoldenStrategyApp:
         if 'prev_year_choice' not in st.session_state:
             st.session_state.prev_year_choice = "직접 설정"
         if 'start_d_input' not in st.session_state:
-            st.session_state['start_d_input'] = datetime.date(2025, 1, 1) if min_d <= datetime.date(2025, 1, 1) else min_d
+            st.session_state['start_d_input'] = datetime.date(2026, 1, 1) if min_d <= datetime.date(2026, 1, 1) else min_d
         if 'end_d_input' not in st.session_state:
             st.session_state['end_d_input'] = max_d
             
