@@ -337,69 +337,56 @@ class StrategyEngine:
                 t_lev_asset, t_lev_pct = pending_rebalance['planned'], pending_rebalance['target_lev_pct']
                 rebalance_stage = pending_rebalance['rebalance_stage']
                 
-                # [수정] 순차적 포트폴리오 리밸런싱 (Natural Transition) 익일 시가 처리
-                if smart_params and smart_params.get('use_sequential', True):
-                    is_turbo_mode = (t_lev_asset == target_group[2])
-                    
-                    # 1. 현재 자산 평가 (trade_prices 기준)
-                    h_vals = {t: holdings[t] * trade_prices[t] for t in holdings if t in trade_prices}
-                    curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
-                    
-                    # 2. 목표 레버리지 총액 및 업그레이드 Cap 계산 (30/70/100)
-                    normalized_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
-                    target_lev_val = etf_funds * normalized_pct
-                    
-                    tqqq_cap = target_lev_val
-                    if target_lev_val > etf_funds * 0.9 and t_lev_asset == target_group[2]:
-                        # 100% 레버리지 구간에서의 터보 업그레이드 단계 적용
-                        if rebalance_stage == 1: tqqq_cap = 0.30 * target_lev_val
-                        elif rebalance_stage == 2: tqqq_cap = 0.70 * target_lev_val
+                # [수정] 순차적 포트폴리오 관리 (상시 활성화)
+                is_turbo_mode = (t_lev_asset == target_group[2])
+                
+                # 1. 현재 자산 평가 (trade_prices 기준)
+                h_vals = {t: holdings[t] * trade_prices[t] for t in holdings if t in trade_prices}
+                curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
+                
+                # 2. 목표 레버리지 총액 및 업그레이드 Cap 계산 (30/70/100)
+                normalized_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
+                target_lev_val = etf_funds * normalized_pct
+                
+                tqqq_cap = target_lev_val
+                if target_lev_val > etf_funds * 0.9 and t_lev_asset == target_group[2]:
+                    # 100% 레버리지 구간에서의 터보 업그레이드 단계 적용
+                    if rebalance_stage == 1: tqqq_cap = 0.30 * target_lev_val
+                    elif rebalance_stage == 2: tqqq_cap = 0.70 * target_lev_val
 
-                    new_h_vals = {t: 0.0 for t in holdings}
-                    
-                    if curr_total_lev_val > target_lev_val + 0.01:
-                        # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
-                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
-                        rem = target_lev_val - new_h_vals[target_group[1]]
-                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
-                    else:
-                        # 증액(Buy) 상황: 기존 레버리지 자산들을 유지하며 부족분만 현재 타겟으로 충전
-                        # 1. TQQQ 보존 및 업그레이드 (Cap 한도 내)
-                        if t_lev_asset == target_group[2]:
-                            # 가속 모드: QLD를 팔아서라도 tqqq_cap까지 채움 (업그레이드)
-                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
-                        else:
-                            # 일반 모드: 기존 TQQQ만 유지
-                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
-                        
-                        # 2. QLD 보전 및 충전 (남은 비중 한도 내)
-                        rem = target_lev_val - new_h_vals[target_group[2]]
-                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
-                        
-                        # 3. 최종 부족분 충전 (현재 시장 타겟 자산으로)
-                        rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
-                        if rem > 0:
-                            new_h_vals[t_lev_asset] += rem
-                    
-                    # 3. 나머지는 Base 자산
-                    allocated_lev = sum(new_h_vals.values())
-                    new_h_vals[base_asset] = etf_funds - allocated_lev
-                    
-                    # holdings 업데이트
-                    for t in holdings:
-                        if t in trade_prices and trade_prices[t] > 0:
-                            holdings[t] = new_h_vals.get(t, 0) / trade_prices[t]
-                        else:
-                            holdings[t] = 0
+                new_h_vals = {t: 0.0 for t in holdings}
+                
+                if curr_total_lev_val > target_lev_val + 0.01:
+                    # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
+                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
+                    rem = target_lev_val - new_h_vals[target_group[1]]
+                    new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
                 else:
-                    # [기존] 표준 리밸런싱 (단일 자산 올인)
-                    for t in list(holdings.keys()): holdings[t] = 0
-                    l_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
-                    if t_lev_asset == base_asset:
-                        holdings[base_asset] = etf_funds / trade_prices[base_asset]
+                    # 증액(Buy) 상황: 기존 레버리지 자산들을 유지하며 부족분만 현재 타겟으로 충전
+                    # 1. TQQQ 보존 및 업그레이드 (Cap 한도 내)
+                    if t_lev_asset == target_group[2]:
+                        # 가속 모드: QLD를 팔아서라도 tqqq_cap까지 채움 (업그레이드)
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
                     else:
-                        holdings[t_lev_asset] = (etf_funds * l_pct) / trade_prices[t_lev_asset]
-                        holdings[base_asset] = (etf_funds * (1 - l_pct)) / trade_prices[base_asset]
+                        # 일반 모드: 기존 TQQQ만 유지
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
+                    
+                    # 2. QLD 보전 및 충전 (남은 비중 한도 내)
+                    rem = target_lev_val - new_h_vals[target_group[2]]
+                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
+                    
+                    # 3. 최종 부족분 충전 (현재 시장 타겟 자산으로)
+                    rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
+                    if rem > 0:
+                        new_h_vals[t_lev_asset] += rem
+
+                # 3. 나머지는 Base 자산
+                allocated_lev = sum(new_h_vals.values())
+                new_h_vals[base_asset] = max(0, etf_funds - allocated_lev)
+                
+                # 수량 업데이트
+                for t in check_targets:
+                    holdings[t] = new_h_vals.get(t, 0) / trade_prices[t] if t in trade_prices and trade_prices[t] > 0 else 0
                 
                 current_planned_asset = t_lev_asset
                 rebalance_stage = pending_rebalance['rebalance_stage']
@@ -663,88 +650,57 @@ class StrategyEngine:
                         if rsi > target_rsi:
                             rebalance_needed, is_delayed, delay_reason = False, True, f"MA{panic_ma}-RSI"
                 
-                # 2. 시그널 결합 옵션 체크
-                if rebalance_needed and smart_params and smart_params.get('couple_signal', False):
-                    # 결합 옵션 ON일 때는 [가격변동] AND [시그널]이 동시 충족되어야 함
-                    required_sig = is_buy_signal if current_planned_asset == leverage_asset else is_sell_signal
-                    if not (required_sig and price_trigger):
-                        rebalance_needed, is_delayed, delay_reason = False, True, "시그널결합"
 
             if rebalance_needed:
                 if trade_at == "종가":
-                    # [수정] 순차적 포트폴리오 리밸런싱 (Natural Transition) 종가 처리
-                    if smart_params and smart_params.get('use_sequential', True):
-                        is_turbo_mode = (effective_lev_asset == target_group[2])
-                        
-                        # 1. 현재 자산 평가
-                        h_vals = {t: holdings[t] * prices[t] for t in holdings if t in prices}
-                        curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
-                        
-                        # 2. 목표 레버리지 총액
-                        target_lev_val = etf_funds * target_lev_pct
-                        
-                        # 가중치 초기화
-                        new_h_vals = {t: 0.0 for t in holdings}
-                        
-                        if curr_total_lev_val > target_lev_val + 0.01:
-                            # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
-                            new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
-                            rem = target_lev_val - new_h_vals[target_group[1]]
-                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
-                        else:
-                            # 증액(Buy) 상황: 기존 레버리지 자산들을 유지하며 부족분만 목표 자산으로 충전
-                            # [신규] 100% 레버리지 구간 '순차적 업그레이드' 로직 (S1:30%, S2:70%)
-                            tqqq_cap = target_lev_val
-                            if target_lev_val > etf_funds * 0.9 and effective_lev_asset == target_group[2]:
-                                if new_stage == 1: tqqq_cap = 0.30 * target_lev_val
-                                elif new_stage == 2: tqqq_cap = 0.70 * target_lev_val
+                    # [수정] 순차적 포트폴리오 관리 (상시 활성화)
+                    h_vals = {t: holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates}
+                    curr_total_lev_val = sum(h_vals.values())
+                    
+                    target_lev_val = etf_funds * target_lev_pct
+                    new_h_vals = {t: 0.0 for t in holdings}
 
-                            # 1. TQQQ 보존 및 업그레이드 (Cap 한도 내)
-                            if effective_lev_asset == target_group[2]:
-                                new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
-                            else:
-                                new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
-                            
-                            # 2. QLD 보전 및 충전 (남은 비중 한도 내)
-                            rem = target_lev_val - new_h_vals[target_group[2]]
-                            new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
-                            
-                            # 3. 최종 부족분 충전 (현재 시장 타겟 자산으로)
-                            rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
-                            if rem > 0:
-                                new_h_vals[effective_lev_asset] += rem
-                        
-                        # 3. 나머지는 Base 자산
-                        allocated_lev = sum(new_h_vals.values())
-                        new_h_vals[base_asset] = etf_funds - allocated_lev
-                        
-                        for t in holdings:
-                            if t in prices and prices[t] > 0:
-                                holdings[t] = new_h_vals.get(t, 0) / prices[t]
-                            else:
-                                holdings[t] = 0
+                    if curr_total_lev_val > target_lev_val + 0.01:
+                        # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
+                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
+                        rem = target_lev_val - new_h_vals[target_group[1]]
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
                     else:
-                        # [기존] 표준 리벨런싱 (단일 자산 올인)
-                        # [추가] 매도 시에는 자산 성격 유지 (Case 3 대응)
-                        # 현재 보유한 레버리지 자산 찾기
-                        curr_lev_asset = next((t for t in target_group[1:] if holdings.get(t,0) > 0), effective_lev_asset)
-                        
-                        # 매도 상황(감축)이면 현재 자산 유지, 매수(증액) 상황이면 목표 자산(effective_lev_asset) 사용
-                        active_asset = curr_lev_asset if current_lev_pct > target_lev_pct + 0.01 else effective_lev_asset
-                        
-                        for t in list(holdings.keys()): holdings[t] = 0
-                        if active_asset == base_asset:
-                            holdings[base_asset] = etf_funds / prices[base_asset]
+                        # 증액(Buy) 상황: 기존 레버리지 자산들을 유지하며 부족분만 목표 자산으로 충전
+                        # [신규] 100% 레버리지 구간 '순차적 업그레이드' 로직 (S1:30%, S2:70%)
+                        tqqq_cap = target_lev_val
+                        if target_lev_val > etf_funds * 0.9 and effective_lev_asset == target_group[2]:
+                            if new_stage == 1: tqqq_cap = 0.30 * target_lev_val
+                            elif new_stage == 2: tqqq_cap = 0.70 * target_lev_val
+
+                        # 1. TQQQ 보존 및 업그레이드 (Cap 한도 내)
+                        if effective_lev_asset == target_group[2]:
+                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
                         else:
-                            holdings[active_asset] = (etf_funds * target_lev_pct) / prices[active_asset]
-                            holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
+                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
+                        
+                        # 2. QLD 보전 및 충전 (남은 비중 한도 내)
+                        rem = target_lev_val - new_h_vals[target_group[2]]
+                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
+                        
+                        # 3. 최종 부족분 충전 (현재 시장 타겟 자산으로)
+                        rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
+                        if rem > 0:
+                            new_h_vals[effective_lev_asset] += rem
+                    
+                    # 3. 나머지는 Base 자산
+                    allocated_lev = sum(new_h_vals.values())
+                    new_h_vals[base_asset] = max(0, etf_funds - allocated_lev)
+                    
+                    # 수량 업데이트
+                    for t in check_targets:
+                        holdings[t] = new_h_vals.get(t, 0) / prices[t] if t in prices and prices[t] > 0 else 0
                     
                     current_planned_asset, rebalance_stage = new_planned, new_stage
-                    if trade_at == "종가":
-                        last_entry_price = prices[base_asset]
-                        # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
-                        cash = current_total_val * cash_ratio
-                        current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
+                    last_entry_price = prices[base_asset]
+                    # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
+                    cash = current_total_val * cash_ratio
+                    current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
                 else:
                     # 익일 시가 대기
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned}
@@ -765,7 +721,7 @@ class StrategyEngine:
                 if delay_reason.startswith("MA"):
                     trade_label = f"지연({delay_reason}:{rsi:.1f})"
                 else:
-                    trade_label = f"지연(시그널결합)"
+                    trade_label = "지연"
             elif rebalance_stage in [1, 2]:
                 trade_label = f"진행중(S{rebalance_stage})"
             else:
@@ -1731,8 +1687,7 @@ class GoldenStrategyApp:
             with st.sidebar.expander("가속/탈출 파라미터"):
                 v_exit = st.slider("VIX 도망점 (Safety)", 20, 50, 31)
                 r_turbo = st.slider("RSI 가속점 (Turbo)", 20, 40, 31)
-                use_sequential = st.checkbox("순차적 포트폴리오 관리 (자산 유지/우선 매도)", value=True, help="가속 시 2배수를 3배수로 스왑하고, 매도 시 3배수를 우선 매도하는 자연스러운 자산 이동을 적용합니다.")
-                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo, 'use_sequential': use_sequential})
+                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
         
         # [신규] 리스크 방어 모드 설정 (가변 RSI 매수 제한)
         st.sidebar.subheader("🛡️ 리스크 관리")
@@ -1748,8 +1703,6 @@ class GoldenStrategyApp:
                 p_r3 = st.slider("3단계 매수 RSI", 15, 40, 30)
                 smart_params.update({'panic_rsi_s1': p_r1, 'panic_rsi_s2': p_r2, 'panic_rsi_s3': p_r3})
                 
-        couple_signal = st.sidebar.checkbox("추가 매매 시 시그널 결합", value=False, help="2·3단계 리밸런싱 시에도 가격 조건과 함께 보조지표 시그널이 충족되어야 합나다.")
-        smart_params.update({'couple_signal': couple_signal})
         st.sidebar.markdown("---")
 
         # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
