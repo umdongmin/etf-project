@@ -629,9 +629,16 @@ class StrategyEngine:
                 # 3. 동일 자산 내 추가 단계 진행 (가격 변동 OR MACD 데드크로스 가속)
                 is_accelerated_sell = False
                 # is_accelerated_sell = (current_planned_asset == base_asset and sell_cond_5)
-                if price_trigger or is_accelerated_sell:
+                # [수정] 가격 트리거 방향성 및 모드 일관성 체크
+                # 1. 매수(증액) 중: 현재 타고 있는 말(current_planned_asset)과 지금 타야 하는 말(effective_lev_asset)이 같을 때만 허용
+                # 2. 매도(감축) 중: 리스크 관리가 최우선이므로 모드와 상관없이 가격 조건 맞으면 즉시 단계 진행
+                is_buy_process = (current_planned_asset != base_asset)
+                is_mode_consistent = (current_planned_asset == effective_lev_asset)
+                
+                # 매도 중이거나, 매수 중이면서 모드가 일치할 때만 가격 트리거 작동
+                if ((price_trigger and (not is_buy_process or is_mode_consistent)) or is_accelerated_sell):
                     new_stage = rebalance_stage + 1
-                    target_lev_pct = (0.70 if new_stage == 2 else 1.0) if current_planned_asset != base_asset else (0.30 if new_stage == 2 else 0.0)
+                    target_lev_pct = (0.70 if new_stage == 2 else 1.0) if is_buy_process else (0.30 if new_stage == 2 else 0.0)
                     rebalance_cause = "MACD데드크로스집행" if is_accelerated_sell else "가격조건"
                     rebalance_needed = True
 
