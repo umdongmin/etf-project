@@ -6,45 +6,14 @@ st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="w
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 import os
 import yfinance as yf
 import requests
 import datetime
-import matplotlib.dates as mdates
 import platform
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
-import matplotlib.font_manager as fm
-
-# 한글 폰트 설정 (운영체제별)
-def set_korean_font():
-    sys_name = platform.system()
-    if sys_name == 'Windows':
-        plt.rcParams['font.family'] = 'Malgun Gothic'
-    elif sys_name == 'Darwin': # macOS
-        plt.rcParams['font.family'] = 'AppleGothic'
-    else: # Linux (Streamlit Cloud 등)
-        # 나눔 폰트 설치 시도 확인 및 가용한 한글 폰트 탐색
-        available_fonts = [f.name for f in fm.fontManager.ttflist]
-        if 'NanumGothic' in available_fonts:
-            plt.rcParams['font.family'] = 'NanumGothic'
-        elif 'NanumBarunGothic' in available_fonts:
-            plt.rcParams['font.family'] = 'NanumBarunGothic'
-        elif 'DejaVu Sans' in available_fonts:
-            plt.rcParams['font.family'] = 'DejaVu Sans' # 최후의 보루
-        else:
-            # 폰트 경로 직접 탐색 (Debian/Ubuntu 계열)
-            nanum_path = '/usr/share/fonts/truetype/nanum/NanumGothic.ttf'
-            if os.path.exists(nanum_path):
-                fm.fontManager.addfont(nanum_path)
-                plt.rcParams['font.family'] = 'NanumGothic'
-            else:
-                st.warning("⚠️ 차트 한글 폰트를 찾을 수 없습니다. 배포 환경에서 나눔 폰트 설치가 필요할 수 있습니다.")
-
-set_korean_font()
-plt.rcParams['axes.unicode_minus'] = False # 마이너스 기호 깨짐 방지
 
 # --- Performance Metrics Logic (Merged from backtest.py) ---
 
@@ -891,7 +860,7 @@ class MarketView:
 class BacktestView:
     """백테스트 결과 표시 UI 구성 클래스"""
     @staticmethod
-    def render_results(golden_history, bh_histories, base_asset, leverage_asset):
+    def render_results(golden_history, bh_histories, base_asset, leverage_asset, smart_params=None):
         if golden_history.empty:
             st.warning("⚠️ 선택하신 기간에 대한 백테스트 결과가 없습니다. (자산 상장일 이전이거나 데이터 수집 오류)")
             return
@@ -934,13 +903,89 @@ class BacktestView:
             st.metric("승률 (일별)", f"{s_m['Win_Rate']:.1%}", help="전체 거래일 중 수익이 난 날의 비중입니다.")
             st.metric("손익비", f"{s_m['Profit_Factor']:.2f}", help="총 이익을 총 손실로 나눈 값입니다. (1.0 이상이면 수익적)")
         
-        st.subheader("성과 비교 차트")
-        fig, ax = plt.subplots(figsize=(10, 5))
-        for k, v in bh_histories.items(): ax.plot(v['Value']/10000, label=k, alpha=0.5)
-        ax.plot(golden_history['Value']/10000, label='Strategy', linewidth=2, color='blue')
-        ax.legend(); ax.grid(True, alpha=0.3)
-        st.pyplot(fig, clear_figure=True)
-        plt.close(fig)
+        st.subheader("성과 비교 차트 (상세 분석)")
+        fig = go.Figure()
+        
+        # 벤치마크 데이터 추가
+        for k, v in bh_histories.items():
+            fig.add_trace(go.Scatter(x=v.index, y=v['Value']/10000, name=k, opacity=0.5, line=dict(width=1.5)))
+        
+        # 전략 데이터 추가
+        fig.add_trace(go.Scatter(x=golden_history.index, y=golden_history['Value']/10000, name='Strategy', line=dict(color='blue', width=2.5)))
+        
+        # 마커 데이터 준비
+        v_exit = smart_params.get('vix_exit', 29) if smart_params else 29
+        r_turbo = smart_params.get('rsi_turbo', 31) if smart_params else 31
+        
+        buy_pts = golden_history[golden_history['Trade_Label'].str.contains('매수', na=False)]
+        sell_pts = golden_history[golden_history['Trade_Label'].str.contains('매도', na=False)]
+        
+        # 일반 마커와 특수 마커 분류
+        safety_sells = sell_pts[sell_pts['VIX'] >= v_exit] if 'VIX' in sell_pts.columns else pd.DataFrame()
+        normal_sells = sell_pts.drop(safety_sells.index)
+        
+        turbo_buys = buy_pts[buy_pts['RSI'] <= r_turbo] if 'RSI' in buy_pts.columns else pd.DataFrame()
+        normal_buys = buy_pts.drop(turbo_buys.index)
+
+        # 1. 일반 매수/매도 마커 추가
+        if not normal_buys.empty:
+            fig.add_trace(go.Scatter(x=normal_buys.index, y=normal_buys['Value']/10000, mode='markers', 
+                                     name='Normal Buy', marker=dict(symbol='triangle-up', size=8, color='green', opacity=0.6)))
+        if not normal_sells.empty:
+            fig.add_trace(go.Scatter(x=normal_sells.index, y=normal_sells['Value']/10000, mode='markers', 
+                                     name='Normal Sell', marker=dict(symbol='triangle-down', size=8, color='red', opacity=0.6)))
+            
+        # 2. 특수 마커 (Turbo Buy / Safety Sell) 강조 추가
+        if not turbo_buys.empty:
+            fig.add_trace(go.Scatter(x=turbo_buys.index, y=turbo_buys['Value']/10000, mode='markers', 
+                                     name='Turbo Buy ▲', marker=dict(symbol='triangle-up', size=14, color='blue', line=dict(color='white', width=1))))
+        if not safety_sells.empty:
+            fig.add_trace(go.Scatter(x=safety_sells.index, y=safety_sells['Value']/10000, mode='markers', 
+                                     name='Safety Sell ▼', marker=dict(symbol='triangle-down', size=14, color='crimson', line=dict(color='white', width=1))))
+
+        fig.update_layout(
+            template='plotly_white',
+            hovermode='x unified',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=0, r=0, t=30, b=0),
+            xaxis_title="날짜",
+            yaxis_title="누적 수익 (배수)",
+            height=450
+        )
+
+        # [신규] 배경 하이라이트 및 범례 추가
+        if smart_params:
+            v_exit = smart_params.get('vix_exit', 29)
+            r_turbo = smart_params.get('rsi_turbo', 31)
+            
+            # 범례용 더미 트레이스
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
+                                     marker=dict(size=10, color='red', opacity=0.2),
+                                     name='Safety Mode (VIX↑)', showlegend=True))
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
+                                     marker=dict(size=10, color='blue', opacity=0.2),
+                                     name='Turbo Mode (RSI↓)', showlegend=True))
+
+            def add_backtest_vrects(df, mask, color):
+                intervals = []
+                start = None
+                for i in range(len(df)):
+                    if mask.iloc[i] and start is None:
+                        start = df.index[i]
+                    elif not mask.iloc[i] and start is not None:
+                        intervals.append((start, df.index[i-1]))
+                        start = None
+                if start is not None:
+                    intervals.append((start, df.index[-1]))
+                for s, e in intervals:
+                    fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=0.08, line_width=0, layer="below")
+
+            if 'VIX' in golden_history.columns:
+                add_backtest_vrects(golden_history, golden_history['VIX'] >= v_exit, "red")
+            if 'RSI' in golden_history.columns:
+                add_backtest_vrects(golden_history, golden_history['RSI'] <= r_turbo, "blue")
+
+        st.plotly_chart(fig, use_container_width=True)
         
         # [신규] 월간 수익률 히트맵 (비교 기능 포함)
         BacktestView.render_returns_heatmap(golden_history, bh_histories)
@@ -1016,30 +1061,33 @@ class BacktestView:
             pivot['Annual'] = annual_ret.values
             return pivot
 
-        def plot_it(pivot, title, ax, is_diff=False):
-            vmin, vmax = (-10, 10) if not is_diff else (-5, 5)
-            cmap = 'RdYlGn' if not is_diff else 'PiYG'
+        def render_plotly_heatmap(pivot, title, colorscale='RdYlGn'):
+            fig = go.Figure(data=go.Heatmap(
+                z=pivot.iloc[:, :-1].values,
+                x=['1M', '2M', '3M', '4M', '5M', '6M', '7M', '8M', '9M', '10M', '11M', '12M'],
+                y=pivot.index,
+                colorscale=colorscale,
+                zmin=-10, zmax=10,
+                text=pivot.iloc[:, :-1].applymap(lambda x: f"{x:.1f}%" if not np.isnan(x) else ""),
+                texttemplate="%{text}",
+                hoverinfo="all"
+            ))
             
-            im = ax.imshow(pivot.iloc[:, :-1], cmap=cmap, aspect='auto', vmin=vmin, vmax=vmax)
-            ax.set_xticks(np.arange(12))
-            ax.set_xticklabels(['1M', '2M', '3M', '4M', '5M', '6M', '7M', '8M', '9M', '10M', '11M', '12M'])
-            ax.set_yticks(np.arange(len(pivot)))
-            ax.set_yticklabels(pivot.index)
-            
-            for i in range(len(pivot)):
-                for j in range(12):
-                    val = pivot.iloc[i, j]
-                    if not np.isnan(val):
-                        color = 'white' if abs(val) > 7 else 'black'
-                        ax.text(j, i, f'{val:.1f}%', ha='center', va='center', color=color, fontsize=8)
-                ann_val = pivot.iloc[i, -1]
-                ax.text(12.2, i, f'{ann_val:.1f}%', ha='left', va='center', weight='bold', color='blue' if ann_val > 0 else 'red', fontsize=9)
-            
-            ax.set_title(title, fontsize=12, pad=10, weight='bold')
-            ax.spines[:].set_visible(False)
-            ax.set_xticks(np.arange(13)-0.5, minor=True); ax.set_yticks(np.arange(len(pivot)+1)-0.5, minor=True)
-            ax.grid(which="minor", color="w", linestyle='-', linewidth=2)
-            ax.tick_params(which="minor", bottom=False, left=False)
+            # 연간 합산 데이터 추가
+            for i, year in enumerate(pivot.index):
+                ann = pivot.iloc[i, -1]
+                fig.add_annotation(x=12.2, y=year, text=f"<b>{ann:.1f}%</b>", 
+                                   showarrow=False, font=dict(color="blue" if ann > 0 else "red"))
+
+            fig.update_layout(
+                title=title,
+                xaxis_title="Month",
+                yaxis_title="Year",
+                height=300 + (len(pivot) * 20),
+                template='plotly_white',
+                margin=dict(l=50, r=50, t=50, b=50)
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
         try:
             b_name = list(bh_histories.keys())[0] if bh_histories else "Benchmark"
@@ -1056,21 +1104,12 @@ class BacktestView:
             s_view = s_pivot.loc[common_years]
             b_view = b_pivot.loc[common_years] if b_pivot is not None else None
             
-            num_charts = 3 if b_view is not None else 1
-            fig, axes = plt.subplots(num_charts, 1, figsize=(12, (len(common_years) * 0.7 + 1.5) * num_charts))
-            if num_charts == 1: axes = [axes]
-            
-            plot_it(s_view, f"🔥 My Strategy Monthly Returns (%)", axes[0])
+            render_plotly_heatmap(s_view, f"🔥 My Strategy ({leverage_asset}) Monthly Returns (%)")
             if b_view is not None:
-                plot_it(b_view, f"📊 Benchmark ({b_name}) Monthly Returns (%)", axes[1])
+                render_plotly_heatmap(b_view, f"📊 Benchmark ({b_name}) Monthly Returns (%)")
                 diff_view = s_view - b_view
-                plot_it(diff_view, "✨ Strategy Alpha (Strategy - Benchmark) (%)", axes[2], is_diff=True)
-            
-            plt.tight_layout(pad=3.0)
-            st.pyplot(fig, clear_figure=True)
-            plt.close(fig)
-            
-            if b_view is not None:
+                diff_view['Annual'] = s_view['Annual'] - b_view['Annual']
+                render_plotly_heatmap(diff_view, "🆚 Alpha (Strategy - Benchmark) (%)", colorscale='PiYG')
                 st.caption(f"※ Alpha 매트릭스: [내 전략 수익률] - [{b_name} 수익률]. 양수(초록)일수록 시장 대비 초과 성과를 기록했음을 의미합니다.")
 
         except Exception as e:
@@ -1088,23 +1127,34 @@ class BacktestView:
             st.info("시뮬레이션을 위한 데이터가 부족합니다.")
             return
             
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig = go.Figure()
+        
+        # 시뮬레이션 경로 추가 (opacity로 겹침 표현)
         for i in range(sim_data.shape[1]):
-            ax.plot(sim_data[:, i], color='gray', alpha=0.1, linewidth=1)
+            fig.add_trace(go.Scatter(x=list(range(sim_data.shape[0])), y=sim_data[:, i], 
+                                     line=dict(color='gray', width=0.5), opacity=0.1, showlegend=False))
             
         # 백분위수 계산
         p5 = np.percentile(sim_data[-1, :], 5)
         p50 = np.percentile(sim_data[-1, :], 50)
         p95 = np.percentile(sim_data[-1, :], 95)
-        
-        ax.axhline(sum(sim_data[0,:])/sim_data.shape[1], color='red', linestyle='--', label='Current', alpha=0.5)
-        ax.plot(np.median(sim_data, axis=1), color='blue', linewidth=2, label='Median (50th)')
-        ax.set_title("Future Asset Value Projection (1 Year)")
-        ax.set_ylabel("Portfolio Value ($)")
-        ax.legend()
-        ax.grid(True, alpha=0.2)
-        st.pyplot(fig, clear_figure=True)
-        plt.close(fig)
+        median_path = np.median(sim_data, axis=1)
+        start_avg = sum(sim_data[0,:])/sim_data.shape[1]
+
+        fig.add_trace(go.Scatter(x=list(range(sim_data.shape[0])), y=median_path, 
+                                 name='Median (50th)', line=dict(color='blue', width=2.5)))
+        fig.add_hline(y=start_avg, line_dash="dash", line_color="red", opacity=0.5, annotation_text="Current")
+
+        fig.update_layout(
+            title="Future Asset Value Projection (1 Year)",
+            template='plotly_white',
+            xaxis_title="거래일 (Days)",
+            yaxis_title="Portfolio Value ($)",
+            height=500,
+            margin=dict(l=20, r=20, t=50, b=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        )
+        st.plotly_chart(fig, use_container_width=True)
         
         # 통계 요약
         c1, c2, c3 = st.columns(3)
@@ -1344,20 +1394,20 @@ class HistoryLabView:
         plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg}).reindex(order).fillna(0)
         plot_df.index = [f"{i}년차" for i in order]
 
-        fig, ax = plt.subplots(figsize=(10, 5))
-        plot_df.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
-        ax.set_title("Strategy vs QQQ by Election Cycle Year")
-        ax.set_ylabel("Average Annual Return (%)")
-        ax.axhline(0, color='black', linewidth=0.8)
-        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['내 전략'], name='내 전략', marker_color='#00c853', text=plot_df['내 전략'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['나스닥(QQQ)'], name='나스닥(QQQ)', marker_color='#66b3ff', text=plot_df['나스닥(QQQ)'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
         
-        # 값 표시
-        for i in range(len(plot_df)):
-            ax.text(i - 0.15, plot_df.iloc[i, 0] + 1, f"{plot_df.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
-            ax.text(i + 0.15, plot_df.iloc[i, 1] + 1, f"{plot_df.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
-            
-        st.pyplot(fig, clear_figure=True)
-        plt.close(fig)
+        fig.update_layout(
+            title="Strategy vs QQQ by Election Cycle Year",
+            template='plotly_white',
+            xaxis_title="임기 년차",
+            yaxis_title="Average Annual Return (%)",
+            barmode='group',
+            height=450,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        )
+        st.plotly_chart(fig, use_container_width=True)
         
         st.markdown("""
         *   **1년차 (취임)**: 신정부 정책 기대감 반영
@@ -1407,31 +1457,19 @@ class HistoryLabView:
         col1, col2 = st.columns([1, 2])
         with col1:
             st.write("**평균 성과 비교**")
-            fig, ax = plt.subplots(figsize=(6, 8))
-            avg_comp.plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
-            ax.set_ylabel("Avg Annual Return (%)")
-            
-            for i in range(len(avg_comp)):
-                ax.text(i - 0.15, avg_comp.iloc[i, 0] + (0.5 if avg_comp.iloc[i, 0] >= 0 else -1.5), f"{avg_comp.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
-                ax.text(i + 0.15, avg_comp.iloc[i, 1] + (0.5 if avg_comp.iloc[i, 1] >= 0 else -1.5), f"{avg_comp.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
-                
-            st.pyplot(fig, clear_figure=True)
-            plt.close(fig)
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=avg_comp.index, y=avg_comp['내 전략'], name='내 전략', marker_color='#00c853', text=avg_comp['내 전략'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
+            fig.add_trace(go.Bar(x=avg_comp.index, y=avg_comp[f'시장({b_name})'], name=f'시장({b_name})', marker_color='#66b3ff', text=avg_comp[f'시장({b_name})'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
+            fig.update_layout(template='plotly_white', barmode='group', height=400, showlegend=False, margin=dict(l=20, r=20, t=20, b=20))
+            st.plotly_chart(fig, use_container_width=True)
             
         with col2:
             st.write(f"**역대 중간선거 연도별 성과 비교 (vs {b_name})**")
-            fig, ax = plt.subplots(figsize=(10, 5))
-            mid_yearly.rename(columns={b_name: f'시장({b_name})'}).plot(kind='bar', ax=ax, color=['#00c853', '#66b3ff'], alpha=0.8)
-            ax.axhline(0, color='black', linewidth=0.8)
-            ax.set_ylabel("Annual Return (%)")
-            ax.set_xticklabels([f"{y}년" for y in mid_yearly.index], rotation=0)
-            
-            for i in range(len(mid_yearly)):
-                ax.text(i - 0.15, mid_yearly.iloc[i, 0] + (1 if mid_yearly.iloc[i, 0] >= 0 else -3), f"{mid_yearly.iloc[i, 0]:.1f}%", ha='center', fontsize=9, weight='bold', color='green')
-                ax.text(i + 0.15, mid_yearly.iloc[i, 1] + (1 if mid_yearly.iloc[i, 1] >= 0 else -3), f"{mid_yearly.iloc[i, 1]:.1f}%", ha='center', fontsize=9, weight='bold', color='blue')
-                
-            st.pyplot(fig, clear_figure=True)
-            plt.close(fig)
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=mid_yearly.index.map(str), y=mid_yearly['Strategy'], name='내 전략', marker_color='#00c853', text=mid_yearly['Strategy'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
+            fig.add_trace(go.Bar(x=mid_yearly.index.map(str), y=mid_yearly[b_name], name=f'시장({b_name})', marker_color='#66b3ff', text=mid_yearly[b_name].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
+            fig.update_layout(template='plotly_white', barmode='group', height=400, margin=dict(l=20, r=20, t=20, b=20), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
+            st.plotly_chart(fig, use_container_width=True)
 
     @staticmethod
     def render_seasonality(strategy_hist, bench_hist, b_name="QQQ"):
@@ -1458,30 +1496,29 @@ class HistoryLabView:
         
         plot_df = pd.DataFrame({'내 전략': s_avg, '나스닥(QQQ)': b_avg})
         
-        fig, ax1 = plt.subplots(figsize=(12, 6))
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
         
-        # 월간 수익률 막대 (그룹형)
-        plot_df.plot(kind='bar', ax=ax1, color=['#00c853', '#66b3ff'], alpha=0.7)
-        ax1.set_ylabel("Avg Monthly Return (%)", color='black')
-        ax1.set_xticks(range(12))
-        ax1.set_xticklabels([f"{m}월" for m in range(1, 13)], rotation=0)
-        ax1.axhline(0, color='black', linewidth=0.8)
+        # 월간 수익률 막대
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['내 전략'], name='내 전략 (Avg Ret)', marker_color='#00c853', opacity=0.7), secondary_y=False)
+        fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['나스닥(QQQ)'], name='나스닥(QQQ) (Avg Ret)', marker_color='#66b3ff', opacity=0.7), secondary_y=False)
         
         # 전략 승률 라인
-        ax2 = ax1.twinx()
-        ax2.plot(range(12), s_win.values, color='#ff1744', marker='o', linewidth=2.5, label='내 전략 승률')
-        ax2.set_ylabel("Strategy Win Rate (%)", color='#ff1744')
-        ax2.set_ylim(40, 70)
+        fig.add_trace(go.Scatter(x=s_win.index, y=s_win.values, name='내 전략 승률', line=dict(color='#ff1744', width=3), marker=dict(size=8)), secondary_y=True)
         
-        # 범례 합치기
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+        fig.update_layout(
+            title=f"Strategy vs {b_name} Seasonality Analysis",
+            template='plotly_white',
+            xaxis=dict(tickmode='array', tickvals=list(range(1, 13)), ticktext=[f"{m}월" for m in range(1, 13)]),
+            barmode='group',
+            height=500,
+            hovermode='x unified',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+        )
         
-        ax1.set_title(f"Strategy vs {b_name} Seasonality Analysis")
-        ax1.grid(axis='y', linestyle='--', alpha=0.3)
-        st.pyplot(fig, clear_figure=True)
-        plt.close(fig)
+        fig.update_yaxes(title_text="Avg Monthly Return (%)", secondary_y=False)
+        fig.update_yaxes(title_text="Strategy Win Rate (%)", secondary_y=True, range=[40, 80])
+        
+        st.plotly_chart(fig, use_container_width=True)
         
         st.info("💡 **전략의 파란색/초록색 막대**가 QQQ보다 높다면, 해당 월에 시장 대비 초과 수익을 내는 경향이 있음을 의미합니다.")
 
@@ -1508,78 +1545,98 @@ class ChartView:
             st.warning(f"{selected_year}년에 해당하는 충분한 데이터가 없습니다.")
             return
 
-        # 차트 생성 (3개 패널)
-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
-        plt.subplots_adjust(hspace=0.1)
-        
-        # 1. 가격 차트 필드
-        ax1.plot(history.index, history['Close'], color='#66b3ff', label=f'{base_asset} Price', alpha=0.8, linewidth=1.5)
-        panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
-        if f'SMA{panic_ma}' in history.columns:
-            ax1.plot(history.index, history[f'SMA{panic_ma}'], color='#f39c12', label=f'SMA{panic_ma}', alpha=0.6, linestyle='--')
-        ax1.set_title(f"{selected_year}년 {base_asset} 흐름 및 매매 시그널 (MA{panic_ma} 기준)", fontsize=14, weight='bold')
-        ax1.set_ylabel("Price ($)")
-        ax1.grid(True, linestyle='--', alpha=0.4)
-        
-        # 매매 마커 표시
-        buy_points = history[history['Trade_Label'].str.contains('매수', na=False)]
-        sell_points = history[history['Trade_Label'].str.contains('매도', na=False)]
-        delay_points = history[history['Trade_Label'].str.contains('지연', na=False)]
-        
-        if not buy_points.empty:
-            ax1.scatter(buy_points.index, buy_points['Close'], marker='^', color='green', s=100, label='Buy (Stage)', zorder=5)
-        if not sell_points.empty:
-            ax1.scatter(sell_points.index, sell_points['Close'], marker='v', color='red', s=100, label='Sell (Stage)', zorder=5)
-        
-        # 지연 구간 하이라이트 (SMA200-RSI 제약)
-        has_delay = False
-        panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
-        for idx in delay_points.index:
-            ax1.axvspan(idx, idx + datetime.timedelta(days=1), color='yellow', alpha=0.3, label=f'매수 지연(MA{panic_ma}-RSI)' if not has_delay else "")
-            has_delay = True
+        # [개편] Plotly 기반 인터랙티브 통합 차트 생성
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.05, 
+                            row_heights=[0.5, 0.25, 0.25],
+                            subplot_titles=(f"{base_asset} 가격 및 매매 시그널", "VIX (공포 지수)", "RSI (강도 지수)"))
 
-        ax1.legend(loc='upper left', fontsize=9)
-
-        # 2. VIX 차트 필드
-        ax2.plot(history.index, history['VIX'], color='#ff9999', label='VIX Index', linewidth=1.5)
         v_exit = smart_params.get('vix_exit', 29) if smart_params else 29
         p_vix = smart_params.get('panic_vix', 35) if smart_params else 35
-        ax2.axhline(v_exit, color='red', linestyle='--', alpha=0.6, label=f'VIX Exit ({v_exit})')
-        ax2.axhline(p_vix, color='orange', linestyle='-', alpha=0.8, label=f'Panic Threshold ({p_vix})')
-        ax2.fill_between(history.index, history['VIX'], p_vix, where=(history['VIX'] >= p_vix), color='red', alpha=0.2)
-        ax2.set_ylabel("VIX")
-        ax2.grid(True, linestyle='--', alpha=0.4)
-        ax2.legend(loc='upper left', fontsize=9)
-
-        # 3. RSI 차트 필드
-        ax3.plot(history.index, history['RSI'], color='#9b59b6', label='RSI (14)', linewidth=1.2)
         r_turbo = smart_params.get('rsi_turbo', 31) if smart_params else 31
-        p_r1 = smart_params.get('panic_rsi_s1', 32) if smart_params else 32
-        p_r2 = smart_params.get('panic_rsi_s2', 32) if smart_params else 32
-        p_r3 = smart_params.get('panic_rsi_s3', 30) if smart_params else 30
-        
-        ax3.axhline(70, color='red', linestyle='--', alpha=0.4)
-        ax3.axhline(35, color='green', linestyle='--', alpha=0.4)
-        ax3.axhline(r_turbo, color='blue', linestyle='--', alpha=0.6, label=f'Turbo ({r_turbo})')
-        ax3.axhline(p_r1, color='orange', linestyle=':', alpha=0.6, label=f'Panic S1 ({p_r1})')
-        ax3.axhline(p_r3, color='purple', linestyle='-', alpha=0.8, label=f'Panic S3 ({p_r3})')
-        
-        ax3.fill_between(history.index, history['RSI'], 30, where=(history['RSI'] <= 30), color='green', alpha=0.1)
-        ax3.set_ylabel("RSI")
-        ax3.set_ylim(0, 100)
-        ax3.grid(True, linestyle='--', alpha=0.4)
-        ax3.legend(loc='upper left', fontsize=9)
-        
-        plt.setp(ax1.get_xticklabels(), visible=False)
-        plt.setp(ax2.get_xticklabels(), visible=False)
-        
-        # X축 날짜 포맷
-        ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-        ax3.xaxis.set_major_locator(mdates.MonthLocator())
-        plt.xticks(rotation=45)
+        panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
 
-        st.pyplot(fig, clear_figure=True)
-        plt.close(fig)
+        # 1. 가격 차트 (Row 1)
+        fig.add_trace(go.Scatter(x=history.index, y=history['Close'], name='Price', line=dict(color='#66b3ff', width=2)), row=1, col=1)
+        if f'SMA{panic_ma}' in history.columns:
+            fig.add_trace(go.Scatter(x=history.index, y=history[f'SMA{panic_ma}'], name=f'SMA{panic_ma}', line=dict(color='#f39c12', width=1, dash='dash')), row=1, col=1)
+
+        v_exit = smart_params.get('vix_exit', 29) if smart_params else 29
+        r_turbo = smart_params.get('rsi_turbo', 31) if smart_params else 31
+
+        # 매매 마커 분류
+        buy_pts = history[history['Trade_Label'].str.contains('매수', na=False)]
+        sell_pts = history[history['Trade_Label'].str.contains('매도', na=False)]
+        delay_pts = history[history['Trade_Label'].str.contains('지연', na=False)]
+
+        safety_sells = sell_pts[sell_pts['VIX'] >= v_exit]
+        normal_sells = sell_pts.drop(safety_sells.index)
+        
+        turbo_buys = buy_pts[buy_pts['RSI'] <= r_turbo]
+        normal_buys = buy_pts.drop(turbo_buys.index)
+
+        # 1. 일반 매매 마커
+        fig.add_trace(go.Scatter(x=normal_buys.index, y=normal_buys['Close'], mode='markers', name='Buy', marker=dict(symbol='triangle-up', size=10, color='green', opacity=0.7)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=normal_sells.index, y=normal_sells['Close'], mode='markers', name='Sell', marker=dict(symbol='triangle-down', size=10, color='red', opacity=0.7)), row=1, col=1)
+        
+        # 2. 특수 강조 마커 (Safety Sell / Turbo Buy)
+        fig.add_trace(go.Scatter(x=turbo_buys.index, y=turbo_buys['Close'], mode='markers', name='Turbo Buy ▲', marker=dict(symbol='triangle-up', size=15, color='blue', line=dict(color='white', width=1.5))), row=1, col=1)
+        fig.add_trace(go.Scatter(x=safety_sells.index, y=safety_sells['Close'], mode='markers', name='Safety Sell ▼', marker=dict(symbol='triangle-down', size=15, color='crimson', line=dict(color='white', width=1.5))), row=1, col=1)
+        
+        fig.add_trace(go.Scatter(x=delay_pts.index, y=delay_pts['Close'], mode='markers', name='Delayed', marker=dict(symbol='circle', size=8, color='yellow', opacity=0.5)), row=1, col=1)
+
+        # 2. VIX 차트 (Row 2)
+        fig.add_trace(go.Scatter(x=history.index, y=history['VIX'], name='VIX', line=dict(color='#ff9999', width=1.5)), row=2, col=1)
+        fig.add_hline(y=v_exit, line_dash="dash", line_color="red", annotation_text=f"Exit({v_exit})", row=2, col=1)
+        fig.add_hline(y=p_vix, line_color="orange", annotation_text=f"Panic({p_vix})", row=2, col=1)
+
+        # 3. RSI 차트 (Row 3)
+        fig.add_trace(go.Scatter(x=history.index, y=history['RSI'], name='RSI', line=dict(color='#9b59b6', width=1.5)), row=3, col=1)
+        fig.add_hline(y=70, line_dash="dot", line_color="red", opacity=0.3, row=3, col=1)
+        fig.add_hline(y=35, line_dash="dot", line_color="green", opacity=0.3, row=3, col=1)
+        fig.add_hline(y=r_turbo, line_dash="dash", line_color="blue", annotation_text=f"Turbo({r_turbo})", row=3, col=1)
+
+        # [핵심] 가속/대피 배경 하이라이트 (Shapes)
+        def add_mode_vrects(df, mask, color, label):
+            intervals = []
+            start = None
+            for i in range(len(df)):
+                if mask.iloc[i] and start is None:
+                    start = df.index[i]
+                elif not mask.iloc[i] and start is not None:
+                    intervals.append((start, df.index[i-1]))
+                    start = None
+            if start is not None:
+                intervals.append((start, df.index[-1]))
+            
+            for s, e in intervals:
+                fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=0.1, line_width=0, layer="below")
+
+        add_mode_vrects(history, history['VIX'] >= v_exit, "red", "Safety")
+        add_mode_vrects(history, history['RSI'] <= r_turbo, "blue", "Turbo")
+
+        # [신규] 범례용 더미 트레이스 추가
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
+                                 marker=dict(size=10, color='red', opacity=0.2),
+                                 name=f'Safety Mode (VIX ≥ {v_exit})', showlegend=True))
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
+                                 marker=dict(size=10, color='blue', opacity=0.2),
+                                 name=f'Turbo Mode (RSI ≤ {r_turbo})', showlegend=True))
+
+        fig.update_layout(
+            height=900,
+            template='plotly_white',
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            margin=dict(l=20, r=20, t=50, b=20)
+        )
+        
+        fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+        fig.update_yaxes(title_text="VIX", row=2, col=1)
+        fig.update_yaxes(title_text="RSI", row=3, col=1)
+
+        st.plotly_chart(fig, use_container_width=True)
         
         # 상세 데이터 표
         with st.expander("🔎 상세 시뮬레이션 데이터 보기"):
@@ -1776,7 +1833,7 @@ class GoldenStrategyApp:
             golden_history = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_d, end_d, params, trade_at, smart_params=smart_params)
             
         # 결과 렌더링
-        BacktestView.render_results(golden_history, bh_histories, base_asset, leverage_asset)
+        BacktestView.render_results(golden_history, bh_histories, base_asset, leverage_asset, smart_params=smart_params)
         st.info("💡 팁: '전략 분석기'에서 설정을 변경하면 즉시 백테스트 결과가 업데이트됩니다.")
 
 if __name__ == "__main__":

@@ -2,6 +2,6 @@ streamlit
 pandas
 numpy
 pandas-ta
-matplotlib
+plotly
 yfinance
 requests
