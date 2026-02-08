@@ -255,9 +255,15 @@ class StrategyEngine:
             combined = pd.concat([combined, macd], axis=1)
             combined['MACD'], combined['Signal_Line'] = combined['MACD_12_26_9'], combined['MACDs_12_26_9']
         
+        combined['MACD_Hist'] = combined['MACD'] - combined['Signal_Line']
+        
+        combined['MACD_Hist'] = combined['MACD'] - combined['Signal_Line']
+        combined['Prev2_MACD_Hist'] = combined['MACD_Hist'].shift(2)
+        
         combined['RSI_SMA'] = combined['RSI'].rolling(window=14).mean()
         combined['SMA200'] = combined['Close'].rolling(window=200).mean()
-        for col in ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200']:
+        combined['SMA60'] = combined['Close'].rolling(window=60).mean()
+        for col in ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist']:
             combined[f'Prev_{col}'] = combined[col].shift(1)
         
         combined['FG'] = combined['FG'].ffill().fillna(50)
@@ -280,6 +286,7 @@ class StrategyEngine:
 
         portfolio_value, cash = 10000.0, 10000.0 * cash_ratio
         current_planned_asset, rebalance_stage, last_entry_price = base_asset, 0, 0
+        peak_price, peak_macd = 0, 0
         holdings = {t: 0.0 for t in data_dict.keys()}
         
         # [수정] 첫날 가격이 NaN인 상황에 대비해 가장 빠른 유효가를 찾아 초기 주식 수 계산
@@ -327,32 +334,100 @@ class StrategyEngine:
                 cash = current_total_val * cash_ratio
                 etf_funds = current_total_val * (1 - cash_ratio)
                 
-                t_lev_pct = pending_rebalance['target_lev_pct']
-                current_planned_asset = pending_rebalance['planned']
+                t_lev_asset, t_lev_pct = pending_rebalance['planned'], pending_rebalance['target_lev_pct']
                 rebalance_stage = pending_rebalance['rebalance_stage']
                 
-                t_lev_asset, t_lev_pct = pending_rebalance['planned'], pending_rebalance['target_lev_pct']
-                for t in list(holdings.keys()): holdings[t] = 0
-                
-                # [수정] 자산 중복 오버라이트 방지 (동일 자산일 경우 100% 할당)
-                if t_lev_asset == base_asset:
-                    holdings[base_asset] = etf_funds / trade_prices[base_asset]
+                # [수정] 순차적 포트폴리오 리밸런싱 (Natural Transition) 익일 시가 처리
+                if smart_params and smart_params.get('use_sequential', True):
+                    is_turbo_mode = (t_lev_asset == target_group[2])
+                    
+                    # 1. 현재 자산 평가 (trade_prices 기준)
+                    h_vals = {t: holdings[t] * trade_prices[t] for t in holdings if t in trade_prices}
+                    curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
+                    
+                    # 2. 목표 레버리지 총액
+                    normalized_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
+                    target_lev_val = etf_funds * normalized_pct
+                    
+                    new_h_vals = {t: 0.0 for t in holdings}
+                    
+                    if curr_total_lev_val > target_lev_val + 0.01:
+                        # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
+                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
+                        rem = target_lev_val - new_h_vals[target_group[1]]
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
+                    else:
+                        # 증액(Buy) 상황
+                        if is_turbo_mode:
+                            # 가속(Turbo): QLD -> TQQQ 스왑 우선
+                            new_h_vals[target_group[2]] = h_vals.get(target_group[2], 0) # 기존 TQQQ 유지
+                            rem = target_lev_val - new_h_vals[target_group[2]]
+                            
+                            swap_n = min(h_vals.get(target_group[1], 0), rem)
+                            new_h_vals[target_group[2]] += swap_n
+                            rem -= swap_n
+                            
+                            from_b = min(h_vals.get(base_asset, 0), rem)
+                            new_h_vals[target_group[2]] += from_b
+                            
+                            # 남은 QLD 유지 (이론상 0)
+                            new_h_vals[target_group[1]] = h_vals.get(target_group[1], 0) - swap_n
+                        else:
+                            # 일반(Normal): TQQQ/QLD 유지 후 부족분 QLD 매수
+                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), target_lev_val)
+                            rem = target_lev_val - new_h_vals[target_group[2]]
+                            
+                            new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
+                            rem -= new_h_vals[target_group[1]]
+                            
+                            from_b = min(h_vals.get(base_asset, 0), rem)
+                            new_h_vals[target_group[1]] += from_b
+                    
+                    # 3. 나머지는 Base 자산
+                    allocated_lev = sum(new_h_vals.values())
+                    new_h_vals[base_asset] = etf_funds - allocated_lev
+                    
+                    # holdings 업데이트
+                    for t in holdings:
+                        if t in trade_prices and trade_prices[t] > 0:
+                            holdings[t] = new_h_vals.get(t, 0) / trade_prices[t]
+                        else:
+                            holdings[t] = 0
                 else:
-                    holdings[t_lev_asset] = (etf_funds * t_lev_pct) / trade_prices[t_lev_asset]
-                    holdings[base_asset] = (etf_funds * (1 - t_lev_pct)) / trade_prices[base_asset]
+                    # [기존] 표준 리밸런싱 (단일 자산 올인)
+                    for t in list(holdings.keys()): holdings[t] = 0
+                    l_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
+                    if t_lev_asset == base_asset:
+                        holdings[base_asset] = etf_funds / trade_prices[base_asset]
+                    else:
+                        holdings[t_lev_asset] = (etf_funds * l_pct) / trade_prices[t_lev_asset]
+                        holdings[base_asset] = (etf_funds * (1 - l_pct)) / trade_prices[base_asset]
                 
-                last_entry_price = data_dict[base_asset].loc[date, 'Open']
+                current_planned_asset = t_lev_asset
+                rebalance_stage = pending_rebalance['rebalance_stage']
+                last_entry_price = trade_prices[base_asset]
                 pending_rebalance = None # 처리 완료
             
             rsi, fg, vix, macd_val, signal_line, rsi_sma = row['RSI'], row['FG'], row['VIX'], row['MACD'], row['Signal_Line'], row['RSI_SMA']
+            macd_hist = row['MACD_Hist']
             bb_l, bb_u = row.get('BB_Lower', 0), row.get('BB_Upper', 0)
             prev_rsi, prev_rsi_sma, prev_macd, prev_signal_line = row['Prev_RSI'], row['Prev_RSI_SMA'], row['Prev_MACD'], row['Prev_Signal_Line']
+            prev_macd_hist = row['Prev_MACD_Hist']
+            prev2_macd_hist = row['Prev2_MACD_Hist']
+            
+            # [신규] 다이버전스용 고점 추적
+            if current_planned_asset != base_asset:
+                if price > peak_price:
+                    peak_price = price
+                    peak_macd = macd_val
+            else:
+                peak_price, peak_macd = 0, 0
             
             if params:
                 is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
                 is_rsi_dead_cross = (prev_rsi > prev_rsi_sma) and (rsi < rsi_sma)
-                is_macd_golden_cross = (prev_macd < prev_signal_line) and (macd_val > signal_line)
-                is_macd_dead_cross = (prev_macd > prev_signal_line) and (macd_val < signal_line)
+                is_macd_golden_cross = (prev_macd_hist < 0) and (macd_hist > 0)
+                is_macd_dead_cross = (prev_macd_hist > 0) and (macd_hist < 0)
                 
                 is_buy_signal = False
                 signal_reason = ""
@@ -372,7 +447,7 @@ class StrategyEngine:
                         cond &= (macd_val > prev_macd); active = True
                         reasons.append("MACD 상승")
                     if bp['macd_signal_below']: 
-                        cond &= (macd_val < signal_line); active = True
+                        cond &= (macd_hist < 0); active = True
                         reasons.append("MACD 시그널 하단")
                     if bp['macd_golden']: 
                         cond &= is_macd_golden_cross; active = True
@@ -403,7 +478,7 @@ class StrategyEngine:
                         cond &= (macd_val < prev_macd); active = True
                         reasons.append("MACD 하락")
                     if sp['macd_signal_above']: 
-                        cond &= (macd_val > signal_line); active = True
+                        cond &= (macd_hist > 0); active = True
                         reasons.append("MACD 시그널 상단")
                     if sp['macd_dead']: 
                         cond &= is_macd_dead_cross; active = True
@@ -422,7 +497,7 @@ class StrategyEngine:
                 is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
                 is_buy_signal = False
                 signal_reason = ""
-                if is_rsi_golden_cross and (macd_val > prev_macd) and (macd_val < signal_line):
+                if is_rsi_golden_cross and (macd_val > prev_macd) and (macd_hist < 0):
                     is_buy_signal = True
                     signal_reason = "기본(RSI골든크로스+MACD상승)"
                 elif (rsi < 35):
@@ -431,48 +506,63 @@ class StrategyEngine:
                 
                 sell_cond_1 = (rsi >= 70) and (rsi < prev_rsi)
                 is_rsi_dead_cross = (prev_rsi > prev_rsi_sma) and (rsi < rsi_sma)
-                sell_cond_2 = (macd_val > signal_line) and (macd_val < prev_macd) and is_rsi_dead_cross
-                sell_cond_3 = (prev_macd > prev_signal_line) and (macd_val < signal_line)
+                sell_cond_2 = (macd_hist > 0) and (macd_val < prev_macd) and is_rsi_dead_cross
+                # sell_cond_3 = (macd_hist > 0) and (prev_macd_hist > prev2_macd_hist) and (macd_hist < prev_macd_hist) 
+                # sell_cond_4 = (macd_hist > 0) and (price >= peak_price * 0.98) and (peak_price > 0) and (macd_val < peak_macd * 0.8)
+                sell_cond_5 = (prev_macd_hist > 0) and (macd_hist < 0)
                 
                 is_sell_signal = False
                 if sell_cond_1: 
                     is_sell_signal = True
-                    signal_reason = "기본(RSI과매수)"
+                    signal_reason = "기본(RSI꺾임)"
                 elif sell_cond_2: 
                     is_sell_signal = True
                     signal_reason = "기본(RSI데드크로스+MACD)"
-                elif sell_cond_3: 
+                # elif sell_cond_3:
+                #     is_sell_signal = True
+                #     signal_reason = "기본(히스토그램 기울기급변)"
+                # elif sell_cond_4:
+                #     is_sell_signal = True
+                #     signal_reason = "기본(가격-MACD 다이버전스)"
+                elif sell_cond_5: 
                     is_sell_signal = True
                     signal_reason = "기본(MACD데드크로스)"
                 
                 b_up, b_down, s_up, s_down = 0.03, -0.03, 0.03, -0.03
 
+            # [수정] 자산 그룹 결정 (Natural Transition용 및 에러 방지)
+            semi_group = ['SOXX', 'USD', 'SOXL']
+            nasdaq_group = ['QQQ', 'QLD', 'TQQQ']
+            bond_group = ['TLT', 'TLT', 'TMF'] # 채권은 1x, 1x, 3x로 임시 매핑 (2배수가 없으므로)
+            
+            if base_asset in semi_group or leverage_asset in semi_group:
+                target_group = semi_group
+            elif base_asset in bond_group or leverage_asset in bond_group:
+                target_group = bond_group
+            else:
+                target_group = nasdaq_group
+
             # [신규] 스마트 레버리지 자산 결정
             effective_lev_asset = leverage_asset
+            smart_reason = ""
             if smart_params and smart_params.get('use_smart'):
-                semi_group = ['SOXX', 'USD', 'SOXL']
-                is_semi = (base_asset in semi_group or leverage_asset in semi_group)
-                target_group = semi_group if is_semi else ['QQQ', 'QLD', 'TQQQ']
-                
                 # 1단(Safe), 2단(Normal), 3단(Turbo)
-                if vix > smart_params.get('vix_exit', 32):
+                if vix > smart_params.get('vix_exit', 31):
                     effective_lev_asset = target_group[0]
                     smart_reason = f"스마트(VIX대피:{vix:.1f})"
-                elif rsi < smart_params.get('rsi_turbo', 30):
+                elif rsi < smart_params.get('rsi_turbo', 31):
                     effective_lev_asset = target_group[2]
                     smart_reason = f"스마트(RSI가속:{rsi:.1f})"
                 else:
                     effective_lev_asset = target_group[1]
                     smart_reason = "스마트(Normal)"
-            else:
-                smart_reason = ""
 
             # 현재 가격 추출 (전략 실행용)
             try:
                 # [수정] 현재 보유 중인 자산들과 신호용 기준 자산, 그리고 타겟 자산의 가격을 확보
                 currently_holding = [t for t, qty in holdings.items() if qty > 0]
-                check_targets = list(set([base_asset, effective_lev_asset] + currently_holding))
-                prices = {t: data_dict[t].loc[date, 'Close'] for t in check_targets if t in data_dict}
+                check_targets = list(set([base_asset, leverage_asset, effective_lev_asset] + currently_holding + target_group))
+                prices = {t: data_dict[t].loc[date, 'Close'] for t in check_targets if t in data_dict and date in data_dict[t].index}
                 
                 # 기준 자산 가격이 없으면 데이터 공백이므로 패스
                 if base_asset not in prices:
@@ -505,16 +595,26 @@ class StrategyEngine:
             is_delayed = False # 지연 여부 플래그
             delay_reason = ""
             
-            # 가격 변동 체크 (기속 자산 기준)
+            # 가격 변동 체크 (기준 자산 기반)
             price_change = prices[base_asset] / last_entry_price
-            price_trigger = (price_change >= 1 + b_up or price_change <= 1 + b_down) if current_planned_asset == leverage_asset else (price_change >= 1 + s_up or price_change <= 1 + s_down)
+            price_diff_pct = (price_change - 1) * 100
+            
+            # [수정] 파라미터 부호 설정에 관계없이 하락/상승폭을 절대값으로 체크하도록 강건화
+            up_thresh = abs(b_up if current_planned_asset == leverage_asset else s_up)
+            down_thresh = abs(b_down if current_planned_asset == leverage_asset else s_down)
+            
+            price_trigger = (price_change >= 1 + up_thresh or price_change <= 1 - down_thresh)
             
             if is_buy_signal and current_planned_asset != effective_lev_asset and effective_lev_asset in prices:
                 # 1. 자산 전환 시도 (매수 방향)
                 new_planned = effective_lev_asset
-                if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
-                elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
-                else: target_lev_pct, new_stage = 1.0, 3
+                if effective_lev_asset == base_asset:
+                    # [중요] 세이프 모드(1배수 대피) 시에는 레버리지 비중을 0으로 강제
+                    target_lev_pct, new_stage = 0.0, 3
+                else:
+                    if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
+                    elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
+                    else: target_lev_pct, new_stage = 1.0, 3
                 rebalance_cause = "시그널"
                 rebalance_needed = True
             elif is_sell_signal and current_planned_asset != base_asset:
@@ -526,22 +626,32 @@ class StrategyEngine:
                 rebalance_cause = "시그널"
                 rebalance_needed = True
             elif rebalance_stage in [1, 2]:
-                # 3. 동일 자산 내 추가 단계 진행 (가격 변동)
-                if price_trigger:
+                # 3. 동일 자산 내 추가 단계 진행 (가격 변동 OR MACD 데드크로스 가속)
+                is_accelerated_sell = False
+                # is_accelerated_sell = (current_planned_asset == base_asset and sell_cond_5)
+                if price_trigger or is_accelerated_sell:
                     new_stage = rebalance_stage + 1
-                    target_lev_pct = (0.70 if new_stage == 2 else 1.0) if current_planned_asset == leverage_asset else (0.30 if new_stage == 2 else 0.0)
-                    rebalance_cause = "가격조건"
+                    target_lev_pct = (0.70 if new_stage == 2 else 1.0) if current_planned_asset != base_asset else (0.30 if new_stage == 2 else 0.0)
+                    rebalance_cause = "MACD데드크로스집행" if is_accelerated_sell else "가격조건"
                     rebalance_needed = True
 
-            # [통합 가드] S2, S3 진입 시 리스크 관리 적용 (자산 전환 포함)
-            if rebalance_needed and new_stage > 1:
-                # 1. SMA200 방어막 체크
-                if current_planned_asset == leverage_asset and smart_params and smart_params.get('use_panic', False):
-                    sma200 = combined.loc[date, 'SMA200']
-                    if prices[base_asset] < sma200:
-                        target_rsi = smart_params.get('panic_rsi_s2', 30) if new_stage == 2 else smart_params.get('panic_rsi_s3', 25)
+            # [통합 가드] S1, S2, S3 진입 시 리스크 관리 적용 (자산 전환 포함)
+            if rebalance_needed:
+                # 1. 이평선 방어막 체크 (레버리지 자산 진입/증액 시)
+                if new_planned != base_asset and smart_params and smart_params.get('use_panic', False):
+                    panic_ma = smart_params.get('panic_ma', 200)
+                    ma_val = combined.loc[date, f'SMA{panic_ma}']
+                    if prices[base_asset] < ma_val:
+                        # 단계별 RSI 제한선 결정
+                        if new_stage == 1:
+                            target_rsi = smart_params.get('panic_rsi_s1', 32)
+                        elif new_stage == 2:
+                            target_rsi = smart_params.get('panic_rsi_s2', 32)
+                        else: # S3
+                            target_rsi = smart_params.get('panic_rsi_s3', 30)
+                        
                         if rsi > target_rsi:
-                            rebalance_needed, is_delayed, delay_reason = False, True, "MA200-RSI"
+                            rebalance_needed, is_delayed, delay_reason = False, True, f"MA{panic_ma}-RSI"
                 
                 # 2. 시그널 결합 옵션 체크
                 if rebalance_needed and smart_params and smart_params.get('couple_signal', False):
@@ -552,34 +662,102 @@ class StrategyEngine:
 
             if rebalance_needed:
                 if trade_at == "종가":
-                    # 즉시 체결
-                    cash = current_total_val * cash_ratio
-                    etf_funds = current_total_val * (1 - cash_ratio)
-                    current_planned_asset, rebalance_stage = new_planned, new_stage
-                    for t in list(holdings.keys()): holdings[t] = 0
-                    
-                    # [수정] 자산 중복 오버라이트 방지 (동일 자산일 경우 100% 할당)
-                    if effective_lev_asset == base_asset:
-                        holdings[base_asset] = etf_funds / prices[base_asset]
+                    # [수정] 순차적 포트폴리오 리밸런싱 (Natural Transition) 종가 처리
+                    if smart_params and smart_params.get('use_sequential', True):
+                        is_turbo_mode = (effective_lev_asset == target_group[2])
+                        
+                        # 1. 현재 자산 평가
+                        h_vals = {t: holdings[t] * prices[t] for t in holdings if t in prices}
+                        curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
+                        
+                        # 2. 목표 레버리지 총액
+                        target_lev_val = etf_funds * target_lev_pct
+                        
+                        # 가중치 초기화
+                        new_h_vals = {t: 0.0 for t in holdings}
+                        
+                        if curr_total_lev_val > target_lev_val + 0.01:
+                            # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
+                            new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
+                            rem = target_lev_val - new_h_vals[target_group[1]]
+                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
+                        else:
+                            # 증액(Buy) 상황
+                            if is_turbo_mode:
+                                # 가속(Turbo): QLD -> TQQQ 스왑 우선
+                                new_h_vals[target_group[2]] = h_vals.get(target_group[2], 0) # 기존 TQQQ 유지
+                                rem = target_lev_val - new_h_vals[target_group[2]]
+                                
+                                swap_n = min(h_vals.get(target_group[1], 0), rem)
+                                new_h_vals[target_group[2]] += swap_n
+                                rem -= swap_n
+                                
+                                from_b = min(h_vals.get(base_asset, 0), rem)
+                                new_h_vals[target_group[2]] += from_b
+                                
+                                # 남은 QLD 유지 (이론상 0)
+                                new_h_vals[target_group[1]] = h_vals.get(target_group[1], 0) - swap_n
+                            else:
+                                # 일반(Normal): TQQQ/QLD 유지 후 부족분 QLD 매수
+                                new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), target_lev_val)
+                                rem = target_lev_val - new_h_vals[target_group[2]]
+                                
+                                new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
+                                rem -= new_h_vals[target_group[1]]
+                                
+                                from_b = min(h_vals.get(base_asset, 0), rem)
+                                new_h_vals[target_group[1]] += from_b
+                        
+                        # 3. 나머지는 Base 자산
+                        allocated_lev = sum(new_h_vals.values())
+                        new_h_vals[base_asset] = etf_funds - allocated_lev
+                        
+                        for t in holdings:
+                            if t in prices and prices[t] > 0:
+                                holdings[t] = new_h_vals.get(t, 0) / prices[t]
+                            else:
+                                holdings[t] = 0
                     else:
-                        holdings[effective_lev_asset] = (etf_funds * target_lev_pct) / prices[effective_lev_asset]
-                        holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
-                    last_entry_price = prices[base_asset]
+                        # [기존] 표준 리벨런싱 (단일 자산 올인)
+                        # [추가] 매도 시에는 자산 성격 유지 (Case 3 대응)
+                        # 현재 보유한 레버리지 자산 찾기
+                        curr_lev_asset = next((t for t in target_group[1:] if holdings.get(t,0) > 0), effective_lev_asset)
+                        
+                        # 매도 상황(감축)이면 현재 자산 유지, 매수(증액) 상황이면 목표 자산(effective_lev_asset) 사용
+                        active_asset = curr_lev_asset if current_lev_pct > target_lev_pct + 0.01 else effective_lev_asset
+                        
+                        for t in list(holdings.keys()): holdings[t] = 0
+                        if active_asset == base_asset:
+                            holdings[base_asset] = etf_funds / prices[base_asset]
+                        else:
+                            holdings[active_asset] = (etf_funds * target_lev_pct) / prices[active_asset]
+                            holdings[base_asset] = (etf_funds * (1 - target_lev_pct)) / prices[base_asset]
+                    
+                    current_planned_asset, rebalance_stage = new_planned, new_stage
+                    if trade_at == "종가":
+                        last_entry_price = prices[base_asset]
+                        # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
+                        cash = current_total_val * cash_ratio
+                        current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
                 else:
                     # 익일 시가 대기
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned}
+                    # [신규] '익일 시가' 매매 시에도 기준가격 계산의 베이스는 '신호 발생일 종가'로 고정하여 
+                    # 주말/휴일 사이의 갭에 의한 조기 트리거 방지
+                    last_entry_price = prices[base_asset]
 
             # 시각적 가독성을 위해 trade_label 설정
             if rebalance_needed:
                 prefix = "매도" if new_planned == base_asset else "매수"
-                reason = signal_reason if rebalance_cause == "시그널" else "가격조건"
-                trade_label = f"{prefix}(S{new_stage}): {reason}"
-                if smart_params and smart_params.get('use_smart') and new_planned != base_asset:
+                # [신규] 가격조건 매매 시 실제 변동폭 표시
+                condition_label = f"가격조건({price_diff_pct:+.1f}%)" if rebalance_cause == "가격조건" else (signal_reason if rebalance_cause == "시그널" else "MACD데드크로스집행")
+                trade_label = f"{prefix}(S{new_stage}): {condition_label}"
+                if smart_params and smart_params.get('use_smart') and smart_reason:
                     trade_label += f" [{smart_reason}]"
             elif is_delayed:
                 # [원복] 지연 원인 표시
-                if delay_reason == "MA200-RSI":
-                    trade_label = f"지연(MA200-RSI:{rsi:.1f})"
+                if delay_reason.startswith("MA"):
+                    trade_label = f"지연({delay_reason}:{rsi:.1f})"
                 else:
                     trade_label = f"지연(시그널결합)"
             elif rebalance_stage in [1, 2]:
@@ -595,18 +773,36 @@ class StrategyEngine:
                 # 매수 중 (leverage_asset으로 진입 중)
                 curr_w = 0.30 if rebalance_stage == 1 else (0.70 if rebalance_stage == 2 else 1.0)
             
-            history.append({
+            # [수정] 실제 비중이 가장 큰 자산을 로그에 표시
+            main_asset = base_asset
+            max_w = (holdings.get(base_asset, 0) * prices[base_asset]) / current_total_val if current_total_val > 0 else 0
+            for t in target_group[1:]:
+                w = (holdings.get(t, 0) * prices.get(t, 0)) / current_total_val if current_total_val > 0 else 0
+                if w > max_w:
+                    max_w = w
+                    main_asset = t
+
+            # [수정] 개별 레버리지 자산 비중 추가
+            history_item = {
                 'Date': date, 
                 'Close': prices[base_asset],
                 'Value': current_total_val, 
                 'Cash': cash,
                 'Trade_Label': trade_label,
-                'Asset': f"{current_planned_asset}(S{rebalance_stage})" if rebalance_stage < 3 else current_planned_asset,
-                'Lev_Weight': curr_w, 
-                f'{base_asset}_Weight': 1 - curr_w, 
+                'Asset': f"{main_asset}(S{rebalance_stage})" if rebalance_stage < 3 else main_asset,
+                'Target': f"{new_planned}(S{new_stage})" if new_stage < 3 else new_planned,
+                'Lev_Weight': current_lev_funds / current_total_val if current_total_val > 0 else 0,
+                f'{base_asset}_Weight': (holdings.get(base_asset, 0) * prices[base_asset]) / current_total_val if current_total_val > 0 else 0,
+                'Cash_Weight': cash / current_total_val if current_total_val > 0 else 0,
                 'RSI': rsi, 'FG': fg, 'VIX': vix, 'MACD': macd_val, 'Signal_Line': signal_line,
-                'SMA200': combined.loc[date, 'SMA200']
-            })
+                'SMA200': combined.loc[date, 'SMA200'],
+                'SMA60': combined.loc[date, 'SMA60']
+            }
+            # 타겟 그룹의 개별 레버리지 자산 비중 동적 추가 (QLD_Weight, TQQQ_Weight 등)
+            for t in target_group[1:]:
+                history_item[f'{t}_Weight'] = (holdings.get(t, 0) * prices.get(t, 0)) / current_total_val if current_total_val > 0 else 0
+            
+            history.append(history_item)
         return pd.DataFrame(history).set_index('Date')
 
     @staticmethod
@@ -803,12 +999,19 @@ class BacktestView:
             log_df = golden_history.copy()
             log_df.index = log_df.index.date
             
-            # 가독성을 위해 컬럼 순서 조정 및 정리
-            cols = ['Value', 'Trade_Label', 'Asset', 'Lev_Weight', f'{base_asset}_Weight', 'RSI', 'MACD', 'VIX']
+            # 가독성을 위해 컬럼 순서 조정 및 정리 (QLD_Weight, TQQQ_Weight 등 동적 포함)
+            base_w_col = f'{base_asset}_Weight'
+            lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
+            cols = ['Value', 'Trade_Label', 'Asset', 'Lev_Weight'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'VIX']
+            
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
+            # 포맷팅 딕셔너리 동적 생성
+            formats = {'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VIX': '{:.1f}'}
+            formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
+
             styled_log = display_df.style.apply(style_signal, axis=1)\
-                                  .format({'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', f'{base_asset}_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VIX': '{:.1f}'})
+                                  .format(formats)
             
             st.dataframe(styled_log, use_container_width=True, height=600)
 
@@ -994,7 +1197,8 @@ class HistoryLabView:
         
         # 리스크 관리 설정 표시
         if smart_params and smart_params.get('use_panic'):
-            st.info(f"🛡️ **하락장 대응 활성**: 주가 < SMA200일 때 2·3단계 매수를 RSI {smart_params.get('panic_rsi_s2', 30)}/{smart_params.get('panic_rsi_s3', 25)} 이하로 제한합니다.")
+            panic_ma = smart_params.get('panic_ma', 200)
+            st.info(f"🛡️ **하락장 대응 활성**: 주가 < SMA{panic_ma}일 때 매수를 RSI {smart_params.get('panic_rsi_s1', 32)}/{smart_params.get('panic_rsi_s2', 32)}/{smart_params.get('panic_rsi_s3', 30)} 이하로 제한합니다.")
         
         # [추가] 벤치마크 누락 경고
         missingbench = [t for t in [b1, b2, b3] if t not in data_dict]
@@ -1004,7 +1208,7 @@ class HistoryLabView:
         tab1, tab2, tab3, tab4 = st.tabs(["📅 연도별 성과 & 이벤트", "🇺🇸 미 대선 주기 분석", "🗳️ 중간선거 주기", "🍂 월별 계절성"])
         
         with tab1:
-            HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
+            HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
             
         with tab2:
             HistoryLabView.render_election_cycle(golden_history, bh_1, b_name=b1)
@@ -1016,7 +1220,7 @@ class HistoryLabView:
             HistoryLabView.render_seasonality(golden_history, bh_1, b_name=b1)
 
     @staticmethod
-    def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ")):
+    def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None):
         st.subheader(f"연도별 성과 및 리스크 분석 (vs {b_names[0]}군)")
         
         def calculate_mdd(series):
@@ -1066,7 +1270,8 @@ class HistoryLabView:
             panic_days = 0
             if 'Trade_Label' in s_h.columns:
                 s_y_full = s_h[s_h.index.year == y]
-                panic_days = s_y_full['Trade_Label'].str.contains("지연\(MA200", na=False).sum()
+                panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
+                panic_days = s_y_full['Trade_Label'].str.contains(f"지연\(MA{panic_ma}", na=False).sum()
             
             event = HistoryLabView.EVENTS.get(y, "-")
             
@@ -1337,9 +1542,10 @@ class ChartView:
         
         # 1. 가격 차트 필드
         ax1.plot(history.index, history['Close'], color='#66b3ff', label=f'{base_asset} Price', alpha=0.8, linewidth=1.5)
-        if 'SMA200' in history.columns:
-            ax1.plot(history.index, history['SMA200'], color='#f39c12', label='SMA200', alpha=0.6, linestyle='--')
-        ax1.set_title(f"{selected_year}년 {base_asset} 흐름 및 매매 시그널", fontsize=14, weight='bold')
+        panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
+        if f'SMA{panic_ma}' in history.columns:
+            ax1.plot(history.index, history[f'SMA{panic_ma}'], color='#f39c12', label=f'SMA{panic_ma}', alpha=0.6, linestyle='--')
+        ax1.set_title(f"{selected_year}년 {base_asset} 흐름 및 매매 시그널 (MA{panic_ma} 기준)", fontsize=14, weight='bold')
         ax1.set_ylabel("Price ($)")
         ax1.grid(True, linestyle='--', alpha=0.4)
         
@@ -1355,15 +1561,16 @@ class ChartView:
         
         # 지연 구간 하이라이트 (SMA200-RSI 제약)
         has_delay = False
+        panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
         for idx in delay_points.index:
-            ax1.axvspan(idx, idx + datetime.timedelta(days=1), color='yellow', alpha=0.3, label='매수 지연(MA200-RSI)' if not has_delay else "")
+            ax1.axvspan(idx, idx + datetime.timedelta(days=1), color='yellow', alpha=0.3, label=f'매수 지연(MA{panic_ma}-RSI)' if not has_delay else "")
             has_delay = True
 
         ax1.legend(loc='upper left', fontsize=9)
 
         # 2. VIX 차트 필드
         ax2.plot(history.index, history['VIX'], color='#ff9999', label='VIX Index', linewidth=1.5)
-        v_exit = smart_params.get('vix_exit', 32) if smart_params else 32
+        v_exit = smart_params.get('vix_exit', 29) if smart_params else 29
         p_vix = smart_params.get('panic_vix', 35) if smart_params else 35
         ax2.axhline(v_exit, color='red', linestyle='--', alpha=0.6, label=f'VIX Exit ({v_exit})')
         ax2.axhline(p_vix, color='orange', linestyle='-', alpha=0.8, label=f'Panic Threshold ({p_vix})')
@@ -1374,13 +1581,15 @@ class ChartView:
 
         # 3. RSI 차트 필드
         ax3.plot(history.index, history['RSI'], color='#9b59b6', label='RSI (14)', linewidth=1.2)
-        r_turbo = smart_params.get('rsi_turbo', 30) if smart_params else 30
-        p_r2 = smart_params.get('panic_rsi_s2', 30) if smart_params else 30
-        p_r3 = smart_params.get('panic_rsi_s3', 25) if smart_params else 25
+        r_turbo = smart_params.get('rsi_turbo', 31) if smart_params else 31
+        p_r1 = smart_params.get('panic_rsi_s1', 32) if smart_params else 32
+        p_r2 = smart_params.get('panic_rsi_s2', 32) if smart_params else 32
+        p_r3 = smart_params.get('panic_rsi_s3', 30) if smart_params else 30
         
         ax3.axhline(70, color='red', linestyle='--', alpha=0.4)
         ax3.axhline(35, color='green', linestyle='--', alpha=0.4)
         ax3.axhline(r_turbo, color='blue', linestyle='--', alpha=0.6, label=f'Turbo ({r_turbo})')
+        ax3.axhline(p_r1, color='orange', linestyle=':', alpha=0.6, label=f'Panic S1 ({p_r1})')
         ax3.axhline(p_r3, color='purple', linestyle='-', alpha=0.8, label=f'Panic S3 ({p_r3})')
         
         ax3.fill_between(history.index, history['RSI'], 30, where=(history['RSI'] <= 30), color='green', alpha=0.1)
@@ -1499,27 +1708,32 @@ class GoldenStrategyApp:
         # [신규] 스마트 레버리지 모드 설정
         st.sidebar.markdown("---")
         st.sidebar.subheader("🚀 스마트 레버리지")
-        use_smart = st.sidebar.checkbox("스마트 레버리지 활성화", value=False, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
+        use_smart = st.sidebar.checkbox("스마트 레버리지 활성화", value=True, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
+        
+        smart_params = {'use_smart': use_smart}
+        if use_smart:
+            with st.sidebar.expander("가속/탈출 파라미터"):
+                v_exit = st.slider("VIX 도망점 (Safety)", 20, 50, 31)
+                r_turbo = st.slider("RSI 가속점 (Turbo)", 20, 40, 31)
+                use_sequential = st.checkbox("순차적 포트폴리오 관리 (자산 유지/우선 매도)", value=True, help="가속 시 2배수를 3배수로 스왑하고, 매도 시 3배수를 우선 매도하는 자연스러운 자산 이동을 적용합니다.")
+                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo, 'use_sequential': use_sequential})
         
         # [신규] 리스크 방어 모드 설정 (가변 RSI 매수 제한)
         st.sidebar.subheader("🛡️ 리스크 관리")
-        use_panic = st.sidebar.checkbox("하락장 매수 제한", value=True, help="주가가 200일 이평선 아래일 때 추가 매수 조건을 강화합니다.")
-        couple_signal = st.sidebar.checkbox("추가 매매 시 시그널 결합", value=False, help="2·3단계 리밸런싱 시에도 가격 조건과 함께 보조지표 시그널이 충족되어야 합나다.")
+        use_panic = st.sidebar.checkbox("하락장 매수 제한", value=True, help="주가가 설정한 이평선 아래일 때 추가 매수 조건을 강화합니다.")
+        panic_ma = st.sidebar.selectbox("방어막 기준 이평선", [200, 60], index=0, help="하락장 판정의 기준이 되는 이동평균선입니다.")
         
-        smart_params = {'use_smart': use_smart, 'use_panic': use_panic, 'couple_signal': couple_signal}
-        
-        if use_smart:
-            with st.sidebar.expander("가속/탈출 파라미터"):
-                v_exit = st.slider("VIX 도망점 (Safety)", 20, 50, 32)
-                r_turbo = st.slider("RSI 가속점 (Turbo)", 20, 40, 30)
-                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
-        
+        smart_params.update({'use_panic': use_panic, 'panic_ma': panic_ma})
         if use_panic:
-            with st.sidebar.expander("SMA200 방어 파라미터"):
-                st.caption("주가가 200일 이평선 하단일 때 적용")
-                p_r2 = st.slider("2단계 매수 RSI", 15, 40, 30)
-                p_r3 = st.slider("3단계 매수 RSI", 15, 40, 25)
-                smart_params.update({'panic_rsi_s2': p_r2, 'panic_rsi_s3': p_r3})
+            with st.sidebar.expander(f"SMA{panic_ma} 방어 파라미터"):
+                st.caption(f"주가가 {panic_ma}일 이평선 하단일 때 적용")
+                p_r1 = st.slider("1단계 매수 RSI", 15, 45, 32)
+                p_r2 = st.slider("2단계 매수 RSI", 15, 40, 32)
+                p_r3 = st.slider("3단계 매수 RSI", 15, 40, 30)
+                smart_params.update({'panic_rsi_s1': p_r1, 'panic_rsi_s2': p_r2, 'panic_rsi_s3': p_r3})
+                
+        couple_signal = st.sidebar.checkbox("추가 매매 시 시그널 결합", value=False, help="2·3단계 리밸런싱 시에도 가격 조건과 함께 보조지표 시그널이 충족되어야 합나다.")
+        smart_params.update({'couple_signal': couple_signal})
         st.sidebar.markdown("---")
 
         # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
