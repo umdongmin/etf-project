@@ -66,6 +66,9 @@ def calculate_metrics(history):
     gross_loss = abs(losing_days.sum())
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else (100.0 if gross_profit > 0 else 0)
     
+    # [신규] 일별 수익률의 단순 합산 (산술 합계)
+    return_sum = df['Daily_Return'].sum()
+    
     # 최대 회복 기간 계산 (일 수)
     under_water = df['PortfolioValue'] < df['Rolling_Max']
     recovery_periods = []
@@ -89,6 +92,7 @@ def calculate_metrics(history):
         'MAR': mar,
         'Win_Rate': win_rate,
         'Profit_Factor': profit_factor,
+        'Return_Sum': return_sum,
         'Max_Recovery': max_recovery
     }
 
@@ -137,17 +141,31 @@ class DataService:
         tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
         # [수정] 여러 번 호출하지 않고 한 번에 묶어서 다운로드 (Rate Limit 회피)
         try:
-            full_data = yf.download(tickers + ['^VIX'], start=start_date, end=end_date, progress=False, group_by='ticker')
-            
+            # 주 자산 다운로드
+            full_data = yf.download(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
             for ticker in tickers:
                 if ticker in full_data and not full_data[ticker].empty:
                     df = full_data[ticker].copy()
-                    # [수정] 결측치(NaN) 전파 방지를 위해 ffill/bfill 적용
                     df = df.ffill().bfill() 
                     df = cls.calculate_indicators(df)
                     data_dict[ticker] = df
             
-            vix_df = full_data['^VIX'].copy() if '^VIX' in full_data else pd.DataFrame()
+            # [신규] 지표 데이터 개별 다운로드 및 병합 (하나가 실패해도 나머지는 살리기 위함)
+            def fetch_symbol_robust(symbol):
+                try: 
+                    # Ticker.history()가 download()보다 지수 수집 시 간혹 더 안정적임
+                    ticker_obj = yf.Ticker(symbol)
+                    d = ticker_obj.history(start=start_date, end=end_date)
+                    return d['Close'] if not d.empty else pd.Series()
+                except: return pd.Series()
+
+            vix_close = fetch_symbol_robust('^VIX')
+            vix_df = pd.DataFrame(vix_close).rename(columns={'Close': 'Close'}) if not vix_close.empty else pd.DataFrame()
+            
+            if not vix_df.empty:
+                # 시계열 인덱스 TZ-Naive 통일 (병합 시 에러 방지)
+                vix_df.index = vix_df.index.tz_localize(None)
+                vix_df = vix_df.ffill().bfill()
         except Exception as e:
             print(f"Main Download Error: {e}")
             vix_df = pd.DataFrame()
@@ -214,6 +232,11 @@ class StrategyEngine:
         vix_clean = vix_df[~vix_df.index.duplicated(keep='first')]
         combined = combined.join(fg_clean['FearGreed'].rename('FG'), how='left')
         combined = combined.join(vix_clean['Close'].rename('VIX'), how='left')
+        # [신규] VVIX와 PCCR 데이터 병합
+        if 'VVIX' in vix_clean.columns:
+            combined = combined.join(vix_clean['VVIX'], how='left')
+        if 'PCCR' in vix_clean.columns:
+            combined = combined.join(vix_clean['PCCR'], how='left')
         
         macd_col = [c for c in combined.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
         signal_col = [c for c in combined.columns if 'MACDs_' in c]
@@ -237,6 +260,9 @@ class StrategyEngine:
         
         combined['FG'] = combined['FG'].ffill().fillna(50)
         combined['VIX'] = combined['VIX'].ffill().fillna(15)
+        # [신규] VVIX, PCCR 결측치 처리
+        if 'VVIX' in combined.columns: combined['VVIX'] = combined['VVIX'].ffill()
+        if 'PCCR' in combined.columns: combined['PCCR'] = combined['PCCR'].ffill()
         combined = combined.fillna(0)
         
         # [신규] 자산 상장일 고려: 모든 자산의 실제 데이터가 존재하는 날부터 시작
@@ -961,12 +987,13 @@ class BacktestView:
             # 범례용 더미 트레이스
             fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                                      marker=dict(size=10, color='red', opacity=0.2),
-                                     name='Safety Mode (VIX↑)', showlegend=True))
+                                     name='Safety Mode (VIX↑)', showlegend=True, legendgroup='safety'))
             fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                                      marker=dict(size=10, color='blue', opacity=0.2),
-                                     name='Turbo Mode (RSI↓)', showlegend=True))
+                                     name='Turbo Mode (RSI↓)', showlegend=True, legendgroup='turbo'))
 
-            def add_backtest_vrects(df, mask, color):
+            def add_backtest_vrects(df, mask, color, lg):
+                y_max = (df['Value'] / 10000.0).max() * 2 
                 intervals = []
                 start = None
                 for i in range(len(df)):
@@ -978,12 +1005,17 @@ class BacktestView:
                 if start is not None:
                     intervals.append((start, df.index[-1]))
                 for s, e in intervals:
-                    fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=0.08, line_width=0, layer="below")
+                    fig.add_trace(go.Scatter(
+                        x=[s, e, e, s], y=[0, 0, y_max, y_max],
+                        fill='toself', fillcolor=color, opacity=0.08,
+                        line_width=0, showlegend=False, legendgroup=lg,
+                        hoverinfo='skip'
+                    ))
 
             if 'VIX' in golden_history.columns:
-                add_backtest_vrects(golden_history, golden_history['VIX'] >= v_exit, "red")
+                add_backtest_vrects(golden_history, golden_history['VIX'] >= v_exit, "red", "safety")
             if 'RSI' in golden_history.columns:
-                add_backtest_vrects(golden_history, golden_history['RSI'] <= r_turbo, "blue")
+                add_backtest_vrects(golden_history, golden_history['RSI'] <= r_turbo, "blue", "turbo")
 
         st.plotly_chart(fig, use_container_width=True)
         
@@ -1000,7 +1032,7 @@ class BacktestView:
         
         # [신규] 전체 거래 내역 확인 및 색상 강조
         st.divider()
-        with st.expander("📝 전체 일별 상세 로그 확인 (시그널 포함)"):
+        with st.expander("전체 일별 상세로그 확인"):
             def style_signal(row):
                 sig = str(row['Trade_Label']) if 'Trade_Label' in row else ""
                 # 배경색 및 텍스트색 결정 (매도 우선 체크하여 과매수 오매칭 방지)
@@ -1014,17 +1046,23 @@ class BacktestView:
 
             # 로그 데이터 가공
             log_df = golden_history.copy()
+            
+            # [신규] QQQ 벤치마크 가치 추가 (비교용)
+            if 'QQQ' in bh_histories:
+                qqq_h = bh_histories['QQQ'].copy()
+                log_df = log_df.join(qqq_h['Value'].rename('QQQ_Value'), how='left')
+            
             log_df.index = log_df.index.date
             
             # [원복] 컬럼명 영문 유지 및 Summary 제외
             base_w_col = f'{base_asset}_Weight'
             lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
-            cols = ['Value', 'Trade_Label', 'Asset', 'Lev_Weight'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'VIX']
+            cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Lev_Weight'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX']
             
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
             # 포맷팅 딕셔너리 동적 생성
-            formats = {'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VIX': '{:.1f}'}
+            formats = {'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'FG': '{:.0f}', 'VIX': '{:.1f}'}
             formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
 
             styled_log = display_df.style.apply(style_signal, axis=1)\
@@ -1289,11 +1327,16 @@ class HistoryLabView:
             t_mdd = calculate_mdd(t_y) * 100
             
             # [신규] 방어(Panic Mode) 발생 일수 계산
+            # [신규] 방어(Panic Mode) 및 Safety(VIX대피) 발생 횟수 계산
             panic_days = 0
+            safety_count = 0
             if 'Trade_Label' in s_h.columns:
                 s_y_full = s_h[s_h.index.year == y]
                 panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
                 panic_days = s_y_full['Trade_Label'].str.contains(f"지연\(MA{panic_ma}", na=False).sum()
+                
+                # [신규] VIX대피(Safety) 발생 횟수 집계
+                safety_count = s_y_full['Trade_Label'].str.contains("VIX대피", na=False).sum()
             
             event = HistoryLabView.EVENTS.get(y, "-")
             
@@ -1305,6 +1348,7 @@ class HistoryLabView:
                 "전략 MDD": f"{s_mdd:.1f}%",
                 f"{b_names[0]} MDD": f"{q_mdd:.1f}%",
                 "방어(일)": f"{panic_days}일" if panic_days > 0 else "-",
+                "Safety(회)": f"{safety_count}회" if safety_count > 0 else "-",
                 "주요 이벤트": event
             })
             
@@ -1342,7 +1386,7 @@ class HistoryLabView:
 
         styled_df = df.style.applymap(style_returns, subset=[c for c in df.columns if "수익" in c])\
                             .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c])\
-                            .applymap(style_panic, subset=["방어(일)"])
+                            .applymap(style_panic, subset=["방어(일)", "Safety(회)"])
         
         st.dataframe(styled_df, use_container_width=True, height=520)
 
@@ -1356,7 +1400,9 @@ class HistoryLabView:
             years_count = (ser.index[-1] - ser.index[0]).days / 365.25
             cagr = ((ser.iloc[-1] / 10000.0) ** (1/years_count) - 1) * 100 if years_count > 0 else 0
             mdd = calculate_mdd(ser) * 100
-            return {"구분": name, "누적 수익률": f"{total_ret:+.1f}%", "연평균(CAGR)": f"{cagr:.1f}%", "최대낙폭(MDD)": f"{mdd:.1f}%"}
+            # [신규] 일별 수익률의 산술 합계 추가
+            ret_sum = ser.pct_change().dropna().sum() * 100
+            return {"구분": name, "누적 수익률": f"{total_ret:+.1f}%", "수익률 합": f"{ret_sum:+.1f}%", "연평균(CAGR)": f"{cagr:.1f}%", "최대낙폭(MDD)": f"{mdd:.1f}%"}
 
         summary_data = [
             get_summary(s_h['Value'], "내 전략 🔥"),
@@ -1545,6 +1591,74 @@ class ChartView:
             st.warning(f"{selected_year}년에 해당하는 충분한 데이터가 없습니다.")
             return
 
+        # [신규] 리밸런싱 승률(Hit Rate) 분석
+        st.subheader("🎯 리밸런싱 승률 분석 (Hit Rate)")
+        df_hit = history.copy()
+        df_hit['Price_Change'] = df_hit['Close'].pct_change()
+        df_hit['Is_Up'] = df_hit['Price_Change'] > 0
+        
+        lev_days = df_hit[df_hit['Lev_Weight'] > 0.01]
+        total_hit = lev_days['Is_Up'].mean() if not lev_days.empty else 0
+        
+        s1_days = df_hit[df_hit['Asset'].str.contains('\(S1\)', na=False)]
+        s1_hit = s1_days['Is_Up'].mean() if not s1_days.empty else 0
+        
+        s2_days = df_hit[df_hit['Asset'].str.contains('\(S2\)', na=False)]
+        s2_hit = s2_days['Is_Up'].mean() if not s2_days.empty else 0
+        
+        s3_days = lev_days[~lev_days['Asset'].str.contains('\(S', na=False)]
+        s3_hit = s3_days['Is_Up'].mean() if not s3_days.empty else 0
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("전체 레버리지 승률", f"{total_hit:.1%}", help="레버리지 자산을 조금이라도 보유한 날들 중 주가가 상승한 날의 비중")
+        c2.metric("1단계(S1.30%) 승률", f"{s1_hit:.1%}", help="1단계 매수(30%) 상태일 때의 상승 확률")
+        c3.metric("2단계(S2.70%) 승률", f"{s2_hit:.1%}", help="2단계 매수(70%) 상태일 때의 상승 확률")
+        c4.metric("3단계(S3.100%) 승률", f"{s3_hit:.1%}", help="3단계 매수(100% 풀배팅) 상태일 때의 상승 확률 (핵심 지표)")
+
+        # [신규] 리밸런싱 수익 승률 (가상 슬롯 방식)
+        st.subheader("💰 리밸런싱 수익 승률 (Trade Win Rate)")
+        
+        # 슬롯별 성적 저장 (1: S1(0-30), 2: S2(30-70), 3: S3(70-100))
+        slots = {1: {'entry': None, 'wins': 0, 'total': 0}, 
+                 2: {'entry': None, 'wins': 0, 'total': 0}, 
+                 3: {'entry': None, 'wins': 0, 'total': 0}}
+        
+        for idx, row in history.iterrows():
+            label = str(row['Trade_Label'])
+            val = row['Value']
+            
+            # 매수(진입) 감지
+            if "매수(S1)" in label: slots[1]['entry'] = val
+            if "매수(S2)" in label: slots[2]['entry'] = val
+            if "매수(S3)" in label: slots[3]['entry'] = val
+            
+            # 매도(청산) 감지 및 수익 계산
+            # S3 매도는 100->70 (슬롯 3 청산)
+            if "매도(S1)" in label and slots[3]['entry'] is not None:
+                slots[3]['total'] += 1
+                if val > slots[3]['entry']: slots[3]['wins'] += 1
+                slots[3]['entry'] = None
+            # S2 매도는 70->35 (슬롯 2 청산)
+            if "매도(S2)" in label and slots[2]['entry'] is not None:
+                slots[2]['total'] += 1
+                if val > slots[2]['entry']: slots[2]['wins'] += 1
+                slots[2]['entry'] = None
+            # S1 매도는 35->0 (슬롯 1 청산)
+            if "매도(S3)" in label and slots[1]['entry'] is not None:
+                slots[1]['total'] += 1
+                if val > slots[1]['entry']: slots[1]['wins'] += 1
+                slots[1]['entry'] = None
+        
+        def get_win_rate_str(s):
+            if s['total'] == 0: return "데이터 없음"
+            rate = s['wins'] / s['total']
+            return f"{rate:.1%} ({s['wins']}승 {s['total']-s['wins']}패)"
+
+        w1, w2, w3 = st.columns(3)
+        w1.metric("1단계(Base) 수익 승률", get_win_rate_str(slots[1]), help="S1 진입 후 전액 매도(S3) 시점까지의 수익 확률")
+        w2.metric("2단계(Add) 수익 승률", get_win_rate_str(slots[2]), help="S2 진입 후 S2 매도 시점까지의 수익 확률")
+        w3.metric("3단계(Turbo) 수익 승률", get_win_rate_str(slots[3]), help="S3(100%) 진입 후 S1 매도 시점까지의 수익 확률")
+
         # [개편] Plotly 기반 인터랙티브 통합 차트 생성
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, 
                             vertical_spacing=0.05, 
@@ -1596,8 +1710,13 @@ class ChartView:
         fig.add_hline(y=35, line_dash="dot", line_color="green", opacity=0.3, row=3, col=1)
         fig.add_hline(y=r_turbo, line_dash="dash", line_color="blue", annotation_text=f"Turbo({r_turbo})", row=3, col=1)
 
-        # [핵심] 가속/대피 배경 하이라이트 (Shapes)
-        def add_mode_vrects(df, mask, color, label):
+        # [핵심] 가속/대피 배경 하이라이트 (Scatter 채우기 활용하여 범례 연동)
+        def add_mode_vrects(df, mask, color, lg):
+            # 행별 데이터 범위 계산 (하이라이트 높이 결정용)
+            p_max = df['Close'].max() * 1.5
+            v_max = df['VIX'].max() * 1.5
+            r_max = 100
+            
             intervals = []
             start = None
             for i in range(len(df)):
@@ -1610,18 +1729,21 @@ class ChartView:
                 intervals.append((start, df.index[-1]))
             
             for s, e in intervals:
-                fig.add_vrect(x0=s, x1=e, fillcolor=color, opacity=0.1, line_width=0, layer="below")
+                # 각 서브플롯별로 하이라이트 추가
+                fig.add_trace(go.Scatter(x=[s, e, e, s], y=[0, 0, p_max, p_max], fill='toself', fillcolor=color, opacity=0.1, line_width=0, showlegend=False, legendgroup=lg, hoverinfo='skip'), row=1, col=1)
+                fig.add_trace(go.Scatter(x=[s, e, e, s], y=[0, 0, v_max, v_max], fill='toself', fillcolor=color, opacity=0.1, line_width=0, showlegend=False, legendgroup=lg, hoverinfo='skip'), row=2, col=1)
+                fig.add_trace(go.Scatter(x=[s, e, e, s], y=[0, 0, r_max, r_max], fill='toself', fillcolor=color, opacity=0.1, line_width=0, showlegend=False, legendgroup=lg, hoverinfo='skip'), row=3, col=1)
 
-        add_mode_vrects(history, history['VIX'] >= v_exit, "red", "Safety")
-        add_mode_vrects(history, history['RSI'] <= r_turbo, "blue", "Turbo")
+        add_mode_vrects(history, history['VIX'] >= v_exit, "red", "safety_chart")
+        add_mode_vrects(history, history['RSI'] <= r_turbo, "blue", "turbo_chart")
 
         # [신규] 범례용 더미 트레이스 추가
         fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                                  marker=dict(size=10, color='red', opacity=0.2),
-                                 name=f'Safety Mode (VIX ≥ {v_exit})', showlegend=True))
+                                 name=f'Safety Mode (VIX ≥ {v_exit})', showlegend=True, legendgroup='safety_chart'))
         fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers',
                                  marker=dict(size=10, color='blue', opacity=0.2),
-                                 name=f'Turbo Mode (RSI ≤ {r_turbo})', showlegend=True))
+                                 name=f'Turbo Mode (RSI ≤ {r_turbo})', showlegend=True, legendgroup='turbo_chart'))
 
         fig.update_layout(
             height=900,
@@ -1638,10 +1760,44 @@ class ChartView:
 
         st.plotly_chart(fig, use_container_width=True)
         
-        # 상세 데이터 표
-        with st.expander("🔎 상세 시뮬레이션 데이터 보기"):
-            display_df = history[['Close', 'SMA200', 'VIX', 'RSI', 'MACD', 'Trade_Label']].copy()
-            st.dataframe(display_df, use_container_width=True)
+        # [신규] 전체 거래 내역 확인
+        with st.expander("전체 일별 상세로그 확인"):
+            def style_signal(row):
+                sig = str(row['Trade_Label']) if 'Trade_Label' in row else ""
+                # 배경색 및 텍스트색 결정 (매도 우선 체크하여 과매수 오매칭 방지)
+                if sig.startswith("매도"):
+                    return ['background-color: rgba(52, 152, 219, 0.1); color: #3498db; font-weight: bold'] * len(row)
+                elif sig.startswith("매수"):
+                    return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
+                elif "진행중" in sig:
+                    return ['background-color: rgba(243, 156, 18, 0.05); color: #f39c12'] * len(row)
+                return [''] * len(row)
+
+            # 로그 데이터 가공
+            log_df = history.copy()
+            
+            # [신규] QQQ 벤치마크 가치 추가 (비교용)
+            qqq_bh = StrategyEngine.run_benchmark(data_dict, 'QQQ', start_date, end_date)
+            if not qqq_bh.empty:
+                log_df = log_df.join(qqq_bh['Value'].rename('QQQ_Value'), how='left')
+            
+            log_df.index = log_df.index.date
+            
+            # [원복] 컬럼명 영문 유지 및 Summary 제외
+            base_w_col = f'{base_asset}_Weight'
+            lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
+            cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Lev_Weight'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX']
+            
+            display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
+            
+            # 포맷팅 딕셔너리 동적 생성
+            formats = {'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'FG': '{:.0f}', 'VIX': '{:.1f}'}
+            formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
+
+            styled_log = display_df.style.apply(style_signal, axis=1)\
+                                  .format(formats)
+            
+            st.dataframe(styled_log, use_container_width=True, height=600)
 
 class TesterView:
     """전략 분석기 입력 UI 구성 클래스"""
