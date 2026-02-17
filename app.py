@@ -13,6 +13,7 @@ import datetime
 import platform
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import json
 
 
 # --- Performance Metrics Logic (Merged from backtest.py) ---
@@ -40,10 +41,12 @@ def calculate_metrics(history):
     
     cagr = (final_value / initial_value) ** (1 / years) - 1
     
-    # MDD 계산
+    # MDD 및 UI(궤양 지수) 계산
     df['Rolling_Max'] = df['PortfolioValue'].cummax()
     df['Drawdown'] = df['PortfolioValue'] / df['Rolling_Max'] - 1
     mdd = df['Drawdown'].min()
+    # UI = sqrt(mean(Drawdown^2)) * 100
+    ui = np.sqrt((df['Drawdown']**2).mean()) * 100
     
     # 샤프 지수 및 변동성 계산 (연율화)
     daily_std = df['Daily_Return'].std()
@@ -88,6 +91,7 @@ def calculate_metrics(history):
         'Cumulative Return': df['Cumulative_Return'].iloc[-1] if not df['Cumulative_Return'].empty else 0,
         'CAGR': cagr,
         'MDD': mdd,
+        'UI': ui,
         'Sharpe': sharpe,
         'MAR': mar,
         'Win_Rate': win_rate,
@@ -97,6 +101,37 @@ def calculate_metrics(history):
     }
 
 # --- Core Logic Classes ---
+
+class StrategyStorage:
+    """전략 설정을 로컬 JSON 파일로 관리하는 클래스"""
+    STRATEGY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategies")
+
+    @classmethod
+    def save_strategy(cls, name, params):
+        """전략 파라미터를 JSON 파일로 저장"""
+        if not os.path.exists(cls.STRATEGY_DIR):
+            os.makedirs(cls.STRATEGY_DIR)
+        
+        filepath = os.path.join(cls.STRATEGY_DIR, f"{name}.json")
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(params, f, ensure_ascii=False, indent=4)
+        return filepath
+
+    @classmethod
+    def list_strategies(cls):
+        """저장된 전략 목록 추출"""
+        if not os.path.exists(cls.STRATEGY_DIR):
+            return []
+        return [f.replace(".json", "") for f in os.listdir(cls.STRATEGY_DIR) if f.endswith(".json")]
+
+    @classmethod
+    def load_strategy(cls, name):
+        """특정 전략 파일 로드"""
+        filepath = os.path.join(cls.STRATEGY_DIR, f"{name}.json")
+        if os.path.exists(filepath):
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return None
 
 class DataService:
     """데이터 수집 및 전처리를 담당하는 클래스"""
@@ -592,20 +627,24 @@ class StrategyEngine:
             else:
                 target_group = nasdaq_group
 
-            # [신규] 스마트 레버리지 자산 결정
+            # [수정] 스마트 레버리지 필터링 (VIX Safety vs RSI Turbo 분리)
             effective_lev_asset = leverage_asset
             smart_reason = ""
-            if smart_params and smart_params.get('use_smart'):
-                # 1단(Safe), 2단(Normal), 3단(Turbo)
-                if vix > smart_params.get('vix_exit', 31):
+            
+            if smart_params:
+                # 1순위: VIX Safety (시장 대피 - 1배 자산)
+                if smart_params.get('use_vix_safety') and vix > smart_params.get('vix_exit', 31):
                     effective_lev_asset = target_group[0]
-                    smart_reason = f"스마트(VIX대피:{vix:.1f})"
-                elif rsi < smart_params.get('rsi_turbo', 31):
+                    smart_reason = f"대피(VIX:{vix:.1f})"
+                # 2순위: RSI Turbo (수익 가속 - 3배 자산)
+                elif smart_params.get('use_rsi_turbo') and rsi < smart_params.get('rsi_turbo', 31):
                     effective_lev_asset = target_group[2]
-                    smart_reason = f"스마트(RSI가속:{rsi:.1f})"
+                    smart_reason = f"가속(RSI:{rsi:.1f})"
+                # 기본: 사용자 선택 자산 (예: 2배)
                 else:
-                    effective_lev_asset = target_group[1]
-                    smart_reason = "스마트(Normal)"
+                    effective_lev_asset = leverage_asset
+                    if smart_params.get('use_vix_safety') or smart_params.get('use_rsi_turbo'):
+                        smart_reason = "정상(Normal)"
 
             # 현재 가격 추출 (전략 실행용)
             try:
@@ -873,7 +912,7 @@ class StrategyEngine:
                 'Cash': cash,
                 'Trade_Label': trade_label,
                 'Summary': ", ".join(summary_parts),
-                'Asset': f"{main_asset}(S{rebalance_stage})" if rebalance_stage < 3 else main_asset,
+                'Asset': f"{current_planned_asset}(S{rebalance_stage})" if 0 < rebalance_stage < 3 else current_planned_asset,
                 'Target': f"{new_planned}(S{new_stage})" if new_stage < 3 else new_planned,
                 'Lev_Weight': current_lev_funds / current_total_val if current_total_val > 0 else 0,
                 f'{base_asset}_Weight': bw,
@@ -1367,8 +1406,55 @@ class HistoryLabView:
 
     @staticmethod
     def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params, smart_params=None):
-        st.header("📜 역사적 마켓 랩 (Historical Market Lab)")
-        st.caption("2010년부터 현재까지의 시장 역사를 전략적 관점에서 분석합니다.")
+        st.header("📜 매매 전략 설정 및 역사적 분석")
+        st.caption("전략을 저장하거나 불러오고, 2010년부터 현재까지의 성과를 분석합니다.")
+
+        # [신규] 전략 파일 관리 섹션 (사이드바에서 이동)
+        st.divider()
+        st.subheader("💾 전략 파일 관리")
+        cp = st.session_state.current_params
+
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.form("save_strat_form_main"):
+                st.write("📝 현재 전략 저장")
+                new_strat_name = st.text_input("새 전략 이름 입력", key="new_strat_save_name_main")
+                save_submitted = st.form_submit_button("💾 내 컴퓨터에 신규 저장", use_container_width=True)
+                if save_submitted:
+                    if new_strat_name:
+                        StrategyStorage.save_strategy(new_strat_name, cp)
+                        st.session_state.loaded_strat_name = new_strat_name
+                        st.success(f"'{new_strat_name}' 저장 완료")
+                        st.rerun()
+                    else:
+                        st.warning("전략 이름을 입력해 주세요.")
+            
+            # 업데이트 버튼은 즉시 반영을 위해 폼 외부에 배치 가능하거나, 
+            # 폼 내부에서 처리 가능하나 UI 흐름상 저 이름 입력과 별개이므로 분리 유지
+            if st.session_state.get('loaded_strat_name'):
+                st.write(f"🔄 기존 전략: **{st.session_state.loaded_strat_name}**")
+                if st.button(f"🚀 '{st.session_state.loaded_strat_name}' 업데이트 (덮어쓰기)", key="update_btn_main", use_container_width=True):
+                    StrategyStorage.save_strategy(st.session_state.loaded_strat_name, cp)
+                    st.success(f"'{st.session_state.loaded_strat_name}' 업데이트 완료!")
+
+        with col2:
+            stored_strats = StrategyStorage.list_strategies()
+            if stored_strats:
+                with st.form("load_strat_form_main"):
+                    st.write("📂 저장된 전략 불러오기")
+                    target_strat = st.selectbox("전략 선택 (목록)", ["선택 안 함"] + stored_strats, key="load_sel_main")
+                    load_submitted = st.form_submit_button("✨ 선택한 전략 적용하기", use_container_width=True)
+                    if load_submitted and target_strat != "선택 안 함":
+                        config = StrategyStorage.load_strategy(target_strat)
+                        if config:
+                            st.session_state.current_params.update(config)
+                            st.session_state.loaded_strat_name = target_strat
+                            # [핵심] 즉시 동기화 대신 플래그 설정 후 Rerun (API 오류 방지)
+                            st.session_state.pending_sync = True
+                            st.success(f"'{target_strat}' 모든 설정 로드 완료!")
+                            st.rerun()
+            else:
+                st.info("저장된 전략이 없습니다.")
         
         # 전체 기간 데이터 확보
         start_date = datetime.date(2010, 1, 1)
@@ -1376,6 +1462,13 @@ class HistoryLabView:
         
         with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
             golden_history, closed_trades = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, 0, start_date, end_date, params, trade_at, smart_params=smart_params)
+            
+            # [신규] 비교 분석용 세션 상태 저장 (탭 이동 시에도 최신 결과 유지)
+            st.session_state.last_golden_result = {
+                'history': golden_history.copy(),
+                'base': base_asset,
+                'lev': leverage_asset
+            }
             
             # [수정] 섹터별 동적 벤치마크 로드 (나스닥 vs 반도체)
             semi_group = ['SOXX', 'USD', 'SOXL']
@@ -1401,9 +1494,10 @@ class HistoryLabView:
         st.subheader("⚙️ 전략 매매 조건 설정")
         st.caption("여기서 설정을 변경한 후 아래 버튼을 클릭해야 모든 분석 결과에 반영됩니다.")
         with st.form("strategy_config_form"):
-            params = TesterView.render_config(st.session_state.current_params)
+            new_params = TesterView.render_config(st.session_state.current_params)
             if st.form_submit_button("🚀 설정 반영 및 재시뮬레이션"):
-                st.session_state.current_params = params
+                # 기존 current_params의 다른 설정(리스크 관리 등)을 유지하며 업데이트
+                st.session_state.current_params.update(new_params)
                 st.rerun()
 
     @staticmethod
@@ -1460,10 +1554,10 @@ class HistoryLabView:
             if 'Trade_Label' in s_h.columns:
                 s_y_full = s_h[s_h.index.year == y]
                 panic_ma = smart_params.get('panic_ma', 200) if smart_params else 200
-                panic_days = s_y_full['Trade_Label'].str.contains(f"지연\(MA{panic_ma}", na=False).sum()
+                panic_days = s_y_full['Trade_Label'].str.contains(f"지연\\(MA{panic_ma}", na=False).sum()
                 
-                # [신규] VIX대피(Safety) 발생 횟수 집계
-                safety_count = s_y_full['Trade_Label'].str.contains("VIX대피", na=False).sum()
+                # [신규] VIX대피(Safety) 발생 횟수 집계 (라벨 변경 대응: "스마트(VIX대피" -> "대피(VIX")
+                safety_count = s_y_full['Trade_Label'].str.contains("대피", na=False).sum()
             
             event = HistoryLabView.EVENTS.get(y, "-")
             
@@ -1519,22 +1613,26 @@ class HistoryLabView:
 
     @staticmethod
     def render_overall_summary(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ")):
-        def calculate_mdd(series):
+        def calculate_mdd_ui(series):
             s = series.dropna()
             if s.empty: return 0
             roll_max = s.cummax()
             dd = (s - roll_max) / roll_max
-            return dd.min()
+            mdd = dd.min()
+            ui = np.sqrt((dd**2).mean()) * 100
+            return mdd, ui
+
 
         def get_summary(ser, name):
             if ser is None or ser.empty: return None
             total_ret = (ser.iloc[-1] / 10000.0 - 1) * 100
             years_count = (ser.index[-1] - ser.index[0]).days / 365.25
             cagr = ((ser.iloc[-1] / 10000.0) ** (1/years_count) - 1) * 100 if years_count > 0 else 0
-            mdd = calculate_mdd(ser) * 100
+            mdd_val, ui_val = calculate_mdd_ui(ser)
+            mdd = mdd_val * 100
             # 일별 수익률의 산술 합계
             ret_sum = ser.pct_change().dropna().sum() * 100
-            return {"구분": name, "누적 수익률": f"{total_ret:+.1f}%", "수익률 합": f"{ret_sum:+.1f}%", "연평균(CAGR)": f"{cagr:.1f}%", "최대낙폭(MDD)": f"{mdd:.1f}%"}
+            return {"구분": name, "누적 수익률": f"{total_ret:+.1f}%", "연평균(CAGR)": f"{cagr:.1f}%", "최대낙폭(MDD)": f"{mdd:.1f}%", "궤양 지수(UI)": f"{ui_val:.1f}%"}
 
         summary_data = [
             get_summary(s_h['Value'], "내 전략 🔥"),
@@ -1748,11 +1846,67 @@ class ChartView:
                 panic_ma = smart_params.get('panic_ma', 200)
                 st.info(f"🛡️ **하락장 대응 활성**: 주가 < SMA{panic_ma}일 때 매수를 RSI {smart_params.get('panic_rsi_s1', 32)}/{smart_params.get('panic_rsi_s2', 32)}/{smart_params.get('panic_rsi_s3', 30)} 이하로 제한합니다.")
 
-            # 연도별 성과 테이블 및 요약 (기존 화면에서 이동)
+            # [신규] 연도별 수익률 바 차트 시각화
+            st.subheader(f"📊 연도별 수익률 비교 ({actual_start.year}~)")
+            st.caption(f"내 전략과 대표 벤치마크({b1})의 연도별 성과를 비교합니다.")
+            
+            y_val_s = golden_history['Value'].resample('YE').last()
+            y_val_b = bh_1['Value'].resample('YE').last()
+            
+            y_ret_s = y_val_s.pct_change()
+            y_ret_b = y_val_b.pct_change()
+            
+            # 첫해 보정
+            y_ret_s.iloc[0] = (y_val_s.iloc[0] / golden_history['Value'].iloc[0]) - 1
+            y_ret_b.iloc[0] = (y_val_b.iloc[0] / bh_1['Value'].iloc[0]) - 1
+            
+            fig_y = go.Figure()
+            fig_y.add_trace(go.Bar(x=y_ret_s.index.year, y=y_ret_s*100, name='내 전략', marker_color='#ff1744'))
+            fig_y.add_trace(go.Bar(x=y_ret_b.index.year, y=y_ret_b*100, name=b1, marker_color='rgba(100, 100, 100, 0.5)'))
+            
+            fig_y.update_layout(
+                barmode='group',
+                yaxis_title="수익률 (%)",
+                xaxis=dict(tickmode='linear'),
+                template='plotly_white',
+                height=350,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            st.plotly_chart(fig_y, use_container_width=True)
+
+        # 연도별 성과 테이블 및 요약 (기존 화면에서 이동)
             HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
             st.divider()
             st.subheader("📊 전체 기간 요약")
             HistoryLabView.render_overall_summary(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
+
+            # [신규] 침수 차트 (Underwater Chart) 추가
+            st.divider()
+            st.subheader("🌊 침수 차트 (Underwater Chart)")
+            st.caption("전고점 대비 현재 하락폭을 시각화합니다. 구덩이가 깊고 넓을수록 고통스러운 구간임을 의미합니다.")
+            
+            def get_drawdown(ser):
+                if ser.empty: return ser
+                roll_max = ser.cummax()
+                return (ser / roll_max - 1) * 100
+
+            s_dd = get_drawdown(golden_history['Value'])
+            b_dd = get_drawdown(bh_1['Value'])
+
+            fig_dd = go.Figure()
+            # 벤치마크 (연한색)
+            fig_dd.add_trace(go.Scatter(x=b_dd.index, y=b_dd, name=f'{b1} (1x) DD', fill='tozeroy', line=dict(color='rgba(100, 100, 100, 0.3)', width=1)))
+            # 내 전략 (강조색)
+            fig_dd.add_trace(go.Scatter(x=s_dd.index, y=s_dd, name='내 전략 DD', fill='tozeroy', line=dict(color='#ff1744', width=2)))
+            
+            fig_dd.update_layout(
+                title="Strategy vs Benchmark Drawdown (Underwater Chart)",
+                yaxis_title="Drawdown (%)",
+                template='plotly_white',
+                height=400,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+            st.plotly_chart(fig_dd, use_container_width=True)
 
             # [신규] 완료된 거래 저널 표시 (이동됨)
             if all_closed_trades is not None and not all_closed_trades.empty:
@@ -1801,13 +1955,13 @@ class ChartView:
                 lev_days = df_hit[df_hit['Lev_Weight'] > 0.01]
                 total_hit = lev_days['Is_Up'].mean() if not lev_days.empty else 0
                 
-                s1_days = df_hit[df_hit['Asset'].str.contains('\(S1\)', na=False)]
+                s1_days = df_hit[df_hit['Asset'].str.contains('\\(S1\\)', na=False)]
                 s1_hit = s1_days['Is_Up'].mean() if not s1_days.empty else 0
                 
-                s2_days = df_hit[df_hit['Asset'].str.contains('\(S2\)', na=False)]
+                s2_days = df_hit[df_hit['Asset'].str.contains('\\(S2\\)', na=False)]
                 s2_hit = s2_days['Is_Up'].mean() if not s2_days.empty else 0
                 
-                s3_days = lev_days[~lev_days['Asset'].str.contains('\(S', na=False)]
+                s3_days = lev_days[~lev_days['Asset'].str.contains('\\(S', na=False)]
                 s3_hit = s3_days['Is_Up'].mean() if not s3_days.empty else 0
         
                 c1, c2, c3, c4 = st.columns(4)
@@ -2070,15 +2224,64 @@ class TesterView:
         
         st.divider(); st.subheader("🔄 리밸런싱 전략")
         r1, r2, r3, r4 = st.columns(4)
-        buy_reb_up = r1.number_input("Buy Reb Up (%)", value=float(current_params.get('buy_reb_up', 0.02)*100), step=0.5)/100
-        buy_reb_down = r2.number_input("Buy Reb Down (%)", value=float(current_params.get('buy_reb_down', -0.05)*100), step=0.5)/100
-        sell_reb_up = r3.number_input("Sell Reb Up (%)", value=float(current_params.get('sell_reb_up', 0.03)*100), step=0.5)/100
-        sell_reb_down = r4.number_input("Sell Reb Down (%)", value=float(current_params.get('sell_reb_down', -0.035)*100), step=0.5)/100
+        buy_reb_up = r1.number_input("Buy Reb Up (%)", value=float(current_params.get('buy_reb_up', 0.02)*100), step=0.5, key="buy_reb_up_ni")/100
+        buy_reb_down = r2.number_input("Buy Reb Down (%)", value=float(current_params.get('buy_reb_down', -0.05)*100), step=0.5, key="buy_reb_down_ni")/100
+        sell_reb_up = r3.number_input("Sell Reb Up (%)", value=float(current_params.get('sell_reb_up', 0.03)*100), step=0.5, key="sell_reb_up_ni")/100
+        sell_reb_down = r4.number_input("Sell Reb Down (%)", value=float(current_params.get('sell_reb_down', -0.035)*100), step=0.5, key="sell_reb_down_ni")/100
         
         return {
             'buy_signals': buy_signals, 'sell_signals': sell_signals,
             'buy_reb_up': buy_reb_up, 'buy_reb_down': buy_reb_down, 'sell_reb_up': sell_reb_up, 'sell_reb_down': sell_reb_down
         }
+
+    @staticmethod
+    def sync_params_to_widgets(params):
+        """current_params의 값을 모든 위젯의 Key(st.session_state[key])로 강제 동기화"""
+        # 1. 자산 및 기본 설정
+        st.session_state['ba_sb'] = params.get('base_asset', 'QQQ')
+        st.session_state['la_sb'] = params.get('leverage_asset', 'QLD')
+        st.session_state['cr_sl'] = params.get('cash_ratio_pct', 0)
+        st.session_state['ta_rd'] = params.get('trade_at', '종가')
+        
+        # 2. 리스크 관리
+        st.session_state['up_cb'] = params.get('use_panic', True)
+        st.session_state['pm_sb'] = params.get('panic_ma', 200)
+        st.session_state['pr1_sl'] = params.get('panic_rsi_s1', 27)
+        st.session_state['pr2_sl'] = params.get('panic_rsi_s2', 28)
+        st.session_state['pr3_sl'] = params.get('panic_rsi_s3', 30)
+        st.session_state['uvs_cb'] = params.get('use_vix_safety', True)
+        st.session_state['ve_sl'] = params.get('vix_exit', 31)
+        
+        # 3. 수익 부스터
+        st.session_state['urt_cb'] = params.get('use_rsi_turbo', True)
+        st.session_state['rt_sl'] = params.get('rsi_turbo', 31)
+        
+        # 5. 리밸런싱 설정
+        st.session_state['buy_reb_up_ni'] = float(params.get('buy_reb_up', 0.02)*100)
+        st.session_state['buy_reb_down_ni'] = float(params.get('buy_reb_down', -0.05)*100)
+        st.session_state['sell_reb_up_ni'] = float(params.get('sell_reb_up', 0.03)*100)
+        st.session_state['sell_reb_down_ni'] = float(params.get('sell_reb_down', -0.035)*100)
+        
+        # 4. 매매 시그널 (루프 순회)
+        for i, b in enumerate(params.get('buy_signals', []), 1):
+            if i > 2: break
+            st.session_state[f"b_rsi_{i}"] = b.get('rsi_val', 0)
+            st.session_state[f"b_cross_{i}"] = b.get('rsi_cross', False)
+            st.session_state[f"b_inc_{i}"] = b.get('rsi_inc', False)
+            st.session_state[f"b_m_inc_{i}"] = b.get('macd_inc', False)
+            st.session_state[f"b_m_bel_{i}"] = b.get('macd_signal_below', False)
+            st.session_state[f"b_m_gold_{i}"] = b.get('macd_golden', False)
+            st.session_state[f"b_bb_l_{i}"] = b.get('bb_lower', False)
+            
+        for i, s in enumerate(params.get('sell_signals', []), 1):
+            if i > 3: break
+            st.session_state[f"s_rsi_{i}"] = s.get('rsi_val', 0)
+            st.session_state[f"s_rsi_dead_{i}"] = s.get('rsi_dead', False)
+            st.session_state[f"s_rsi_dec_{i}"] = s.get('rsi_dec', False)
+            st.session_state[f"s_macd_dec_{i}"] = s.get('macd_dec', False)
+            st.session_state[f"s_macd_above_{i}"] = s.get('macd_signal_above', False)
+            st.session_state[f"s_macd_dead_{i}"] = s.get('macd_dead', False)
+            st.session_state[f"s_bb_u_{i}"] = s.get('bb_upper', False)
 
 # --- Main Application Orchestrator ---
 
@@ -2096,14 +2299,23 @@ class GoldenStrategyApp:
         st.title("📈 ETF Golden Strategy")
         
         # 사이드바 메뉴
-        menu = st.sidebar.radio("📌 메뉴", ["📊 트레이드", "📊 데이터 분석", "📜 매매 전략 설정", "📰 주요 마켓 이슈"])
+        menu = st.sidebar.radio("📌 메뉴", ["📊 트레이드", "📊 데이터 분석", "📜 매매 전략 설정", "📈 전략 성과 비교", "📰 주요 마켓 이슈"])
         if st.sidebar.button("🔄 데이터 새로고침 (Live)"):
             st.cache_data.clear()
             st.rerun()
             
-        # [신규] 핵심 파라미터 초기화 (최상단으로 이동하여 탭 전환 시 초기화 방지)
+        # [신규] 비교 분석 리스트 초기화
+        if 'comparison_list' not in st.session_state:
+            st.session_state.comparison_list = []
+        
+        # [신규] 현재 로드된 전략 이름 추적
+        if 'loaded_strat_name' not in st.session_state:
+            st.session_state.loaded_strat_name = None
+            
+        # [신규] 핵심 파라미터 초기화 (모든 설정을 하나로 통합)
         if 'current_params' not in st.session_state:
             st.session_state.current_params = {
+                # 1. 매매 시그널 파라미터
                 'buy_signals': [
                     {'rsi_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False},
                     {'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False}
@@ -2113,8 +2325,27 @@ class GoldenStrategyApp:
                     {'rsi_val': 0, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'bb_upper': False},
                     {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'bb_upper': False}
                 ],
-                'buy_reb_up': 0.02, 'buy_reb_down': -0.05, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035
+                'buy_reb_up': 0.02, 'buy_reb_down': -0.05, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
+                
+                # 2. 자산 및 기본 설정
+                'base_asset': 'QQQ', 'leverage_asset': 'QLD', 'cash_ratio_pct': 0, 'trade_at': '종가',
+                
+                # 3. 리스크 관리 파라미터
+                'use_panic': True, 'panic_ma': 200, 
+                'panic_rsi_s1': 27, 'panic_rsi_s2': 28, 'panic_rsi_s3': 30,
+                'use_vix_safety': True, 'vix_exit': 31,
+                
+                # 4. 수익 부스터 파라미터
+                'use_rsi_turbo': True, 'rsi_turbo': 31
             }
+        
+        # 기초 포인터 (수정 코드 간소화용)
+        cp = st.session_state.current_params
+
+        # [신규] 위젯 즉시 동기화 처리 (Rerun 후 위젯 생성 전 실행)
+        if st.session_state.get('pending_sync'):
+            TesterView.sync_params_to_widgets(cp)
+            st.session_state.pending_sync = False
         
         # 데이터 로딩
         with st.spinner('실시간 데이터를 가져오는 중...'):
@@ -2126,40 +2357,164 @@ class GoldenStrategyApp:
         
         # 백테스트 및 전략 분석기 공통 설정
         st.sidebar.header("전략 및 기간 설정")
-        base_asset = st.sidebar.selectbox("기준 자산 (시그널)", ["QQQ", "QLD", "TQQQ", "SOXX", "USD", "SOXL"], index=0, format_func=lambda x: self.ticker_map[x])
-        leverage_asset = st.sidebar.selectbox("매매 대상 자산", ["QLD", "TQQQ", "USD", "SOXL", "TMF"], index=0, format_func=lambda x: self.ticker_map[x])
-        cash_ratio = st.sidebar.slider("현금 비중 (%)", 0, 50, 0, step=5) / 100.0
+        base_asset_opts = ["QQQ", "QLD", "TQQQ", "SOXX", "USD", "SOXL"]
+        base_asset = st.sidebar.selectbox("기준 자산 (시그널)", base_asset_opts, index=base_asset_opts.index(cp['base_asset']), key="ba_sb", format_func=lambda x: self.ticker_map[x])
+        cp['base_asset'] = base_asset
         
-        # [신규] 스마트 레버리지 모드 설정
+        leverage_asset_opts = ["QLD", "TQQQ", "USD", "SOXL", "TMF"]
+        leverage_asset = st.sidebar.selectbox("매매 대상 자산", leverage_asset_opts, index=leverage_asset_opts.index(cp['leverage_asset']), key="la_sb", format_func=lambda x: self.ticker_map[x])
+        cp['leverage_asset'] = leverage_asset
+        
+        cash_ratio_pct = st.sidebar.slider("현금 비중 (%)", 0, 50, value=cp['cash_ratio_pct'], step=5, key="cr_sl")
+        cp['cash_ratio_pct'] = cash_ratio_pct
+        cash_ratio = cash_ratio_pct / 100.0
+        
+        # [신규] 리스크 관리 설정 (VIX Safety 통합)
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🚀 스마트 레버리지")
-        use_smart = st.sidebar.checkbox("스마트 레버리지 활성화", value=True, help="VIX와 RSI를 분석해 자산을 자동으로 스위칭합니다.")
-        
-        smart_params = {'use_smart': use_smart}
-        if use_smart:
-            with st.sidebar.expander("가속/탈출 파라미터"):
-                v_exit = st.slider("VIX 도망점 (Safety)", 20, 50, 31)
-                r_turbo = st.slider("RSI 가속점 (Turbo)", 20, 40, 31)
-                smart_params.update({'vix_exit': v_exit, 'rsi_turbo': r_turbo})
-        
-        # [신규] 리스크 방어 모드 설정 (가변 RSI 매수 제한)
         st.sidebar.subheader("🛡️ 리스크 관리")
-        use_panic = st.sidebar.checkbox("하락장 매수 제한", value=True, help="주가가 설정한 이평선 아래일 때 추가 매수 조건을 강화합니다.")
-        panic_ma = st.sidebar.selectbox("방어막 기준 이평선", [200, 60], index=0, help="하락장 판정의 기준이 되는 이동평균선입니다.")
         
-        smart_params.update({'use_panic': use_panic, 'panic_ma': panic_ma})
+        # 1. 하락장 매수 제한
+        use_panic = st.sidebar.checkbox("하락장 매수 제한", value=cp['use_panic'], key="up_cb", help="주가가 설정한 이평선 아래일 때 추가 매수 조건을 강화합니다.")
+        cp['use_panic'] = use_panic
+        
+        panic_ma_opts = [200, 60]
+        panic_ma = st.sidebar.selectbox("방어막 기준 이평선", panic_ma_opts, index=panic_ma_opts.index(cp['panic_ma']), key="pm_sb", help="하락장 판정의 기준이 되는 이동평균선입니다.")
+        cp['panic_ma'] = panic_ma
+        
+        smart_params = {'use_panic': use_panic, 'panic_ma': panic_ma}
         if use_panic:
             with st.sidebar.expander(f"SMA{panic_ma} 방어 파라미터"):
                 st.caption(f"주가가 {panic_ma}일 이평선 하단일 때 적용")
-                p_r1 = st.slider("1단계 매수 RSI", 15, 45, 27)
-                p_r2 = st.slider("2단계 매수 RSI", 15, 40, 28)
-                p_r3 = st.slider("3단계 매수 RSI", 15, 40, 30)
+                p_r1 = st.slider("1단계 매수 RSI", 15, 45, value=cp['panic_rsi_s1'], key="pr1_sl")
+                p_r2 = st.slider("2단계 매수 RSI", 15, 40, value=cp['panic_rsi_s2'], key="pr2_sl")
+                p_r3 = st.slider("3단계 매수 RSI", 15, 40, value=cp['panic_rsi_s3'], key="pr3_sl")
+                cp['panic_rsi_s1'], cp['panic_rsi_s2'], cp['panic_rsi_s3'] = p_r1, p_r2, p_r3
                 smart_params.update({'panic_rsi_s1': p_r1, 'panic_rsi_s2': p_r2, 'panic_rsi_s3': p_r3})
+
+        # 2. VIX Safety
+        use_vix_safety = st.sidebar.checkbox("VIX Safety (시장 대피)", value=cp['use_vix_safety'], key="uvs_cb", help="VIX 지수가 일정 수준 이상일 때 안전자산(1배)으로 대피합니다.")
+        cp['use_vix_safety'] = use_vix_safety
+        if use_vix_safety:
+            v_exit = st.sidebar.slider("VIX 도망점 (Safety)", 20, 50, value=cp['vix_exit'], key="ve_sl")
+            cp['vix_exit'] = v_exit
+            smart_params.update({'use_vix_safety': True, 'vix_exit': v_exit})
+        else:
+            smart_params.update({'use_vix_safety': False})
+
+        # [신규] 수익 부스터 설정 (RSI Turbo 분리)
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("🚀 수익 부스터")
+        use_rsi_turbo = st.sidebar.checkbox("저RSI 가속 (Turbo)", value=cp['use_rsi_turbo'], key="urt_cb", help="RSI가 매우 낮을 때 일시적으로 레버리지를 3배로 높여 수익을 극대화합니다.")
+        cp['use_rsi_turbo'] = use_rsi_turbo
+        
+        if use_rsi_turbo:
+            r_turbo = st.sidebar.slider("RSI 가속점 (Turbo)", 20, 40, value=cp['rsi_turbo'], key="rt_sl")
+            cp['rsi_turbo'] = r_turbo
+            smart_params.update({'use_rsi_turbo': True, 'rsi_turbo': r_turbo})
+        else:
+            smart_params.update({'use_rsi_turbo': False})
                 
         st.sidebar.markdown("---")
 
-        # [신규] 매매 시점 선택 유의: 종가 매매는 당일 체결, 익일 시가는 다음날 아침 체결
-        trade_at = st.sidebar.radio("매매 시점 선택", ["종가", "익일 시가"], index=0, horizontal=True)
+        # [신규] 매매 시점 선택
+        trade_at_opts = ["종가", "익일 시가"]
+        trade_at = st.sidebar.radio("매매 시점 선택", trade_at_opts, index=trade_at_opts.index(cp['trade_at']), key="ta_rd", horizontal=True)
+        cp['trade_at'] = trade_at
+
+        # [신규] 비교 분석 UI를 모든 페이지에서 볼 수 있도록 상단(메뉴 분기 전)으로 이동
+        st.sidebar.divider()
+        st.sidebar.subheader("🔍 비교 분석")
+        
+        # [개선] 비교 분석 UI 상시 노출 (결과 유무와 관계없이)
+        stored_strats = StrategyStorage.list_strategies()
+        loaded_name = st.session_state.get('loaded_strat_name')
+        auto_name = f"전략_{len(st.session_state.comparison_list)+1}"
+        
+        name_opts = ["직접 입력"]
+        if loaded_name:
+            name_opts.append(f"현재 전략: {loaded_name}")
+        name_opts.extend([s for s in stored_strats if s != loaded_name])
+        
+        # 상단 콤보박스로 이름 선택
+        selected_name_opt = st.sidebar.selectbox("비교군 이름 선택", name_opts, index=1 if loaded_name else 0, key="comp_name_sel")
+        
+        if selected_name_opt == "직접 입력":
+            comp_name = st.sidebar.text_input("직접 입력", value=auto_name, key="comp_name_custom")
+        elif selected_name_opt.startswith("현재 전략: "):
+            comp_name = loaded_name
+        else:
+            comp_name = selected_name_opt
+
+        # 결과 추가 버튼 (상시 노출)
+        if st.sidebar.button("📊 현재 결과를 비교군에 추가", key="add_comp_btn_common"):
+            target_res = None
+            
+            # 1. 데이터 확보 전략 결정
+            if selected_name_opt == "직접 입력" or selected_name_opt.startswith("현재 전략: "):
+                # 현재 화면의 마지막 성공 결과를 사용
+                if 'last_golden_result' in st.session_state and st.session_state.last_golden_result is not None:
+                    target_res = st.session_state.last_golden_result
+            else:
+                # 특정 저장 전략을 선택한 경우 -> 즉석에서 해당 설정으로 시뮬레이션 수행
+                with st.sidebar:
+                    with st.spinner(f"'{selected_name_opt}' 분석 중..."):
+                        loaded_config = StrategyStorage.load_strategy(selected_name_opt)
+                        if loaded_config:
+                            # 전략 파일에 저장된 설정값 매핑
+                            s_base = loaded_config.get('base_asset', cp['base_asset'])
+                            s_lev = loaded_config.get('leverage_asset', cp['leverage_asset'])
+                            s_cash = loaded_config.get('cash_ratio_pct', cp['cash_ratio_pct']) / 100.0
+                            s_trade_at = loaded_config.get('trade_at', cp['trade_at'])
+                            
+                            # 스마트 파라미터 (리스크/부스터) 재구성
+                            s_smart = {
+                                'use_panic': loaded_config.get('use_panic', False),
+                                'panic_ma': loaded_config.get('panic_ma', 200),
+                                'panic_rsi_s1': loaded_config.get('panic_rsi_s1', 30),
+                                'panic_rsi_s2': loaded_config.get('panic_rsi_s2', 30),
+                                'panic_rsi_s3': loaded_config.get('panic_rsi_s3', 30),
+                                'use_vix_safety': loaded_config.get('use_vix_safety', False),
+                                'vix_exit': loaded_config.get('vix_exit', 30),
+                                'use_rsi_turbo': loaded_config.get('use_rsi_turbo', False),
+                                'rsi_turbo': loaded_config.get('rsi_turbo', 30)
+                            }
+                            
+                            # 정확한 비교를 위해 역사적 전체 기간 시뮬레이션 (2010~)
+                            s_start = datetime.date(2010, 1, 1)
+                            s_end = datetime.date.today()
+                            
+                            h, _ = StrategyEngine.run_golden_strategy(
+                                data_dict, fg_df, vix_df, s_lev, s_base, s_cash, s_start, s_end, 
+                                loaded_config, s_trade_at, smart_params=s_smart
+                            )
+                            if not h.empty:
+                                target_res = {'history': h, 'base': s_base, 'lev': s_lev}
+
+            # 2. 결과가 확보되었다면 비교 목록에 추가
+            if target_res:
+                res = target_res
+                # 데이터 강화 (필요한 컬럼 생성)
+                hist_copy = res['history'].copy()
+                if 'PortfolioValue' not in hist_copy.columns and 'Value' in hist_copy.columns:
+                    hist_copy.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+                
+                # 수익률 컬럼 계산
+                hist_copy['Daily_Return'] = hist_copy['PortfolioValue'].pct_change()
+                hist_copy['Cumulative_Return'] = (1 + hist_copy['Daily_Return']).cumprod() - 1
+                hist_copy.fillna(0, inplace=True)
+                
+                # metrics 계산 및 추가
+                m = calculate_metrics(hist_copy)
+                st.session_state.comparison_list.append({
+                    'name': comp_name,
+                    'history': hist_copy[['Cumulative_Return', 'PortfolioValue']].copy(),
+                    'metrics': m,
+                    'base': res['base'],
+                    'lev': res['lev']
+                })
+                st.sidebar.success(f"'{comp_name}' 비교 목록에 추가됨!")
+            else:
+                st.sidebar.warning("⚠️ 분석 가능한 데이터가 없습니다. 먼저 분석을 실행하거나 유효한 전략을 선택해 주세요.")
 
         # 마켓 이슈 화면
         if menu == "📰 주요 마켓 이슈":
@@ -2174,6 +2529,11 @@ class GoldenStrategyApp:
         # [신규] 역사적 마켓 랩 화면 처리
         if menu == "📜 매매 전략 설정":
             HistoryLabView.render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, st.session_state.get('current_params'), smart_params=smart_params)
+            st.stop()
+            
+        # [신규] 전략 성과 비교 화면 처리
+        if menu == "📈 전략 성과 비교":
+            self.render_comparison_view()
             st.stop()
         
         if 'QQQ' in data_dict:
@@ -2225,9 +2585,184 @@ class GoldenStrategyApp:
             bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in bench_tickers}
             golden_history, closed_trades = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_d, end_d, params, trade_at, smart_params=smart_params)
             
+            # [신규] 비교 분석용 세션 상태 저장
+            st.session_state.last_golden_result = {
+                'history': golden_history.copy(),
+                'base': base_asset,
+                'lev': leverage_asset
+            }
+            
         # 결과 렌더링
         BacktestView.render_results(golden_history, bh_histories, closed_trades, base_asset, leverage_asset, smart_params=smart_params)
         st.info("💡 팁: '역사적 마켓 랩 > 전략 매매 조건 설정' 탭에서 설정을 변경한 후 [설정 반영] 버튼을 눌러야 분석 결과가 업데이트됩니다.")
+
+    def render_comparison_view(self):
+        """저장된 전략들의 성과를 한 화면에서 비교 렌더링"""
+        st.header("📈 전략 성과 비교 분석")
+        
+        if not st.session_state.comparison_list:
+            st.info("비교 목록이 비어 있습니다. '트레이드' 메뉴에서 백테스트 결과를 [비교군에 추가] 해주세요.")
+            return
+
+        # 목록 관리
+        with st.expander("비교 목록 관리", expanded=False):
+            for i, item in enumerate(st.session_state.comparison_list):
+                col1, col2 = st.columns([4, 1])
+                col1.write(f"**{i+1}. {item['name']}** ({item['base']} / {item['lev']})")
+                if col2.button("삭제", key=f"del_{i}"):
+                    st.session_state.comparison_list.pop(i)
+                    st.rerun()
+            if st.button("비교 목록 전체 초기화"):
+                st.session_state.comparison_list = []
+                st.rerun()
+
+        if not st.session_state.comparison_list:
+            return
+
+        # 1. 누적 수익률 통합 차트
+        st.subheader("📊 누적 수익률 비교")
+        fig = go.Figure()
+        for item in st.session_state.comparison_list:
+            hist = item['history']
+            fig.add_trace(go.Scatter(
+                x=hist.index, 
+                y=hist['Cumulative_Return'] * 100, 
+                mode='lines', 
+                name=item['name']
+            ))
+        fig.update_layout(
+            hovermode='x unified',
+            yaxis_title="누적 수익률 (%)",
+            xaxis_title="날짜",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # 2. 통합 침수 차트 (Drawdown Comparison)
+        st.subheader("🌊 통합 침수 차트 (Drawdown)")
+        fig_dd = go.Figure()
+        
+        def get_dd(ser):
+            if ser.empty: return ser
+            return (ser / ser.cummax() - 1) * 100
+
+        for item in st.session_state.comparison_list:
+            hist = item['history']
+            # PortfolioValue가 있으면 사용, 없으면 추정 (Cumulative_Return 기반)
+            val_ser = hist['PortfolioValue'] if 'PortfolioValue' in hist.columns else (1 + hist['Cumulative_Return']) * 10000
+            dd = get_dd(val_ser)
+            
+            fig_dd.add_trace(go.Scatter(
+                x=dd.index, 
+                y=dd, 
+                mode='lines', 
+                name=item['name'],
+                fill='tozeroy' if len(st.session_state.comparison_list) <= 3 else None, # 너무 많으면 채우기 생략
+                opacity=0.6
+            ))
+            
+        fig_dd.update_layout(
+            hovermode='x unified',
+            yaxis_title="Drawdown (%)",
+            xaxis_title="날짜",
+            template='plotly_white',
+            height=400,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+        # 3. 연도별 수익률 비교 매트릭스
+        st.subheader("📅 연도별 수익률 비교")
+        yearly_data = {}
+        for item in st.session_state.comparison_list:
+            hist = item['history']
+            # 연도별 수익률 추출
+            y_ret = hist['Cumulative_Return'].resample('YE').last().pct_change().fillna(hist['Cumulative_Return'].resample('YE').last().iloc[0])
+            # 위 방식보다 정확한 연도별 수익률 계산 (기존 history의 PortfolioValue 활용 권장)
+            val_ser = hist['PortfolioValue'] if 'PortfolioValue' in hist.columns else (1 + hist['Cumulative_Return']) * 10000
+            y_val = val_ser.resample('YE').last()
+            y_ret = y_val.pct_change()
+            # 첫해 수익률 보정
+            first_year = y_val.index[0].year
+            initial_val = val_ser.iloc[0]
+            y_ret.iloc[0] = (y_val.iloc[0] / initial_val) - 1
+            
+            y_ret.index = y_ret.index.year
+            yearly_data[item['name']] = y_ret
+
+        if yearly_data:
+            df_yearly = pd.DataFrame(yearly_data)
+            
+            def color_returns(val):
+                if pd.isna(val): return ''
+                color = '#e74c3c' if val > 0 else '#3498db'
+                return f'color: {color}; font-weight: bold'
+
+            # 소수점 1자리 퍼센트 포맷팅 및 스타일링
+            st.dataframe(
+                df_yearly.style.format("{:.1%}", na_rep="-").applymap(color_returns),
+                use_container_width=True
+            )
+
+        # 4. 전략 성격 분석 (Radar Chart)
+        st.subheader("🎯 전략 성격 분석 (Radar Chart)")
+        st.caption("5대 핵심 지표를 100점 만점으로 환산하여 전략의 강점과 약점을 시각화합니다.")
+        
+        fig_radar = go.Figure()
+        
+        categories = ['수익성 (CAGR)', '안정성 (MDD)', '효율성 (Sharpe)', '승률 (Win Rate)', '회복력 (Resilience)']
+        
+        for item in st.session_state.comparison_list:
+            m = item['metrics']
+            
+            # 5대 지표 점수화 로직 (0-100점 스케일)
+            score_profit = min(100, max(0, m['CAGR'] * 200)) # CAGR 50% 이상 100점
+            score_stable = min(100, max(0, (1 - abs(m['MDD']) / 0.5) * 100)) # MDD -50% 이하 0점
+            score_effic = min(100, max(0, (m['Sharpe'] / 3.0) * 100)) # Sharpe 3.0 이상 100점
+            score_win = m['Win_Rate'] * 100
+            # 회복력: 1년(252영업일) 이상 걸리면 0점, 0일이면 100점
+            score_resil = min(100, max(0, (1 - m.get('Max_Recovery', 0) / 252) * 100))
+            
+            scores = [score_profit, score_stable, score_effic, score_win, score_resil]
+            # 레이더 차트는 닫힌 곡선을 위해 첫 번째 값을 끝에 추가
+            scores.append(scores[0])
+            categories_radar = categories + [categories[0]]
+            
+            fig_radar.add_trace(go.Scatterpolar(
+                r=scores,
+                theta=categories_radar,
+                fill='toself',
+                name=item['name']
+            ))
+            
+        fig_radar.update_layout(
+            polar=dict(
+                radialaxis=dict(visible=True, range=[0, 100])
+            ),
+            showlegend=True,
+            height=500,
+            template='plotly_white',
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+        # 5. 성과 지표 비교 테이블
+        st.subheader("📋 주요 성과 지표 요약")
+        comparison_data = []
+        for item in st.session_state.comparison_list:
+            m = item['metrics']
+            comparison_data.append({
+                "전략명": item['name'],
+                "자산": f"{item['base']}/{item['lev']}",
+                "누적 수익": f"{m['Cumulative Return']:.2%}",
+                "CAGR": f"{m['CAGR']:.2%}",
+                "MDD": f"{m['MDD']:.2%}",
+                "샤프 지수": f"{m['Sharpe']:.2f}",
+                "MAR": f"{m['MAR']:.2f}",
+                "승률": f"{m['Win_Rate']:.1%}"
+            })
+        
+        st.table(pd.DataFrame(comparison_data))
 
 if __name__ == "__main__":
     try:
