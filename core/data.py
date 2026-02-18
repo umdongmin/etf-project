@@ -1,0 +1,125 @@
+import pandas as pd
+import pandas_ta as ta
+import yfinance as yf
+import requests
+import datetime
+import streamlit as st
+
+class DataService:
+    """데이터 수집 및 전처리를 담당하는 클래스"""
+    @staticmethod
+    def calculate_indicators(df):
+        if 'Close' not in df.columns: return df
+        close_prices = pd.to_numeric(df['Close'], errors='coerce')
+        df['RSI'] = ta.rsi(close_prices, length=14)
+        df['RSI_SMA'] = df['RSI'].rolling(window=14).mean()
+        
+        macd = ta.macd(close_prices)
+        if macd is not None:
+            # MACD 컬럼명 정규화
+            m_col = [c for c in macd.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
+            s_col = [c for c in macd.columns if 'MACDs_' in c]
+            if m_col and s_col:
+                df['MACD'] = macd[m_col[0]]
+                df['Signal_Line'] = macd[s_col[0]]
+            else:
+                # pandas_ta 버전에 따라 직접 컬럼명 매칭이 안 될 경우 concat으로 전체 유지
+                df = pd.concat([df, macd], axis=1)
+        
+        # 볼린저 밴드 추가 (20일, 2표준편차)
+        bbands = ta.bbands(close_prices, length=20, std=2)
+        if bbands is not None:
+            l_col = [c for c in bbands.columns if c.startswith('BBL_')]
+            u_col = [c for c in bbands.columns if c.startswith('BBU_')]
+            if l_col and u_col:
+                df['BB_Lower'] = bbands[l_col[0]]
+                df['BB_Upper'] = bbands[u_col[0]]
+                
+        # [신규] 슬로우 스토캐스틱 추가 (12, 5, 5)
+        if 'High' in df.columns and 'Low' in df.columns:
+            stoch = ta.stoch(df['High'], df['Low'], close_prices, k=12, d=5, smooth_k=5)
+            if stoch is not None:
+                k_col = [c for c in stoch.columns if 'STOCHk_' in c]
+                d_col = [c for c in stoch.columns if 'STOCHd_' in c]
+                if k_col and d_col:
+                    df['STOCH_K'] = stoch[k_col[0]]
+                    df['STOCH_D'] = stoch[d_col[0]]
+        return df
+
+    @classmethod
+    def fetch_live_data(cls):
+        print("라이브 데이터 수집 시작...")
+        # KST(UTC+9) 강제 적용
+        now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+        end_date = now_kst.strftime('%Y-%m-%d')
+        start_date = '2010-01-01'
+        
+        data_dict = {}
+        tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
+        try:
+            full_data = yf.download(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
+            for ticker in tickers:
+                if ticker in full_data and not full_data[ticker].empty:
+                    df = full_data[ticker].copy()
+                    df = df.ffill().bfill() 
+                    df = cls.calculate_indicators(df)
+                    data_dict[ticker] = df
+            
+            def fetch_symbol_robust(symbol):
+                try: 
+                    ticker_obj = yf.Ticker(symbol)
+                    d = ticker_obj.history(start=start_date, end=end_date)
+                    return d['Close'] if not d.empty else pd.Series()
+                except: return pd.Series()
+
+            vix_close = fetch_symbol_robust('^VIX')
+            vix_df = pd.DataFrame(vix_close).rename(columns={'Close': 'Close'}) if not vix_close.empty else pd.DataFrame()
+            
+            if not vix_df.empty:
+                vix_df.index = vix_df.index.tz_localize(None)
+                vix_df = vix_df.ffill().bfill()
+        except Exception as e:
+            print(f"Main Download Error: {e}")
+            vix_df = pd.DataFrame()
+
+        fg_df = pd.DataFrame()
+        try:
+            url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            r = requests.get(url, headers=headers, timeout=10)
+            data = r.json()
+            series = data.get('fear_and_greed_historical', {}).get('data', [])
+            fg_df = pd.DataFrame(series)
+            fg_df['x'] = pd.to_datetime(fg_df['x'], unit='ms')
+            fg_df.rename(columns={'x': 'Date', 'y': 'FearGreed'}, inplace=True)
+            fg_df.set_index('Date', inplace=True)
+        except:
+            fg_df = pd.DataFrame(columns=['FearGreed'])
+
+        macro_data_map = {}
+        fetch_status = {'ETF': 'Success', 'VIX': 'Pending', 'FearGreed': 'Pending', 'Macro': 'Pending'}
+        m_tickers_raw = ['^TNX', '^IRX', '^PCCR']
+        try:
+            m_data = yf.download(m_tickers_raw, period='5d', progress=False, group_by='ticker')
+            m_map = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCCR': 'PCCR'}
+            for t_raw, t_name in m_map.items():
+                if t_raw in m_data and not m_data[t_raw].empty:
+                    val = m_data[t_raw]['Close'].dropna().iloc[-1]
+                    macro_data_map[t_name] = val
+            fetch_status['Macro'] = 'Success'
+        except:
+            fetch_status['Macro'] = 'Error'
+        
+        if not vix_df.empty:
+            macro_data_map['VIX'] = vix_df['Close'].dropna().iloc[-1]
+            fetch_status['VIX'] = 'Success'
+        if not fg_df.empty: fetch_status['FearGreed'] = 'Success'
+        
+        macro_df = pd.DataFrame([macro_data_map])
+        fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time
+
+    @staticmethod
+    @st.cache_data(ttl=3600)
+    def load_all_data():
+        return DataService.fetch_live_data()
