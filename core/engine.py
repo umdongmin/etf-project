@@ -5,9 +5,9 @@ import streamlit as st
 
 class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
-    @staticmethod
     @st.cache_data(ttl=3600, show_spinner=False)
-    def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가", smart_params=None):
+    @staticmethod
+    def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가", smart_params=None, salt=None):
         if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame()
         base_df = data_dict[base_asset]
         combined = base_df[['Close', 'RSI']].copy()
@@ -51,12 +51,36 @@ class StrategyEngine:
         combined['SMA200'] = combined['Close'].rolling(window=200).mean()
         combined['SMA60'] = combined['Close'].rolling(window=60).mean()
         
-        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist']
+        # [신규] 사용자 정의 Panic MA 계산 (예: SMA120 등)
+        if smart_params and 'panic_ma' in smart_params:
+            p_ma = smart_params['panic_ma']
+            if f'SMA{p_ma}' not in combined.columns:
+                combined[f'SMA{p_ma}'] = combined['Close'].rolling(window=p_ma).mean()
+        
+        # [신규] ADX 및 DI 지표 계산 추가 (시그널용)
+        adx_df = ta.adx(base_df['High'], base_df['Low'], base_df['Close'], length=14)
+        if adx_df is not None:
+            combined = pd.concat([combined, adx_df], axis=1)
+            combined['ADX'] = combined['ADX_14']
+            combined['DMP'] = combined['DMP_14']
+            combined['DMN'] = combined['DMN_14']
+        else:
+            combined['ADX'], combined['DMP'], combined['DMN'] = 0, 0, 0
+        
+        # [신규] 급락 진단용 지표 계산 (Base Asset 기준)
+        # Drop_Acc: 2거래일 누적 수익률 (최근 하강 가속도 측정용)
+        combined['Drop_Acc'] = combined['Close'].pct_change(periods=2) * 100
+        # Gap_Down: 전일 종가 대비 당일 시가 갭 (패닉 시가 측정용)
+        combined['Gap_Down'] = (combined['Open'] / combined['Close'].shift(1) - 1) * 100
+        
+        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist', 'ADX', 'DMP', 'DMN', 'VIX', 'Drop_Acc', 'Gap_Down']
         if 'STOCH_K' in combined.columns:
             cols_to_shift += ['STOCH_K', 'STOCH_D']
             
         for col in cols_to_shift:
             combined[f'Prev_{col}'] = combined[col].shift(1)
+        combined['Prev_ADX'] = combined['ADX'].shift(1)
+        combined['Prev_Close'] = combined['Close'].shift(1)
         
         combined['FG'] = combined['FG'].ffill().fillna(50)
         combined['VIX'] = combined['VIX'].ffill().fillna(15)
@@ -91,8 +115,7 @@ class StrategyEngine:
         holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / initial_price
         
         def get_v_level(planned, stage):
-            if planned == base_asset:
-                return 3 - stage if stage > 0 else 0
+            # Stage는 이제 항상 레버리지 노출 수준(0-3)을 의미합니다.
             return stage
 
         history = []
@@ -120,6 +143,8 @@ class StrategyEngine:
             trade_ret_val = None
             trade_status_val = ""
             trade_entry_date_val = None
+            s3_drop_triggered_val = 0
+            s3_detail_val = ""
             
             # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
             if trade_at == "익일 시가" and pending_rebalance is not None:
@@ -245,6 +270,8 @@ class StrategyEngine:
             bb_l, bb_u = row.get('BB_Lower', 0), row.get('BB_Upper', 0)
             prev_rsi, prev_rsi_sma, prev_macd, prev_macd_hist = row['Prev_RSI'], row['Prev_RSI_SMA'], row['Prev_MACD'], row['Prev_MACD_Hist']
             prev2_macd_hist = row['Prev2_MACD_Hist']
+            prev_vix = row.get('Prev_VIX', 0)
+            vix_jump_pct = ((vix / prev_vix - 1) * 100) if prev_vix > 0 else 0
             
             # [신규] 다이버전스용 고점 추적
             if current_planned_asset != base_asset:
@@ -260,30 +287,43 @@ class StrategyEngine:
                 is_macd_golden_cross = (prev_macd_hist < 0) and (macd_hist > 0)
                 is_macd_dead_cross = (prev_macd_hist > 0) and (macd_hist < 0)
                 
+                # [신규] 지표 값 확보
+                adx_val = row.get('ADX', 0)
+                d_plus, d_minus = row.get('DMP', 0), row.get('DMN', 0)
+                
                 is_buy_signal = False
                 signal_reason = ""
                 for bp in params['buy_signals']:
                     cond, active = True, False
                     reasons = []
-                    if bp['rsi_val'] > 0: 
+                    if bp.get('rsi_val', 0) > 0: 
                         cond &= (rsi < bp['rsi_val']); active = True
                         reasons.append(f"RSI<{bp['rsi_val']}")
-                    if bp['rsi_cross']: 
+                    if bp.get('rsi_cross'): 
                         cond &= is_rsi_golden_cross; active = True
                         reasons.append("RSI 골든크로스")
-                    if bp['rsi_inc']: 
+                    if bp.get('use_adx'):
+                        op = bp.get('adx_op', '<=')
+                        val = bp.get('adx_val', 40)
+                        if op == '<=':
+                            cond &= (adx_val <= val)
+                        else:
+                            cond &= (adx_val >= val)
+                        active = True
+                        reasons.append(f"ADX{op}{val}")
+                    if bp.get('rsi_inc'): 
                         cond &= (rsi > prev_rsi); active = True
                         reasons.append("RSI 상승")
-                    if bp['macd_inc']: 
+                    if bp.get('macd_inc'): 
                         cond &= (macd_val > prev_macd); active = True
                         reasons.append("MACD 상승")
-                    if bp['macd_signal_below']: 
+                    if bp.get('macd_signal_below'): 
                         cond &= (macd_hist < 0); active = True
                         reasons.append("MACD 시그널 하단")
-                    if bp['macd_golden']: 
+                    if bp.get('macd_golden'): 
                         cond &= is_macd_golden_cross; active = True
                         reasons.append("MACD 골든크로스")
-                    if bp['bb_lower']: 
+                    if bp.get('bb_lower'): 
                         cond &= (price <= bb_l); active = True
                         reasons.append("BB 하단 터치")
                     
@@ -296,25 +336,28 @@ class StrategyEngine:
                 for sp in params['sell_signals']:
                     cond, active = True, False
                     reasons = []
-                    if sp['rsi_val'] > 0: 
+                    if sp.get('rsi_val', 0) > 0: 
                         cond &= (rsi >= sp['rsi_val']); active = True
                         reasons.append(f"RSI>={sp['rsi_val']}")
-                    if sp['rsi_dead']: 
+                    if sp.get('rsi_dead'): 
                         cond &= is_rsi_dead_cross; active = True
                         reasons.append("RSI 데드크로스")
-                    if sp['rsi_dec']: 
+                    if sp.get('rsi_dec'): 
                         cond &= (rsi < prev_rsi); active = True
                         reasons.append("RSI 하락")
-                    if sp['macd_dec']: 
+                    if sp.get('macd_dec'): 
                         cond &= (macd_val < prev_macd); active = True
                         reasons.append("MACD 하락")
-                    if sp['macd_signal_above']: 
+                    if sp.get('macd_signal_above'): 
                         cond &= (macd_hist > 0); active = True
                         reasons.append("MACD 시그널 상단")
-                    if sp['macd_dead']: 
+                    if sp.get('macd_dead'): 
                         cond &= is_macd_dead_cross; active = True
                         reasons.append("MACD 데드크로스")
-                    if sp['bb_upper']: 
+                    if sp.get('di_minus_above'):
+                        cond &= (d_minus > d_plus); active = True
+                        reasons.append("DI->DI+")
+                    if sp.get('bb_upper'): 
                         cond &= (price >= bb_u); active = True
                         reasons.append("BB 상단 터치")
                     
@@ -322,16 +365,19 @@ class StrategyEngine:
                         is_sell_signal = True
                         signal_reason = " / ".join(reasons)
                         break
+
+                # [기존] 일반 매도 시그널 순회 끝
+                pass
                 
                 b_up, b_down, s_up, s_down = params['buy_reb_up'], params['buy_reb_down'], params['sell_reb_up'], params['sell_reb_down']
             else:
                 is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
                 is_buy_signal = False
                 signal_reason = ""
-                if is_rsi_golden_cross and (macd_val > prev_macd) and (macd_hist < 0):
+                if is_rsi_golden_cross and (macd_val > prev_macd) and (macd_hist < 0) and (adx_val <= 40):
                     is_buy_signal = True
                     signal_reason = "기본(RSI골든크로스+MACD상승)"
-                elif (rsi < 35):
+                elif (rsi < 35) and (adx_val <= 40):
                     is_buy_signal = True
                     signal_reason = "기본(RSI과매도)"
                 
@@ -372,7 +418,7 @@ class StrategyEngine:
             try:
                 currently_holding = [t for t, qty in holdings.items() if qty > 0]
                 check_targets = list(set([base_asset, leverage_asset, effective_lev_asset] + currently_holding + target_group))
-                prices = {t: data_dict[t].loc[date, 'Close'] for t in check_targets if t in data_dict and date in data_dict[t].index}
+                prices = {t: data_dict[t].loc[date, 'Close'] for t in data_dict.keys() if date in data_dict[t].index}
                 if base_asset not in prices or any(t not in prices for t in currently_holding):
                     continue
             except (KeyError, ValueError):
@@ -402,49 +448,155 @@ class StrategyEngine:
             down_thresh = abs(b_down if current_planned_asset == leverage_asset else s_down)
             price_trigger = (price_change >= 1 + up_thresh or price_change <= 1 - down_thresh)
             
-            if is_buy_signal and current_planned_asset != effective_lev_asset and effective_lev_asset in prices:
-                new_planned = effective_lev_asset
-                if effective_lev_asset == base_asset:
-                    target_lev_pct, new_stage = 0.0, 3
-                else:
-                    if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
-                    elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
+            # [리밸런싱 판정 우선순위 조정] 매입(신호/가격)이 매도(신호/가격)보다 우선함
+            is_buy_process = (current_planned_asset != base_asset)
+            is_mode_consistent = (current_planned_asset == effective_lev_asset)
+            
+            # (1) 매입 판정 (자산 교체 신호 OR 동일 자산 내 가격 트리거 상향)
+            buy_signal_hit = is_buy_signal and not is_mode_consistent and effective_lev_asset in prices
+            buy_price_hit = (rebalance_stage in [1, 2] and is_buy_process and is_mode_consistent and price_trigger)
+            
+            if buy_signal_hit or buy_price_hit:
+                if buy_signal_hit:
+                    new_planned = effective_lev_asset
+                    if effective_lev_asset == base_asset:
+                        target_lev_pct, new_stage = 0.0, 0
                     else:
-                        if current_planned_asset != effective_lev_asset and effective_lev_asset == target_group[2] and current_lev_pct > 0.9:
-                            curr_tqqq_w = (holdings.get(target_group[2], 0) * prices.get(target_group[2], 0)) / etf_funds if etf_funds > 0 else 0
-                            if curr_tqqq_w < 0.25: target_lev_pct, new_stage = 1.0, 1
-                            elif curr_tqqq_w < 0.65: target_lev_pct, new_stage = 1.0, 2
-                            else: target_lev_pct, new_stage = 1.0, 3
+                        if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
+                        elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
                         else:
-                            target_lev_pct, new_stage = 1.0, 3
-                rebalance_cause = "시그널"
+                            if current_planned_asset != effective_lev_asset and effective_lev_asset == target_group[2] and current_lev_pct > 0.9:
+                                curr_tqqq_w = (holdings.get(target_group[2], 0) * prices.get(target_group[2], 0)) / etf_funds if etf_funds > 0 else 0
+                                if curr_tqqq_w < 0.25: target_lev_pct, new_stage = 1.0, 1
+                                elif curr_tqqq_w < 0.65: target_lev_pct, new_stage = 1.0, 2
+                                else: target_lev_pct, new_stage = 1.0, 3
+                            else:
+                                target_lev_pct, new_stage = 1.0, 3
+                    rebalance_cause = "시그널"
+                else:
+                    # 가격 트리거에 의한 매입/상향 (1->2, 2->3)
+                    new_stage = min(3, rebalance_stage + 1)
+                    target_lev_pct = (0.70 if new_stage == 2 else 1.0)
+                    rebalance_cause = "가격조건"
                 rebalance_needed = True
+                
+            # (2) 매도 판정 (자산 교체 신호)
             elif is_sell_signal and current_planned_asset != base_asset:
                 new_planned = base_asset
-                if current_lev_pct > 0.75: target_lev_pct, new_stage = 0.70, 1
-                elif current_lev_pct > 0.35: target_lev_pct, new_stage = 0.30, 2
-                else: target_lev_pct, new_stage = 0.0, 3
+                # [수정] 점진적 매도 로직 복원 (3->2, 2->1, 1->0)
+                if current_lev_pct > 0.75: target_lev_pct, new_stage = 0.70, 2
+                elif current_lev_pct > 0.35: target_lev_pct, new_stage = 0.30, 1
+                else: target_lev_pct, new_stage = 0.0, 0
                 rebalance_cause = "시그널"
                 rebalance_needed = True
-            elif rebalance_stage in [1, 2]:
-                is_buy_process = (current_planned_asset != base_asset)
-                is_mode_consistent = (current_planned_asset == effective_lev_asset)
-                if ((price_trigger and (not is_buy_process or is_mode_consistent))):
-                    new_stage = rebalance_stage + 1
-                    target_lev_pct = (0.70 if new_stage == 2 else 1.0) if is_buy_process else (0.30 if new_stage == 2 else 0.0)
-                    rebalance_cause = "가격조건"
-                    rebalance_needed = True
+                
+            # (3) 매도 하향 가격 트리거
+            elif rebalance_stage in [1, 2, 3] and not is_buy_process and price_trigger:
+                # 레버리지 비중 축소 (3->2, 2->1, 1->0)
+                new_stage = max(0, rebalance_stage - 1)
+                target_lev_pct = (0.70 if new_stage == 2 else (0.30 if new_stage == 1 else 0.0))
+                rebalance_cause = "가격조건"
+                rebalance_needed = True
 
+            # [신규] S3(레버리지 100%) 전용 보호 조건 처리 (Emergency Defensive)
+            # 여러 개의 신호 중 하나라도 충족되면(OR) 작동함
+            s3_p_list = params.get('s3_protection', [])
+            if not isinstance(s3_p_list, list): s3_p_list = [s3_p_list]
+            
+            if rebalance_stage == 3:
+                for idx, s3_p in enumerate(s3_p_list, 1):
+                    is_drop_ok = True
+                    if s3_p.get('use_daily_drop'):
+                        daily_ret = (price / row['Prev_Close'] - 1) * 100
+                        is_drop_ok = (daily_ret <= s3_p.get('drop_limit', -3.0))
+                    
+                    is_ma60_ok = True
+                    if s3_p.get('use_ma60'):
+                        sma60 = row.get('SMA60', 0)
+                        limit = s3_p.get('ma60_limit', 0.0)
+                        is_ma60_ok = (price < sma60 * (1 + limit / 100.0))
+                    
+                    is_ma200_ok = True
+                    if s3_p.get('use_ma200'):
+                        sma200 = row.get('SMA200', 0)
+                        limit = s3_p.get('ma200_limit', 0.0)
+                        is_ma200_ok = (price < sma200 * (1 + limit / 100.0))
+
+                    is_vix_ok = True
+                    if s3_p.get('use_vix_jump'):
+                        is_vix_ok = (vix_jump_pct >= s3_p.get('vix_jump', 15.0))
+                    
+                    is_gap_ok = True
+                    if s3_p.get('use_gap_down'):
+                        gap_down = row.get('Gap_Down', 0)
+                        is_gap_ok = (gap_down <= s3_p.get('gap_limit', -3.0))
+                    
+                    is_acc_ok = True
+                    if s3_p.get('use_drop_acc'):
+                        drop_acc = row.get('Drop_Acc', 0)
+                        is_acc_ok = (drop_acc <= s3_p.get('acc_limit', -7.0))
+                    
+                    # 활성화된 모든 필터가 만족되어야 함 (AND)
+                    active_filters = [s3_p.get('use_daily_drop'), s3_p.get('use_ma60'), s3_p.get('use_ma200'), s3_p.get('use_vix_jump'), s3_p.get('use_gap_down'), s3_p.get('use_drop_acc')]
+                    if any(active_filters) and is_drop_ok and is_ma60_ok and is_ma200_ok and is_vix_ok and is_gap_ok and is_acc_ok:
+                        dr = (price / row['Prev_Close'] - 1) * 100
+                        rebalance_needed = True
+                        new_planned = base_asset
+                        
+                        # 로그 상세화 (#N:신호번호, V:VIX, G:Gap, A:Acc, M60:MA60, M200:MA200)
+                        detail_log = f"#{idx} D:{dr:+.1f}%"
+                        if s3_p.get('use_ma60'): detail_log += f" M60({s3_p.get('ma60_limit', 0.0):+.1f}%)"
+                        if s3_p.get('use_ma200'): detail_log += f" M200({s3_p.get('ma200_limit', 0.0):+.1f}%)"
+                        if s3_p.get('use_vix_jump'): detail_log += f" V:{vix_jump_pct:+.1f}%"
+                        if s3_p.get('use_gap_down'): detail_log += f" G:{row.get('Gap_Down', 0):+.1f}%"
+                        if s3_p.get('use_drop_acc'): detail_log += f" A:{row.get('Drop_Acc', 0):+.1f}%"
+
+                        s3_detail_val = detail_log
+                        
+                        if s3_p.get('use_exit_all', False):
+                            new_stage = 0
+                            target_lev_pct = 0.0
+                            rebalance_cause = f"S3-전량매도({detail_log})"
+                        else:
+                            new_stage = 2
+                            target_lev_pct = 0.70
+                            rebalance_cause = f"S3-복합위기({detail_log})"
+                        
+                        s3_drop_triggered_val = dr 
+                        break # 하나라도 충족되면 종료 (OR)
+
+            passed_panic = False
             if rebalance_needed and new_planned != base_asset and smart_params and smart_params.get('use_panic', False):
                 panic_ma = smart_params.get('panic_ma', 200)
                 ma_val = combined.loc[date, f'SMA{panic_ma}']
-                if prices[base_asset] < ma_val:
+                if prices.get(base_asset, price) < ma_val:
                     if new_stage == 1: target_rsi = smart_params.get('panic_rsi_s1', 27)
                     elif new_stage == 2: target_rsi = smart_params.get('panic_rsi_s2', 28)
                     else: target_rsi = smart_params.get('panic_rsi_s3', 30)
                     if rsi > target_rsi:
                         rebalance_needed, is_delayed, delay_reason = False, True, f"MA-RSI"
+                    else:
+                        passed_panic = True
                 
+            # [신규] 손절제어 (Stop-Loss Control) 로직
+            # 오직 '매도(비중 축소)' 상황에서만 손절제어를 체크함
+            if rebalance_needed and not is_delayed and smart_params and smart_params.get('use_sl_control', False):
+                # 1. 목표 레버리지 비중이 현재보다 낮거나(매도), 2. 안전자산(base_asset)으로의 완전 회귀 시 작동
+                is_selling_move = (target_lev_pct < current_lev_pct - 0.01) or (new_planned == base_asset and current_planned_asset != base_asset)
+                
+                if is_selling_move:
+                    if trade_slots:
+                        # FIFO 기준으로 가장 오래된 물량의 수익률 체크
+                        oldest_slot = trade_slots[0]
+                        asset_to_check = oldest_slot.get('asset', leverage_asset)
+                        if asset_to_check in prices:
+                            curr_ret = (prices[asset_to_check] / oldest_slot['buy_price'] - 1) * 100
+                            sl_limit = smart_params.get('sl_control_limit', -15)
+                            if curr_ret <= sl_limit:
+                                # 지연 사유에 원래의 리밸런싱 원인(시그널/가격조건)을 포함하여 투명성 강화
+                                cause_info = f" [{rebalance_cause}]" if rebalance_cause else ""
+                                rebalance_needed, is_delayed, delay_reason = False, True, f"손절제어{cause_info}({curr_ret:.1f}%)"
+
             if rebalance_needed:
                 if trade_at == "종가":
                     h_vals = {t: holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates}
@@ -522,12 +674,28 @@ class StrategyEngine:
             # 시각적 가독성을 위해 trade_label 설정
             if rebalance_needed:
                 prefix = "매도" if new_planned == base_asset else "매수"
-                condition_label = f"가격조건({price_diff_pct:+.1f}%)" if rebalance_cause == "가격조건" else (signal_reason if rebalance_cause == "시그널" else "MACD데드크로스집행")
+                # [수정] rebalance_cause가 "시그널"이나 "가격조건"이 아닌 경우(예: S3보호)에도 해당 원인이 표시되도록 수정
+                if rebalance_cause == "가격조건":
+                    condition_label = f"가격조건({price_diff_pct:+.1f}%)"
+                elif rebalance_cause == "시그널":
+                    condition_label = signal_reason
+                else:
+                    condition_label = rebalance_cause
+                
+                # [수정] 하락장(Panic) 구간에서 지연을 뚫고 들어온 경우, 'RSI조건'을 우선 표시함
+                if passed_panic:
+                    if new_stage == 1: limit = smart_params.get('panic_rsi_s1', 27)
+                    elif new_stage == 2: limit = smart_params.get('panic_rsi_s2', 28)
+                    else: limit = smart_params.get('panic_rsi_s3', 30)
+                    condition_label = f"RSI조건(RSI<{limit})"
+
                 trade_label = f"{prefix}(S{new_stage}): {condition_label}"
                 if smart_params and smart_params.get('use_smart') and smart_reason:
                     trade_label += f" [{smart_reason}]"
             elif is_delayed:
-                trade_label = f"지연({delay_reason}:{rsi:.1f})" if delay_reason.startswith("MA") else "지연"
+                trade_label = f"지연({delay_reason})"
+                if delay_reason.startswith("MA"):
+                    trade_label = f"지연({delay_reason}:{rsi:.1f})"
             else:
                 state_label = f"진행중(S{rebalance_stage})" if 0 < rebalance_stage < 3 else "중립"
                 if is_buy_signal or is_sell_signal:
@@ -543,12 +711,31 @@ class StrategyEngine:
             b_w = (holdings.get(base_asset, 0) * prices.get(base_asset, 0)) / current_total_val if current_total_val > 0 else 0
             if b_w >= 0.01: summary_p.append(f"{base_asset} {b_w*100:.0f}%")
             
+            # [수정] 맵핑용 레버리지 자산 총액 및 현금 비중 실시간 재계산 (로그 정확도 향상)
+            log_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
+            log_cash_weight = cash / current_total_val if current_total_val > 0 else 0
+            log_lev_weight = log_lev_funds / current_total_val if current_total_val > 0 else 0
+
+            # [수정] 자산 명칭과 Stage를 로그 기록 시점에 동기화
+            log_asset_name = current_planned_asset
+            if 0 < rebalance_stage < 3:
+                log_asset_name = f"{current_planned_asset}(S{int(rebalance_stage)})"
+            elif rebalance_stage == 3:
+                # S3는 레버리지 자산일 때만 명시적으로 표시 (base_asset이면 그냥 표시)
+                if current_planned_asset != base_asset:
+                    log_asset_name = f"{current_planned_asset}(S3)"
+
             history.append({
                 'Date': date,
                 'Value': current_total_val,
-                'Cash_Weight': cash / current_total_val if current_total_val > 0 else 0,
-                'Lev_Weight': current_lev_funds / current_total_val if current_total_val > 0 else 0,
-                'Asset': f"{current_planned_asset}(S{rebalance_stage})" if 0 < rebalance_stage < 3 else current_planned_asset,
+                'Cash_Weight': log_cash_weight,
+                'Lev_Weight': log_lev_weight,
+                'Stage': int(rebalance_stage),
+                'Asset': log_asset_name,
+                'Drop_Acc': row.get('Drop_Acc', 0),
+                'Gap_Down': row.get('Gap_Down', 0),
+                'S3_Drop_Limit': s3_drop_triggered_val, # [기록]
+                'S3_Detail': s3_detail_val, # [신규 추가]
                 'Trade_Label': trade_label,
                 'Summary': ", ".join(summary_p),
                 'Trade_Ret': trade_ret_val,

@@ -146,7 +146,8 @@ class BacktestView:
             
             base_w_col = f'{base_asset}_Weight'
             lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
-            cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date', 'Asset', 'Lev_Weight'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX', 'STOCH_K', 'STOCH_D']
+            # 가치 관련 컬럼을 가장 앞쪽에 배치하여 확인 용이하도록 수정
+            cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX', 'STOCH_K', 'STOCH_D']
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
             formats = {'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'FG': '{:.0f}', 'VIX': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}'}
@@ -161,6 +162,53 @@ class BacktestView:
                 journal_df['Exit_Date'] = pd.to_datetime(journal_df['Exit_Date']).dt.date
                 j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%'}
                 st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), use_container_width=True, height=400)
+
+        # [신규] 실시간 거래 체결 내역 (이미양식 대응 및 접기 기능 추가)
+        st.divider()
+        with st.expander("📝 실시간 거래 체결 내역 (Actual Execution Log)", expanded=False):
+            # Trade_Label이 '매수(' 또는 '매도('로 시작하는 행만 필터링
+            exec_df = golden_history[golden_history['Trade_Label'].str.startswith(('매수(', '매도('), na=False)].copy()
+            
+            if not exec_df.empty:
+                exec_df.index = exec_df.index.date
+                
+                # 이미지 양식에 맞춘 고정 컬럼 구성
+                # 모든 자산 비중 컬럼이 존재하도록 보장 (없으면 0.0)
+                all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', 'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_asset}_Weight']
+                for col in all_weight_cols:
+                    if col not in exec_df.columns:
+                        exec_df[col] = 0.0
+                
+                # 최종 출력 컬럼 순서 (이미지 양식과 동일 + Stage 추가)
+                e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'QLD_Weight', 'TQQQ_Weight', 
+                          'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_asset}_Weight', 
+                          'Cash_Weight', 'RSI', 'MACD', 'VIX']
+                
+                display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
+                
+                # 포맷팅 설정
+                e_formats = {
+                    'Value': '${:,.0f}', 
+                    'Lev_Weight': '{:.1%}', 
+                    'Cash_Weight': '{:.1%}', 
+                    'RSI': '{:.1f}', 
+                    'MACD': '{:.2f}', 
+                    'VIX': '{:.1f}'
+                }
+                e_formats.update({c: '{:.1%}' for c in all_weight_cols})
+                
+                def style_exec(row):
+                    sig = str(row['Trade_Label'])
+                    if sig.startswith("매도"): 
+                        return ['background-color: rgba(52, 152, 219, 0.1); color: #3498db; font-weight: bold'] * len(row)
+                    elif sig.startswith("매수"): 
+                        return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
+                    return [''] * len(row)
+                
+                st.dataframe(display_exec_df.style.apply(style_exec, axis=1).format(e_formats, na_rep='-'), use_container_width=True)
+            else:
+                st.write("해당 기간 동안 실행된 매매 내역이 없습니다.")
+
 
     @staticmethod
     def render_returns_heatmap(strategy_history, bh_histories, leverage_asset):
