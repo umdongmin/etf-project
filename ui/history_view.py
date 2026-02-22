@@ -320,7 +320,7 @@ class HistoryLabView:
             
             def get_ret(ser):
                 s = ser.dropna()
-                if s.empty or len(s) < 2: return 0
+                if s.empty or len(s) < 2 or s.iloc[0] == 0: return 0
                 return (s.iloc[-1] / s.iloc[0] - 1) * 100
 
             s_ret = get_ret(s_y)

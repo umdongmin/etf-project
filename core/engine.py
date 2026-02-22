@@ -109,10 +109,12 @@ class StrategyEngine:
         holdings = {t: 0.0 for t in data_dict.keys()}
         
         initial_price = base_df['Close'].asof(dates[0])
-        if pd.isna(initial_price):
-            initial_price = base_df['Close'].dropna().iloc[0] if not base_df['Close'].dropna().empty else 1.0
+        if pd.isna(initial_price) or initial_price <= 0:
+            # [수정] 데이터 부재 시 백업 로직 강화
+            valid_closes = base_df['Close'].dropna()
+            initial_price = valid_closes.iloc[0] if not valid_closes.empty else 1.0
             
-        holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / initial_price
+        holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / initial_price if initial_price > 0 else 0
         
         def get_v_level(planned, stage):
             # Stage는 이제 항상 레버리지 노출 수준(0-3)을 의미합니다.
@@ -425,6 +427,11 @@ class StrategyEngine:
                 continue 
             
             current_total_val = cash + sum(holdings.get(t, 0) * prices.get(t, 0) for t in holdings if t in prices)
+            
+            # [신규 추가] 수익률 nan 방지를 위한 수치 정규화 (Defensive Check)
+            if pd.isna(current_total_val) or current_total_val <= 0:
+                current_total_val = history[-1]['Value'] if history else 10000.0
+                
             rebalance_needed = False
             new_planned = current_planned_asset
             new_stage = rebalance_stage
