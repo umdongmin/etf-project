@@ -7,6 +7,29 @@ from core.storage import StrategyStorage
 from core.engine import StrategyEngine
 from ui.tester_view import TesterView
 
+# [신규] 시뮬레이션 캐싱 래퍼 (성능 최적화 및 안정성 확보)
+def deep_tuple(obj):
+    if isinstance(obj, dict):
+        return tuple(sorted((k, deep_tuple(v)) for k, v in obj.items()))
+    if isinstance(obj, list):
+        return tuple(deep_tuple(i) for i in obj)
+    return obj
+
+@st.cache_data
+def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
+    # 튜플을 다시 딕셔너리로 복구하여 엔진 실행 (재귀적으로 처리)
+    def to_dict(tup):
+        if not isinstance(tup, tuple): return tup
+        # 모든 항목이 (문자열, 값) 형태의 튜플인 경우에만 딕셔너리로 간주
+        if len(tup) > 0 and all(isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], str) for v in tup):
+            return {k: to_dict(v) for k, v in tup}
+        # 그 외에는 리스트로 복구
+        return [to_dict(v) for v in tup]
+
+    _p = to_dict(params_tuple)
+    _s = to_dict(smart_tuple)
+    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
+
 class HistoryLabView:
     """역사적 마켓 랩 화면 UI 구성 클래스"""
     
@@ -114,6 +137,33 @@ class HistoryLabView:
                                 st.session_state[f"s_m_dead_{i}"] = sp.get('macd_dead', False)
                                 st.session_state[f"s_bb_up_{i}"] = sp.get('bb_upper', False)
 
+                            # S3 보호 설정 동기화 (최대 3개 신호 블록 처리)
+                            s3_prots = config.get('s3_protection', [])
+                            for i in range(1, 4):
+                                # 해당 순번의 설정이 있으면 불러오고, 없으면 기본값으로 초기화
+                                s3p = s3_prots[i-1] if i <= len(s3_prots) else {}
+                                
+                                st.session_state[f"s_drop_use_{i}"] = s3p.get('use_daily_drop', False)
+                                st.session_state[f"s_drop_lim_{i}"] = float(s3p.get('drop_limit', -3.0))
+                                st.session_state[f"s_ma60_use_{i}"] = s3p.get('use_ma60', False)
+                                st.session_state[f"s_ma60_lim_{i}"] = float(s3p.get('ma60_limit', 0.0))
+                                st.session_state[f"s_ma200_use_{i}"] = s3p.get('use_ma200', False)
+                                st.session_state[f"s_ma200_lim_{i}"] = float(s3p.get('ma200_limit', 0.0))
+                                st.session_state[f"s_vj_use_{i}"] = s3p.get('use_vix_jump', False)
+                                st.session_state[f"s_vj_{i}"] = float(s3p.get('vix_jump', 15.0))
+                                st.session_state[f"s_gap_use_{i}"] = s3p.get('use_gap_down', False)
+                                st.session_state[f"s_gap_lim_{i}"] = float(s3p.get('gap_limit', -3.0))
+                                st.session_state[f"s_acc_use_{i}"] = s3p.get('use_drop_acc', False) # 파라미터명 수정: use_acc_down -> use_drop_acc
+                                st.session_state[f"s_acc_lim_{i}"] = float(s3p.get('acc_limit', -7.0))
+                                st.session_state[f"s_exit_all_{i}"] = s3p.get('use_exit_all', False)
+
+                            # 리밸런싱 모드 및 ATR 설정 동기화
+                            st.session_state.use_fixed_chk = config.get('use_fixed_reb', True)
+                            st.session_state.use_atr_chk = config.get('use_atr_reb', False)
+                            st.session_state.atr_m_buy_up = float(config.get('atr_mult_buy_up', 10.0))
+                            st.session_state.atr_m_buy_down = float(config.get('atr_mult_buy_down', 1.5))
+                            st.session_state.atr_m_sell = float(config.get('atr_mult_sell', 3.0))
+
                             st.session_state.loaded_strat_name = target_strat
                             st.success(f"'{target_strat}' 모든 설정 및 UI 로드 완료!")
                             st.rerun()
@@ -124,7 +174,14 @@ class HistoryLabView:
         end_date = datetime.date.today()
         
         with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
-            golden_history, closed_trades = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, start_date, end_date, params, trade_at, smart_params=smart_params, salt=salt)
+            # 중첩된 설정(시그널 리스트 등)의 변경을 감지하기 위해 Deep Tuplification 적용
+            params_tuple = deep_tuple(params)
+            smart_tuple = deep_tuple(smart_params)
+            
+            golden_history, closed_trades = get_cached_strategy_result(
+                data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
+                start_date, end_date, params_tuple, trade_at, smart_tuple, salt
+            )
             
             st.session_state.last_golden_result = {
                 'history': golden_history.copy(),
@@ -145,18 +202,38 @@ class HistoryLabView:
             return
 
         st.divider()
-        st.subheader("⚙️ 전략 매매 조건 설정")
-        st.caption("여기서 설정을 변경한 후 아래 버튼을 클릭해야 모든 분석 결과에 반영됩니다.")
-        with st.form("strategy_config_form"):
-            ticker_map = {
-                "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
-                "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
-                "TMF": "채권 3배 (TMF)", "TLT": "채권 1배 (TLT)"
-            }
-            new_params = TesterView.render_config(st.session_state.current_params, ticker_map=ticker_map)
+        st.subheader("⚖️ 리밸런싱 실행 설정 (병합 사용 가능)")
+        st.caption("고정 비율과 ATR 방식을 각각 활성화하여 병합 사용할 수 있습니다. (체크 시 즉시 입력창 활성화)")
+        
+        # [신규] 반응성 확보를 위해 체크박스를 폼 외부로 이동
+        c_sel1, c_sel2, _ = st.columns(3)
+        use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
+        use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
+        
+        # 세션 파라미터 즉시 동기화 (TesterView 렌더링용)
+        st.session_state.current_params['use_fixed_reb'] = use_fixed
+        st.session_state.current_params['use_atr_reb'] = use_atr
+
+        ticker_map = {
+            "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
+            "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
+            "TMF": "채권 3배 (TMF)", "TLT": "채권 1배 (TLT)"
+        }
+
+        # [수정] 모든 설정을 하나의 폼으로 통합
+        with st.form("strategy_config_combined_form"):
+            # 1. 상단 섹션 (기준 자산 및 매매 시그널)
+            new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
+            
+            # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
+            new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
+            
+            st.write("---")
             col_btn1, col_btn2 = st.columns(2)
-            if col_btn1.form_submit_button("🚀 설정 반영 및 재시뮬레이션", use_container_width=True):
-                st.session_state.current_params.update(new_params)
+            if col_btn1.form_submit_button("🚀 전체 설정 반영 및 재시뮬레이션", use_container_width=True):
+                # 모든 파라미터 통합 업데이트
+                st.session_state.current_params.update(new_params_top)
+                st.session_state.current_params.update(new_params_bottom)
                 st.rerun()
             
             if col_btn2.form_submit_button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", use_container_width=True):
@@ -171,128 +248,41 @@ class HistoryLabView:
         st.divider()
         HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
 
-        # [신규] 레버리지 100% (S3) 구간 로그 추가
+        # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
         st.divider()
-        with st.expander("🚩 레버리지 100% (S3) 진입 구간 기록", expanded=False):
-            st.caption("전략이 TQQQ/SOXL 등 레버리지 자산에 100% 집중되었던 상시 노출 구간입니다.")
-            
-            # 레버리지 100% (S3) 구간 추출 로직 정교화 (Double-Lock Safety)
-            if 'Stage' in golden_history.columns and 'Lev_Weight' in golden_history.columns:
-                # Stage 3이면서 실제 레버리지 비중이 높은 날(85% 초과)만 S3 구간으로 추출합니다.
-                # 이는 엔진 규칙 개편 후에도 남아있을 수 있는 초기 단계(S1/S2)와의 혼선을 완벽히 차단합니다.
-                is_100 = (golden_history['Stage'].astype(float).fillna(0).round().astype(int) == 3) & (golden_history['Lev_Weight'] > 0.85)
-            elif 'Stage' in golden_history.columns:
-                is_100 = (golden_history['Stage'] == 3)
-            elif 'Lev_Weight' in golden_history.columns:
-                is_100 = golden_history['Lev_Weight'] > 0.95
-            else:
-                lev_assets = ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF']
-                weight_cols = [c for c in golden_history.columns if c.endswith('_Weight') and any(la in c for la in lev_assets)]
-                is_100 = golden_history[weight_cols].sum(axis=1) > 0.95 if weight_cols else pd.Series(False, index=golden_history.index)
-            
-            periods = []
-            start_p = None
-            for date, val in is_100.items():
-                if val:
-                    if start_p is None: start_p = date
-                else:
-                    if start_p is not None:
-                        periods.append((start_p, date)) # 비중이 줄어든 당일을 종료일로 설정
-                        start_p = None
-            if start_p is not None: periods.append((start_p, golden_history.index[-1]))
-                
-            if periods:
-                p_data = []
-                for s, e in reversed(periods): # 최신순
-                    dur = (e - s).days + 1
-                    # 해당 구간 수익률 계산
-                    try:
-                        v_start = golden_history.loc[s, 'Value']
-                        v_end = golden_history.loc[e, 'Value']
-                        ret = (v_end / v_start - 1) * 100
-                        ret_str = f"{ret:+.1f}%"
-                    except:
-                        ret_str = "-"
-                    
-                    p_data.append({
-                        "시작일": s.strftime('%Y-%m-%d'), 
-                        "종료일": e.strftime('%Y-%m-%d'), 
-                        "유지기간": f"{dur}일",
-                        "구간 수익률": ret_str,
-                        "Stage": f"S{int(golden_history.loc[s, 'Stage'])}" if 'Stage' in golden_history.columns else "-",
-                        "최고 비중": f"{golden_history.loc[s:e, 'Lev_Weight'].max()*100:.1f}%" if 'Lev_Weight' in golden_history.columns else "-"
-                    })
-                
-                df_p = pd.DataFrame(p_data)
-                
-                def style_p_ret(val):
-                    if val == "-": return ""
-                    try:
-                        num = float(val.replace('%','').replace('+',''))
-                        return f'color: {"#00c853" if num >= 0 else "#ff1744"}; font-weight: bold;'
-                    except: return ''
-
-                st.dataframe(df_p.style.applymap(style_p_ret, subset=["구간 수익률"]), use_container_width=True)
-            else:
-                st.info("레버리지 100% 구간이 없습니다.")
-
-        # [신규] 급락 리스크 진단 로그 (분석용)
-        st.divider()
-        st.subheader("⚠️ 급락 리스크 진단 로그 (분석용)")
-        st.caption("실제 로그와 별개로, 시장의 급격한 하락 신호가 포착된 날들을 나열합니다. (위험 관리 아이디어 검증용)")
+        st.subheader("⚠️ S3 보호 및 긴급 매도 진단 로그 (분석용)")
+        st.caption("레버리지 3단계(S3) 상태에서 보호 로직이나 특정 매도 신호가 작동한 기록입니다.")
         
-        col_crash1, col_crash2, col_crash3 = st.columns(3)
-        
-        with col_crash1:
-            with st.expander("🚩 급격한 하락 발생 기록 (-7% 이하)", expanded=False):
-                st.caption("최근 2거래일간 지수(Base)가 -7% 이상 급급락한 날짜들입니다.")
-                if 'Drop_Acc' in golden_history.columns:
-                    crash_days = golden_history[golden_history['Drop_Acc'] <= -7.0].copy()
-                    if not crash_days.empty:
-                        crash_display = crash_days[['Drop_Acc', 'Asset', 'Stage']].copy()
-                        crash_display.index = crash_display.index.strftime('%Y-%m-%d')
-                        crash_display.columns = ['2일 누적', '보유자산', 'Stage']
-                        st.dataframe(crash_display.style.format({'2일 누적': '{:+.2f}%'}), use_container_width=True)
+        col_diag1, col_diag2 = st.columns(2)
+        with col_diag1:
+            with st.expander("🚩 S3 보호(Emergency) 작동 기록", expanded=False):
+                st.caption("이평선 하회, VIX 급등, 시가 갭락 등으로 인해 보호 매도가 작동한 내역입니다.")
+                if 'S3_Detail' in golden_history.columns:
+                    s3_emerg = golden_history[golden_history['S3_Detail'] != ""].copy()
+                    if not s3_emerg.empty:
+                        s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VIX']].copy()
+                        s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
+                        s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VIX']
+                        st.dataframe(s3_emerg_display, use_container_width=True)
                     else:
-                        st.info("해당되는 급격한 하락 구간이 없습니다.")
+                        st.info("기록된 S3 보호 작동 내역이 없습니다.")
                 else:
-                    st.warning("데이터가 부족하여 분석할 수 없습니다.")
-        
-        with col_crash2:
-            with st.expander("🚩 패닉 시가 갭 발생 기록 (-3% 이하)", expanded=False):
-                st.caption("전일 종가 대비 시가(Open)가 -3% 이상 낮게 시작한 날짜들입니다.")
-                if 'Gap_Down' in golden_history.columns:
-                    gap_days = golden_history[golden_history['Gap_Down'] <= -3.0].copy()
-                    if not gap_days.empty:
-                        gap_display = gap_days[['Gap_Down', 'Asset', 'Stage']].copy()
-                        gap_display.index = gap_display.index.strftime('%Y-%m-%d')
-                        gap_display.columns = ['시가 갭', '보유자산', 'Stage']
-                        st.dataframe(gap_display.style.format({'시가 갭': '{:+.2f}%'}), use_container_width=True)
-                    else:
-                        st.info("해당되는 시가 갭 구간이 없습니다.")
-                else:
-                    st.warning("데이터가 부족하여 분석할 수 없습니다.")
+                    st.warning("데이터가 부족합니다.")
 
-        with col_crash3:
-            with st.expander("🚩 S3 전용 복합 보호 작동 기록", expanded=False):
-                st.caption("레버리지 100% 상태에서 설정된 복합 조건(일일/VIX/시가갭/가속도)에 의해 매도 보호가 작동한 날짜들입니다.")
-                if 'S3_Drop_Limit' in golden_history.columns:
-                    s3_days = golden_history[golden_history['S3_Drop_Limit'] != 0].copy()
-                    if not s3_days.empty:
-                        # [수정] 상세 정보가 있으면 상세 정보를, 없으면 기존 수치 표시
-                        if 'S3_Detail' in s3_days.columns:
-                            s3_display = s3_days[['S3_Detail', 'Asset', 'Stage']].copy()
-                            s3_display.columns = ['상세 정보 (D/V/G/A)', '보유자산', 'Stage']
-                        else:
-                            s3_display = s3_days[['S3_Drop_Limit', 'Asset', 'Stage']].copy()
-                            s3_display.columns = ['당일 변동', '보유자산', 'Stage']
-                            
-                        s3_display.index = s3_display.index.strftime('%Y-%m-%d')
-                        st.dataframe(s3_display, use_container_width=True)
+        with col_diag2:
+            with st.expander("🚩 S3 + 매도신호3(MACD데드+매도우세) 기록", expanded=False):
+                st.caption("S3 상태에서 매도신호3 조건으로 비중이 조절된 내역입니다.")
+                if 'S3_Sell3_Event' in golden_history.columns:
+                    sell3_days = golden_history[golden_history['S3_Sell3_Event'] == 1].copy()
+                    if not sell3_days.empty:
+                        s3_sell3_display = sell3_days[['RSI', 'MACD', 'VIX', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
+                        s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
+                        s3_sell3_display.columns = ['RSI', 'MACD', 'VIX', 'ADX', 'DI+', 'DI-', '보유자산']
+                        st.dataframe(s3_sell3_display, use_container_width=True)
                     else:
-                        st.info("S3 보호 로직이 작동한 기록이 없습니다.")
+                        st.info("S3 + 매도신호3 작동 기록이 없습니다.")
                 else:
-                    st.warning("데이터가 부족하거나 해당 기능이 비활성화 상태입니다.")
+                    st.warning("데이터가 부족합니다.")
 
     @staticmethod
     def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None, selected_comparisons=[]):

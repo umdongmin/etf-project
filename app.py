@@ -45,16 +45,16 @@ class GoldenStrategyApp:
                     {'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40}
                 ],
                 'sell_signals': [
-                    {'rsi_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'bb_upper': False},
-                    {'rsi_val': 0, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'bb_upper': False},
-                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'bb_upper': False}
+                    {'rsi_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False},
+                    {'rsi_val': 0, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False},
+                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'bb_upper': False}
                 ],
                 's3_protection': [
                     {
                         'only_s3': True, 'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
                         'use_vix_jump': False, 'vix_jump': 15.0, 
-                        'use_gap_down': False, 'gap_limit': -3.0,
+                        'use_gap_down': True, 'gap_limit': -3.0,
                         'use_drop_acc': False, 'acc_limit': -7.0,
                         'use_exit_all': False
                     },
@@ -63,7 +63,7 @@ class GoldenStrategyApp:
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
                         'use_vix_jump': False, 'vix_jump': 15.0, 
                         'use_gap_down': False, 'gap_limit': -3.0,
-                        'use_drop_acc': False, 'acc_limit': -7.0,
+                        'use_drop_acc': True, 'acc_limit': -7.0,
                         'use_exit_all': False
                     },
                     {
@@ -75,12 +75,14 @@ class GoldenStrategyApp:
                         'use_exit_all': False
                     }
                 ],
-                'buy_reb_up': 0.02, 'buy_reb_down': -0.05, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
-                'base_asset': 'QQQ', 'leverage_asset': 'QLD', 'cash_ratio_pct': 0, 'trade_at': '종가',
+                'buy_reb_up': 0.02, 'buy_reb_down': -0.07, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
+                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0, 'trade_at': '종가',
+                'use_fixed_reb': True, 'use_atr_reb': False,
+                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 1.5, 'atr_mult_sell': 3.0,
                 'use_panic': True, 'panic_ma': 200, 
                 'panic_rsi_s1': 27, 'panic_rsi_s2': 28, 'panic_rsi_s3': 30,
-                'use_vix_safety': True, 'vix_exit': 31,
-                'use_rsi_turbo': True, 'rsi_turbo': 31
+                'use_vix_safety': False, 'vix_exit': 31,
+                'use_rsi_turbo': False, 'rsi_turbo': 31
             }
         
         if 'comparison_list' not in st.session_state:

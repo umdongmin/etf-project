@@ -73,7 +73,11 @@ class StrategyEngine:
         # Gap_Down: 전일 종가 대비 당일 시가 갭 (패닉 시가 측정용)
         combined['Gap_Down'] = (combined['Open'] / combined['Close'].shift(1) - 1) * 100
         
-        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist', 'ADX', 'DMP', 'DMN', 'VIX', 'Drop_Acc', 'Gap_Down']
+        # [신규] ATR 지표 계산 (20일 기준, 기초자산 QQQ 등 타겟)
+        combined['ATR'] = ta.atr(base_df['High'], base_df['Low'], base_df['Close'], length=20)
+        combined['ATR'] = combined['ATR'].ffill().fillna(0)
+        
+        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist', 'ADX', 'DMP', 'DMN', 'VIX', 'Drop_Acc', 'Gap_Down', 'ATR']
         if 'STOCH_K' in combined.columns:
             cols_to_shift += ['STOCH_K', 'STOCH_D']
             
@@ -147,6 +151,13 @@ class StrategyEngine:
             trade_entry_date_val = None
             s3_drop_triggered_val = 0
             s3_detail_val = ""
+            s3_sell3_event_val = 0 # [복구] S3 + 매도신호3 발생 여부
+            
+            # [신규] 일별 로직 변수 초기화 (NameError 방지)
+            trade_label = ""
+            rebalance_cause = ""
+            is_delayed = False
+            delay_reason = ""
             
             # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
             if trade_at == "익일 시가" and pending_rebalance is not None:
@@ -335,7 +346,8 @@ class StrategyEngine:
                         break
                 
                 is_sell_signal = False
-                for sp in params['sell_signals']:
+                sell_signal_idx = -1 # [신규] 어떤 매도 신호가 발생했는지 추적
+                for idx, sp in enumerate(params['sell_signals']):
                     cond, active = True, False
                     reasons = []
                     if sp.get('rsi_val', 0) > 0: 
@@ -365,8 +377,13 @@ class StrategyEngine:
                     
                     if active and cond: 
                         is_sell_signal = True
+                        sell_signal_idx = idx + 1 # 1-based index
                         signal_reason = " / ".join(reasons)
                         break
+
+                # [복구] S3(레버리지 3단계)에서 매도신호3 발생 시에만 기록
+                if is_sell_signal and rebalance_stage == 3 and sell_signal_idx == 3:
+                    s3_sell3_event_val = 1
 
                 # [기존] 일반 매도 시그널 순회 끝
                 pass
@@ -443,25 +460,63 @@ class StrategyEngine:
             lev_candidates = ['QLD', 'TQQQ', 'SOXL', 'USD', 'TMF']
             current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
             current_lev_pct = current_lev_funds / etf_funds if etf_funds > 0 else 0
+
+            # [리밸런싱 판정 우선순위 조정] 매입(신호/가격)이 매도(신호/가격)보다 우선함
+            is_buy_process = (current_planned_asset != base_asset)
+            is_mode_consistent = (current_planned_asset == effective_lev_asset)
+
+            # [신규] ATR 샹들리에 엑시트를 위한 최고가(Peak Price) 실시간 갱신
+            if is_buy_process:
+                if peak_price == 0 or prices[base_asset] > peak_price:
+                    peak_price = prices[base_asset]
+            else:
+                peak_price = 0 # 매도 프로세스 중에는 고점 추적 안함
             
-            rebalance_cause = "" 
-            is_delayed = False 
-            delay_reason = ""
+            # [수정] 리밸런싱 트리거 판정 (하이브리드: 고정 % + ATR 변동성 병합)
+            use_fixed = params.get('use_fixed_reb', True)
+            use_atr = params.get('use_atr_reb', False)
             
             price_change = prices[base_asset] / last_entry_price
             price_diff_pct = (price_change - 1) * 100
             
-            up_thresh = abs(b_up if current_planned_asset == leverage_asset else s_up)
-            down_thresh = abs(b_down if current_planned_asset == leverage_asset else s_down)
-            price_trigger = (price_change >= 1 + up_thresh or price_change <= 1 - down_thresh)
+            buy_price_hit = False
+            sell_price_hit = False
             
-            # [리밸런싱 판정 우선순위 조정] 매입(신호/가격)이 매도(신호/가격)보다 우선함
-            is_buy_process = (current_planned_asset != base_asset)
-            is_mode_consistent = (current_planned_asset == effective_lev_asset)
-            
-            # (1) 매입 판정 (자산 교체 신호 OR 동일 자산 내 가격 트리거 상향)
+            # (1) 시그널 매입 판정 (모드 공통)
             buy_signal_hit = is_buy_signal and not is_mode_consistent and effective_lev_asset in prices
-            buy_price_hit = (rebalance_stage in [1, 2] and is_buy_process and is_mode_consistent and price_trigger)
+
+            # (2) 고정 비율 트리거 계산
+            fixed_buy_hit = False
+            fixed_sell_hit = False
+            if use_fixed:
+                up_thresh = abs(b_up if current_planned_asset == leverage_asset else s_up)
+                down_thresh = abs(b_down if current_planned_asset == leverage_asset else s_down)
+                price_trigger = (price_change >= 1 + up_thresh or price_change <= 1 - down_thresh)
+                fixed_buy_hit = (rebalance_stage in [1, 2] and is_buy_process and is_mode_consistent and price_trigger)
+                fixed_sell_hit = (rebalance_stage in [1, 2, 3] and not is_buy_process and price_trigger)
+
+            # (3) ATR 트리거 계산
+            atr_buy_hit = False
+            atr_sell_hit = False
+            if use_atr:
+                prev_atr = row.get('Prev_ATR', 0)
+                k_up = params.get('atr_mult_buy_up', 10.0)
+                k_down = params.get('atr_mult_buy_down', 1.5)
+                k_sell = params.get('atr_mult_sell', 3.0)
+                
+                # ATR 매수 트리거 (상향/하향)
+                hit_down = (prices[base_asset] <= last_entry_price - (k_down * prev_atr))
+                hit_up = (prices[base_asset] >= last_entry_price + (k_up * prev_atr))
+                atr_buy_hit = (rebalance_stage in [1, 2] and is_mode_consistent and (hit_down or hit_up))
+                
+                # ATR 샹들리에 엑시트
+                if is_buy_process and peak_price > 0:
+                    atr_sell_hit = (prices[base_asset] <= peak_price - (k_sell * prev_atr))
+                atr_sell_hit = (rebalance_stage in [1, 2, 3] and atr_sell_hit)
+
+            # (4) 최종 판정 (OR 결합)
+            buy_price_hit = fixed_buy_hit or atr_buy_hit
+            sell_price_hit = fixed_sell_hit or atr_sell_hit
             
             if buy_signal_hit or buy_price_hit:
                 if buy_signal_hit:
@@ -484,7 +539,9 @@ class StrategyEngine:
                     # 가격 트리거에 의한 매입/상향 (1->2, 2->3)
                     new_stage = min(3, rebalance_stage + 1)
                     target_lev_pct = (0.70 if new_stage == 2 else 1.0)
-                    rebalance_cause = "가격조건"
+                    if fixed_buy_hit and atr_buy_hit: rebalance_cause = "고정+ATR(매수)"
+                    elif fixed_buy_hit: rebalance_cause = "고정(매수)"
+                    else: rebalance_cause = "ATR(매수)"
                 rebalance_needed = True
                 
             # (2) 매도 판정 (자산 교체 신호)
@@ -497,12 +554,14 @@ class StrategyEngine:
                 rebalance_cause = "시그널"
                 rebalance_needed = True
                 
-            # (3) 매도 하향 가격 트리거
-            elif rebalance_stage in [1, 2, 3] and not is_buy_process and price_trigger:
+            elif sell_price_hit:
                 # 레버리지 비중 축소 (3->2, 2->1, 1->0)
                 new_stage = max(0, rebalance_stage - 1)
                 target_lev_pct = (0.70 if new_stage == 2 else (0.30 if new_stage == 1 else 0.0))
-                rebalance_cause = "가격조건"
+                
+                if fixed_sell_hit and atr_sell_hit: rebalance_cause = "고정+ATR(매도)"
+                elif fixed_sell_hit: rebalance_cause = "고정(매도)"
+                else: rebalance_cause = "ATR(샹들리에)"
                 rebalance_needed = True
 
             # [신규] S3(레버리지 100%) 전용 보호 조건 처리 (Emergency Defensive)
@@ -543,9 +602,20 @@ class StrategyEngine:
                         drop_acc = row.get('Drop_Acc', 0)
                         is_acc_ok = (drop_acc <= s3_p.get('acc_limit', -7.0))
                     
-                    # 활성화된 모든 필터가 만족되어야 함 (AND)
-                    active_filters = [s3_p.get('use_daily_drop'), s3_p.get('use_ma60'), s3_p.get('use_ma200'), s3_p.get('use_vix_jump'), s3_p.get('use_gap_down'), s3_p.get('use_drop_acc')]
-                    if any(active_filters) and is_drop_ok and is_ma60_ok and is_ma200_ok and is_vix_ok and is_gap_ok and is_acc_ok:
+                    # S3 보호 조건 결합 방식 정교화: 
+                    # 1. 보호 신호 1, 2, 3 '내부' 항목들은 모두 만족해야 함 (AND)
+                    # 2. 보호 신호 1, 2, 3 '끼리'는 하나라도 만족하면 작동 (OR)
+                    
+                    active_conditions = []
+                    if s3_p.get('use_daily_drop'): active_conditions.append(is_drop_ok)
+                    if s3_p.get('use_ma60'): active_conditions.append(is_ma60_ok)
+                    if s3_p.get('use_ma200'): active_conditions.append(is_ma200_ok)
+                    if s3_p.get('use_vix_jump'): active_conditions.append(is_vix_ok)
+                    if s3_p.get('use_gap_down'): active_conditions.append(is_gap_ok)
+                    if s3_p.get('use_drop_acc'): active_conditions.append(is_acc_ok)
+                    
+                    # 하나라도 체크되어 있고, 체크된 모든 조건이 참(True)인 경우 작동
+                    if len(active_conditions) > 0 and all(active_conditions):
                         dr = (price / row['Prev_Close'] - 1) * 100
                         rebalance_needed = True
                         new_planned = base_asset
@@ -570,7 +640,7 @@ class StrategyEngine:
                             rebalance_cause = f"S3-복합위기({detail_log})"
                         
                         s3_drop_triggered_val = dr 
-                        break # 하나라도 충족되면 종료 (OR)
+                        break # 신호 간에는 OR이므로 하나라도 충족되면 검사 종료
 
             passed_panic = False
             if rebalance_needed and new_planned != base_asset and smart_params and smart_params.get('use_panic', False):
@@ -669,6 +739,7 @@ class StrategyEngine:
                     current_planned_asset = new_planned
                     rebalance_stage = new_stage
                     last_entry_price = prices[base_asset]
+                    peak_price = prices[base_asset] # 리밸런싱 시 고점 초기화
 
                     # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
                     cash = current_total_val * cash_ratio
@@ -677,15 +748,18 @@ class StrategyEngine:
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned}
                     # [신규] '익일 시가' 매매 시에도 기준가격 계산의 베이스는 '신호 발생일 종가'로 고속
                     last_entry_price = prices[base_asset]
+                    peak_price = prices[base_asset]
 
             # 시각적 가독성을 위해 trade_label 설정
             if rebalance_needed:
                 prefix = "매도" if new_planned == base_asset else "매수"
                 # [수정] rebalance_cause가 "시그널"이나 "가격조건"이 아닌 경우(예: S3보호)에도 해당 원인이 표시되도록 수정
-                if rebalance_cause == "가격조건":
-                    condition_label = f"가격조건({price_diff_pct:+.1f}%)"
-                elif rebalance_cause == "시그널":
+                if rebalance_cause == "시그널":
                     condition_label = signal_reason
+                elif "ATR" in rebalance_cause:
+                    condition_label = f"{rebalance_cause} (ATR:{prev_atr:.2f})"
+                elif "고정" in rebalance_cause:
+                    condition_label = f"{rebalance_cause} ({price_diff_pct:+.1f}%)"
                 else:
                     condition_label = rebalance_cause
                 
@@ -742,6 +816,7 @@ class StrategyEngine:
                 'Drop_Acc': row.get('Drop_Acc', 0),
                 'Gap_Down': row.get('Gap_Down', 0),
                 'S3_Drop_Limit': s3_drop_triggered_val, # [기록]
+                'S3_Sell3_Event': s3_sell3_event_val, # [복구]
                 'S3_Detail': s3_detail_val, # [신규 추가]
                 'Trade_Label': trade_label,
                 'Summary': ", ".join(summary_p),
@@ -753,6 +828,9 @@ class StrategyEngine:
                 'MACD': macd_val,
                 'FG': fg,
                 'VIX': vix,
+                'ADX': row.get('ADX', 0),
+                'DMP': row.get('DMP', 0),
+                'DMN': row.get('DMN', 0),
                 'Smart_Mode': smart_reason,
                 'SMA200': row.get('SMA200', 0),
                 'SMA60': row.get('SMA60', 0),

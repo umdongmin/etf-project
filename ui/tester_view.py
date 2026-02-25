@@ -3,7 +3,7 @@ import streamlit as st
 class TesterView:
     """전략 분석기 입력 UI 구성 클래스"""
     @staticmethod
-    def render_config(current_params, ticker_map=None):
+    def render_top_part(current_params, ticker_map=None):
         st.subheader("🌐 기본 자산 및 거래 설정")
         c1, c2, c3 = st.columns(3)
         
@@ -71,7 +71,7 @@ class TesterView:
             
             st.write("---")
             st.subheader("🛡️ S3(레버리지 100%) 보호 설정")
-            st.caption("두 신호 중 하나만이라도 충족되면(OR) 방어 매도가 작동합니다.")
+            st.caption("각 보호 신호 **내부 항목은 AND(모두 충족)**, **신호 간(1,2,3)은 OR(하나라도 충족)**로 작동합니다.")
             
             s3_p_list = current_params.get('s3_protection', [{}, {}])
             while len(s3_p_list) < 2: s3_p_list.append({})
@@ -86,10 +86,10 @@ class TesterView:
                     col1, col2 = st.columns(2)
                     with col1:
                         use_ma60 = st.checkbox(f"60일 이평선 하회 {i}", value=p.get('use_ma60', False), key=f"s_ma60_use_{i}")
-                        ma60_lim = st.number_input(f"60일 기준 (%) {i}", -20.0, 5.0, p.get('ma60_limit', 0.0), 0.1, format="%.1f", key=f"s_ma60_lim_{i}")
+                        ma60_lim = st.number_input(f"60일 기준 (%) {i}", -50.0, 50.0, p.get('ma60_limit', 0.0), 0.1, format="%.1f", key=f"s_ma60_lim_{i}")
                     with col2:
                         use_ma200 = st.checkbox(f"200일 이평선 하회 {i}", value=p.get('use_ma200', False), key=f"s_ma200_use_{i}")
-                        ma200_lim = st.number_input(f"200일 기준 (%) {i}", -20.0, 5.0, p.get('ma200_limit', 0.0), 0.1, format="%.1f", key=f"s_ma200_lim_{i}")
+                        ma200_lim = st.number_input(f"200일 기준 (%) {i}", -50.0, 50.0, p.get('ma200_limit', 0.0), 0.1, format="%.1f", key=f"s_ma200_lim_{i}")
                     
                     use_vj = st.checkbox(f"VIX 급등 시그널 사용 {i}", value=p.get('use_vix_jump', False), key=f"s_vj_use_{i}")
                     vj_val = st.number_input(f"VIX 급등 기준 (%) {i}", 0.0, 100.0, p.get('vix_jump', 15.0), 0.1, format="%.1f", key=f"s_vj_{i}")
@@ -109,15 +109,51 @@ class TesterView:
                         'use_exit_all': use_exit
                     })
         
-        st.divider()
-        st.subheader("⚖️ 리밸런싱 및 스마트 조건")
+        return {
+            'buy_signals': buy_signals, 'sell_signals': sell_signals, 's3_protection': s3_protection,
+            'base_asset': base_asset, 'leverage_asset': leverage_asset, 'trade_at': trade_at
+        }
+
+    @staticmethod
+    def render_bottom_part(current_params, ticker_map=None, reb_mode=None):
+        # 폼 외부(HistoryView)에서 선택된 핵심 모드 상태를 가져옴
+        use_fixed = current_params.get('use_fixed_reb', True)
+        use_atr = current_params.get('use_atr_reb', False)
+        
         c1, c2, c3 = st.columns(3)
+        
+        # (1) 고정 비율 설정 섹션
+        with c1:
+            st.markdown("##### 🔹 고정 비율 세부 설정")
+            fixed_params = {
+                'buy_reb_up': st.number_input("매수 상향 (%)", 0.0, 100.0, float(current_params.get('buy_reb_up', 0.02)) * 100, 0.1, format="%.1f", key="r_b_u", disabled=not use_fixed) / 100.0,
+                'buy_reb_down': st.number_input("매수 하향 (%)", -100.0, 0.0, float(current_params.get('buy_reb_down', -0.07)) * 100, 0.1, format="%.1f", key="r_b_d", disabled=not use_fixed) / 100.0,
+                'sell_reb_up': st.number_input("매도 상향 (%)", 0.0, 100.0, float(current_params.get('sell_reb_up', 0.03)) * 100, 0.1, format="%.1f", key="r_s_u", disabled=not use_fixed) / 100.0,
+                'sell_reb_down': st.number_input("매도 하향 (%)", -100.0, 0.0, float(current_params.get('sell_reb_down', -0.035)) * 100, 0.1, format="%.1f", key="r_s_d", disabled=not use_fixed) / 100.0,
+            }
+
+        # (2) ATR 변동성 설정 섹션
+        with c2:
+            st.markdown("##### 🔸 ATR 변동성 세부 설정")
+            atr_params = {
+                'atr_mult_buy_up': st.number_input("매수 상향 승수 (불타기)", 0.1, 20.0, float(current_params.get('atr_mult_buy_up', 10.0)), 0.1, key="atr_m_buy_up", disabled=not use_atr),
+                'atr_mult_buy_down': st.number_input("매수 하향 승수 (물타기)", 0.1, 10.0, float(current_params.get('atr_mult_buy_down', 1.5)), 0.1, key="atr_m_buy_down", disabled=not use_atr),
+                'atr_mult_sell': st.number_input("매도 승수 (K2)", 0.1, 10.0, float(current_params.get('atr_mult_sell', 3.0)), 0.1, key="atr_m_sell", disabled=not use_atr),
+            }
+            if use_atr:
+                st.caption("ℹ️ ATR 리밸런싱은 20일 ATR 기준으로 작동합니다.")
+
+        # (3) 공통 설정 및 파라미터 취합
+        with c3:
+            st.markdown("##### 🧱 공통 설정")
+            cash_ratio_pct = st.number_input("현금 유지 비율(%)", 0.0, 100.0, float(current_params.get('cash_ratio_pct', 0.0)), 1.0, key="conf_cash")
+            
         reb_params = {
-            'buy_reb_up': c1.number_input("매수 후 리밸런싱(↑) %", 0.0, 100.0, float(current_params.get('buy_reb_up', 0.03)) * 100, 0.1, format="%.1f", key="r_b_u") / 100.0,
-            'buy_reb_down': c1.number_input("매수 후 리밸런싱(↓) %", -100.0, 0.0, float(current_params.get('buy_reb_down', -0.03)) * 100, 0.1, format="%.1f", key="r_b_d") / 100.0,
-            'sell_reb_up': c2.number_input("매도 후 리밸런싱(↑) %", 0.0, 100.0, float(current_params.get('sell_reb_up', 0.03)) * 100, 0.1, format="%.1f", key="r_s_u") / 100.0,
-            'sell_reb_down': c2.number_input("매도 후 리밸런싱(↓) %", -100.0, 0.0, float(current_params.get('sell_reb_down', -0.03)) * 100, 0.1, format="%.1f", key="r_s_d") / 100.0,
-            'cash_ratio_pct': c3.number_input("현금 유지 비율(%)", 0.0, 100.0, float(current_params.get('cash_ratio_pct', current_params.get('cash_ratio', 0.0) * 100)), 1.0, key="conf_cash")
+            'use_fixed_reb': use_fixed,
+            'use_atr_reb': use_atr,
+            **fixed_params,
+            **atr_params,
+            'cash_ratio_pct': cash_ratio_pct
         }
         
         with st.expander("🛡️ 하락장 및 스마트 대응 설정 (Smart Filter)"):
@@ -135,13 +171,9 @@ class TesterView:
             st.write("**Panic Mode 상세 (매수 시 RSI 제한)**")
             sc1, sc2, sc3 = st.columns(3)
             smart_config.update({
-                'panic_rsi_s1': sc1.number_input("S1 제한 RSI", 20, 45, current_params.get('panic_rsi_s1', 32)),
-                'panic_rsi_s2': sc2.number_input("S2 제한 RSI", 20, 45, current_params.get('panic_rsi_s2', 32)),
+                'panic_rsi_s1': sc1.number_input("S1 제한 RSI", 20, 45, current_params.get('panic_rsi_s1', 27)),
+                'panic_rsi_s2': sc2.number_input("S2 제한 RSI", 20, 45, current_params.get('panic_rsi_s2', 28)),
                 'panic_rsi_s3': sc3.number_input("S3 제한 RSI", 20, 45, current_params.get('panic_rsi_s3', 30))
             })
             
-        return {
-            'buy_signals': buy_signals, 'sell_signals': sell_signals, 's3_protection': s3_protection,
-            'base_asset': base_asset, 'leverage_asset': leverage_asset, 'trade_at': trade_at,
-            **reb_params, **smart_config
-        }
+        return {**reb_params, **smart_config}

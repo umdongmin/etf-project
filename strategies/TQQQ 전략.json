@@ -57,14 +57,66 @@
             "bb_upper": false
         }
     ],
-    "buy_reb_up": 0.02,
-    "buy_reb_down": -0.07,
+    "s3_protection": [
+        {
+            "use_daily_drop": false,
+            "drop_limit": -3.0,
+            "use_ma60": false,
+            "ma60_limit": 0.0,
+            "use_ma200": false,
+            "ma200_limit": 0.0,
+            "use_vix_jump": false,
+            "vix_jump": 15.0,
+            "use_gap_down": true,
+            "gap_limit": -3.0,
+            "use_drop_acc": false,
+            "acc_limit": -7.0,
+            "use_exit_all": false
+        },
+        {
+            "use_daily_drop": false,
+            "drop_limit": -3.0,
+            "use_ma60": false,
+            "ma60_limit": 0.0,
+            "use_ma200": false,
+            "ma200_limit": 0.0,
+            "use_vix_jump": false,
+            "vix_jump": 15.0,
+            "use_gap_down": false,
+            "gap_limit": -3.0,
+            "use_drop_acc": true,
+            "acc_limit": -7.0,
+            "use_exit_all": false
+        },
+        {
+            "use_daily_drop": false,
+            "drop_limit": -3.0,
+            "use_ma60": false,
+            "ma60_limit": 0.0,
+            "use_ma200": false,
+            "ma200_limit": 0.0,
+            "use_vix_jump": false,
+            "vix_jump": 15.0,
+            "use_gap_down": false,
+            "gap_limit": -3.0,
+            "use_drop_acc": false,
+            "acc_limit": -7.0,
+            "use_exit_all": false
+        }
+    ],
+    "buy_reb_up": 0.018000000000000002,
+    "buy_reb_down": -1.0,
     "sell_reb_up": 0.03,
     "sell_reb_down": -0.035,
     "base_asset": "QQQ",
     "leverage_asset": "TQQQ",
     "cash_ratio_pct": 0.0,
     "trade_at": "종가",
+    "use_fixed_reb": true,
+    "use_atr_reb": true,
+    "atr_mult_buy_up": 10.0,
+    "atr_mult_buy_down": 3.0,
+    "atr_mult_sell": 10.0,
     "use_panic": true,
     "panic_ma": 200,
     "panic_rsi_s1": 27,
@@ -74,6 +126,8 @@
     "vix_exit": 31,
     "use_rsi_turbo": false,
     "rsi_turbo": 31,
+    "use_sl_control": false,
+    "sl_control_limit": -15,
     "params": {
         "buy_signals": [
             {
