@@ -28,6 +28,7 @@ def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d
 
     _p = to_dict(params_tuple)
     _s = to_dict(smart_tuple)
+    # [수정] 엔진이 3개(history, closed_trades, sell4_events)의 값을 반환하므로 전체 반환
     return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
 
 class HistoryLabView:
@@ -136,6 +137,11 @@ class HistoryLabView:
                                 st.session_state[f"s_m_above_{i}"] = sp.get('macd_signal_above', False)
                                 st.session_state[f"s_m_dead_{i}"] = sp.get('macd_dead', False)
                                 st.session_state[f"s_bb_up_{i}"] = sp.get('bb_upper', False)
+                                # [신규] 샹들리에 엑시트 파라미터 동기화
+                                st.session_state[f"s_chan_use_{i}"] = sp.get('use_chandelier', False)
+                                st.session_state[f"s_chan_mult_{i}"] = float(sp.get('chandelier_mult', 3.0))
+                                # [신규] 파라볼릭 SAR 동기화
+                                st.session_state[f"s_sar_use_{i}"] = sp.get('use_sar', False)
 
                             # S3 보호 설정 동기화 (최대 3개 신호 블록 처리)
                             s3_prots = config.get('s3_protection', [])
@@ -155,6 +161,9 @@ class HistoryLabView:
                                 st.session_state[f"s_gap_lim_{i}"] = float(s3p.get('gap_limit', -3.0))
                                 st.session_state[f"s_acc_use_{i}"] = s3p.get('use_drop_acc', False) # 파라미터명 수정: use_acc_down -> use_drop_acc
                                 st.session_state[f"s_acc_lim_{i}"] = float(s3p.get('acc_limit', -7.0))
+                                # [신규] S3 보호용 샹들리에 엑시트 파라미터 동기화
+                                st.session_state[f"s3_chan_use_{i}"] = s3p.get('use_chandelier', False)
+                                st.session_state[f"s3_chan_mult_{i}"] = float(s3p.get('chandelier_mult', 3.0))
                                 st.session_state[f"s_exit_all_{i}"] = s3p.get('use_exit_all', False)
 
                             # 리밸런싱 모드 및 ATR 설정 동기화
@@ -163,6 +172,10 @@ class HistoryLabView:
                             st.session_state.atr_m_buy_up = float(config.get('atr_mult_buy_up', 10.0))
                             st.session_state.atr_m_buy_down = float(config.get('atr_mult_buy_down', 1.5))
                             st.session_state.atr_m_sell = float(config.get('atr_mult_sell', 3.0))
+                            
+                            # [신규] 매수/매도 ATR 기준일 동기화 (과거 데이터 호환을 위해 get 기본값 사용)
+                            st.session_state.atr_p_buy = int(config.get('atr_period_buy', 20))
+                            st.session_state.atr_p_sell = int(config.get('atr_period_sell', 20))
 
                             st.session_state.loaded_strat_name = target_strat
                             st.success(f"'{target_strat}' 모든 설정 및 UI 로드 완료!")
@@ -178,7 +191,7 @@ class HistoryLabView:
             params_tuple = deep_tuple(params)
             smart_tuple = deep_tuple(smart_params)
             
-            golden_history, closed_trades = get_cached_strategy_result(
+            golden_history, closed_trades, sell4_events = get_cached_strategy_result(
                 data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
                 start_date, end_date, params_tuple, trade_at, smart_tuple, salt
             )
@@ -247,6 +260,19 @@ class HistoryLabView:
         
         st.divider()
         HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
+
+        # [신규] 매도 신호 4번 (특수 엑시트) 발동 기록
+        st.divider()
+        st.subheader("📉 매도 신호 4번 (특수 엑시트) 발동 기록")
+        st.caption("파라볼릭 SAR, 샹들리에 등 특수 익절/손절 목적의 4번 시그널이 발동된 내역입니다.")
+        if sell4_events:
+            import pandas as pd
+            sell4_df = pd.DataFrame(sell4_events)
+            sell4_df['date'] = sell4_df['date'].dt.strftime('%Y-%m-%d')
+            sell4_df.columns = ['발생일', '진단명 (이유)', '기준가(종가)']
+            st.dataframe(sell4_df.set_index('발생일'), use_container_width=True)
+        else:
+            st.info("시뮬레이션 기간 내 매도 신호 4번 발동 기록이 없습니다.")
 
         # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
         st.divider()

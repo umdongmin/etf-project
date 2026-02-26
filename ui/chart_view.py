@@ -22,7 +22,7 @@ class ChartView:
         long_end = datetime.date.today()
         
         with st.spinner('전 기간 데이터 시뮬레이션 중...'):
-            golden_history, all_closed_trades = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, long_start, long_end, params, trade_at, smart_params=smart_params)
+            golden_history, all_closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, long_start, long_end, params, trade_at, smart_params=smart_params)
             
             semi_group = ['SOXX', 'USD', 'SOXL']
             is_semi = base_asset in semi_group or leverage_asset in semi_group
@@ -64,7 +64,7 @@ class ChartView:
                     target_params = StrategyStorage.load_strategy(new_comp_name) if (new_comp_name in stored_strats and new_comp_name != loaded_name) else None
                     if target_params:
                         with st.spinner(f"'{new_comp_name}' 전략 데이터 시뮬레이션 중..."):
-                            t_hist, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, target_params.get('leverage_asset', leverage_asset), target_params.get('base_asset', base_asset), (target_params.get('cash_ratio_pct', 0)/100.0), long_start, long_end, target_params, target_params.get('trade_at', trade_at), smart_params=target_params)
+                            t_hist, _, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, target_params.get('leverage_asset', leverage_asset), target_params.get('base_asset', base_asset), (target_params.get('cash_ratio_pct', 0)/100.0), long_start, long_end, target_params, target_params.get('trade_at', trade_at), smart_params=target_params)
                             t_metrics = calculate_metrics(t_hist)
                             st.session_state.comparison_list.append({'name': new_comp_name, 'base': target_params.get('base_asset', base_asset), 'lev': target_params.get('leverage_asset', leverage_asset), 'history': t_hist, 'metrics': t_metrics})
                     else:

@@ -73,11 +73,30 @@ class StrategyEngine:
         # Gap_Down: 전일 종가 대비 당일 시가 갭 (패닉 시가 측정용)
         combined['Gap_Down'] = (combined['Open'] / combined['Close'].shift(1) - 1) * 100
         
-        # [신규] ATR 지표 계산 (20일 기준, 기초자산 QQQ 등 타겟)
-        combined['ATR'] = ta.atr(base_df['High'], base_df['Low'], base_df['Close'], length=20)
-        combined['ATR'] = combined['ATR'].ffill().fillna(0)
+        # [신규] ATR 지표 계산 (14일/20일 기준 동시 계산, 기초자산 QQQ 등 타겟)
+        combined['ATR_14'] = ta.atr(base_df['High'], base_df['Low'], base_df['Close'], length=14)
+        combined['ATR_14'] = combined['ATR_14'].ffill().fillna(0)
         
-        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist', 'ADX', 'DMP', 'DMN', 'VIX', 'Drop_Acc', 'Gap_Down', 'ATR']
+        combined['ATR_20'] = ta.atr(base_df['High'], base_df['Low'], base_df['Close'], length=20)
+        combined['ATR_20'] = combined['ATR_20'].ffill().fillna(0)
+        
+        # [신규] 파라볼릭 SAR 계산 (추세 가속 기반 매도 필터용)
+        # ta.psar는 여러 컬럼을 반환하며, 보통 시작하는 컬럼명이 'PSARl_' 또는 'PSARs_' 등입니다.
+        # 방향에 관계없이 현재 활성화된 점(레벨)을 구하기 위해 반환된 데이터프레임을 하나로 합쳐서 취합니다.
+        sar_df = ta.psar(base_df['High'], base_df['Low'], base_df['Close'])
+        if sar_df is not None and not sar_df.empty:
+            # 보통 4개의 컬럼(PSARl, PSARs, PSARaf, PSARr)을 반환. 첫 두 개가 실제 SAR 라인 값 (Long/Short)
+            sar_cols = [c for c in sar_df.columns if c.startswith('PSARl') or c.startswith('PSARs')]
+            if sar_cols:
+                # 롱(상승) 시에는 PSARl에 값이 있고 숏은 NaN, 반대는 반대이므로 서로 채워 병합
+                combined['SAR'] = sar_df[sar_cols].bfill(axis=1).iloc[:, 0]
+                combined['SAR'] = combined['SAR'].ffill().fillna(0)
+            else:
+                combined['SAR'] = 0
+        else:
+            combined['SAR'] = 0
+
+        cols_to_shift = ['RSI', 'RSI_SMA', 'MACD', 'Signal_Line', 'SMA200', 'SMA60', 'MACD_Hist', 'ADX', 'DMP', 'DMN', 'VIX', 'Drop_Acc', 'Gap_Down', 'ATR_14', 'ATR_20', 'SAR']
         if 'STOCH_K' in combined.columns:
             cols_to_shift += ['STOCH_K', 'STOCH_D']
             
@@ -127,6 +146,8 @@ class StrategyEngine:
         history = []
         trade_slots = [] # list of {'buy_price': val, 'date': date}
         closed_trades = [] # list of {'entry_date': d, 'exit_date': d, 'asset': a, 'buy_price': p, 'sell_price': p, 'ret': r, 'status': s}
+        # [신규] 매도 신호 4번 전용 진단 로그 수집 배열
+        sell4_events = []
         
         # [추가] 지연 실행용 상태 변수
         pending_rebalance = None # {'target_lev_pct': val, 'rebalance_stage': val, 'planned': asset}
@@ -375,11 +396,41 @@ class StrategyEngine:
                         cond &= (price >= bb_u); active = True
                         reasons.append("BB 상단 터치")
                     
+                    # [신규] 샹들리에 엑시트를 매도 시그널 조건으로 판단
+                    if sp.get('use_chandelier'):
+                        # 매도 신호용 설정(보통 20일)의 이전 ATR을 가져옵니다.
+                        period_s = params.get('atr_period_sell', 20)
+                        prev_atr_sell = row.get(f'Prev_ATR_{period_s}', 0)
+                        c_mult = float(sp.get('chandelier_mult', 3.0))
+                        
+                        # 투자 상태일 때 고점 대비 하락분이 승수 범위 내를 벗어났는지 확인
+                        hit_chandelier = False
+                        if (current_planned_asset != base_asset) and peak_price > 0:
+                            hit_chandelier = (prices[base_asset] <= peak_price - (c_mult * prev_atr_sell))
+                        
+                        cond &= hit_chandelier; active = True
+                        reasons.append(f"샹들리에 엑시트(ATR*{c_mult})")
+
+                    # [신규] 파라볼릭 SAR 데드크로스를 매도 시그널 조건으로 판단
+                    if sp.get('use_sar'):
+                        # 전날과 오늘의 가격 흐름이 SAR 점을 하향 돌파했는지 확인 (Trailing Stop)
+                        prev_sar = row.get('Prev_SAR', 0)
+                        curr_sar = row.get('SAR', 0)
+                        # 이전 종가는 SAR보다 높았으나, 현재 종가가 SAR 아래로 떨어졌을 때 데드크로스로 간주
+                        is_sar_dead_cross = (row.get('Prev_Close', 0) > prev_sar) and (price < curr_sar)
+                        
+                        cond &= is_sar_dead_cross; active = True
+                        reasons.append("파라볼릭SAR 데드크로스")
+                    
                     if active and cond: 
                         is_sell_signal = True
                         sell_signal_idx = idx + 1 # 1-based index
                         signal_reason = " / ".join(reasons)
                         break
+
+                # [신규] 매도 신호 4번 (특수 엑시트) 발동 시 별도 진단 로그 수집
+                if is_sell_signal and sell_signal_idx == 4:
+                    sell4_events.append({'date': date, 'reason': signal_reason, 'price': price})
 
                 # [복구] S3(레버리지 3단계)에서 매도신호3 발생 시에만 기록
                 if is_sell_signal and rebalance_stage == 3 and sell_signal_idx == 3:
@@ -499,19 +550,25 @@ class StrategyEngine:
             atr_buy_hit = False
             atr_sell_hit = False
             if use_atr:
-                prev_atr = row.get('Prev_ATR', 0)
+                # [수정] 매수/매도별 ATR 기준일 개별 적용 (기본값: 매수 20일, 매도 20일)
+                period_b = params.get('atr_period_buy', 20)
+                period_s = params.get('atr_period_sell', 20)
+                
+                prev_atr_buy = row.get(f'Prev_ATR_{period_b}', 0)
+                prev_atr_sell = row.get(f'Prev_ATR_{period_s}', 0)
+                
                 k_up = params.get('atr_mult_buy_up', 10.0)
                 k_down = params.get('atr_mult_buy_down', 1.5)
                 k_sell = params.get('atr_mult_sell', 3.0)
                 
-                # ATR 매수 트리거 (상향/하향)
-                hit_down = (prices[base_asset] <= last_entry_price - (k_down * prev_atr))
-                hit_up = (prices[base_asset] >= last_entry_price + (k_up * prev_atr))
+                # ATR 매수 트리거 (상향/하향) - prev_atr_buy 사용
+                hit_down = (prices[base_asset] <= last_entry_price - (k_down * prev_atr_buy))
+                hit_up = (prices[base_asset] >= last_entry_price + (k_up * prev_atr_buy))
                 atr_buy_hit = (rebalance_stage in [1, 2] and is_mode_consistent and (hit_down or hit_up))
                 
-                # ATR 샹들리에 엑시트
+                # ATR 샹들리에 엑시트 - prev_atr_sell 사용
                 if is_buy_process and peak_price > 0:
-                    atr_sell_hit = (prices[base_asset] <= peak_price - (k_sell * prev_atr))
+                    atr_sell_hit = (prices[base_asset] <= peak_price - (k_sell * prev_atr_sell))
                 atr_sell_hit = (rebalance_stage in [1, 2, 3] and atr_sell_hit)
 
             # (4) 최종 판정 (OR 결합)
@@ -602,6 +659,18 @@ class StrategyEngine:
                         drop_acc = row.get('Drop_Acc', 0)
                         is_acc_ok = (drop_acc <= s3_p.get('acc_limit', -7.0))
                     
+                    # [신규] S3 보호 설정 전용: 샹들리에 엑시트 (고점 추적 매도)
+                    is_s3_chan_ok = True
+                    if s3_p.get('use_chandelier'):
+                        period_s = params.get('atr_period_sell', 20)
+                        prev_atr_sell = row.get(f'Prev_ATR_{period_s}', 0)
+                        c_mult = float(s3_p.get('chandelier_mult', 3.0))
+                        
+                        hit_s3_chandelier = False
+                        if (current_planned_asset != base_asset) and peak_price > 0:
+                            hit_s3_chandelier = (prices[base_asset] <= peak_price - (c_mult * prev_atr_sell))
+                        is_s3_chan_ok = hit_s3_chandelier
+
                     # S3 보호 조건 결합 방식 정교화: 
                     # 1. 보호 신호 1, 2, 3 '내부' 항목들은 모두 만족해야 함 (AND)
                     # 2. 보호 신호 1, 2, 3 '끼리'는 하나라도 만족하면 작동 (OR)
@@ -613,6 +682,7 @@ class StrategyEngine:
                     if s3_p.get('use_vix_jump'): active_conditions.append(is_vix_ok)
                     if s3_p.get('use_gap_down'): active_conditions.append(is_gap_ok)
                     if s3_p.get('use_drop_acc'): active_conditions.append(is_acc_ok)
+                    if s3_p.get('use_chandelier'): active_conditions.append(is_s3_chan_ok)
                     
                     # 하나라도 체크되어 있고, 체크된 모든 조건이 참(True)인 경우 작동
                     if len(active_conditions) > 0 and all(active_conditions):
@@ -620,13 +690,15 @@ class StrategyEngine:
                         rebalance_needed = True
                         new_planned = base_asset
                         
-                        # 로그 상세화 (#N:신호번호, V:VIX, G:Gap, A:Acc, M60:MA60, M200:MA200)
-                        detail_log = f"#{idx} D:{dr:+.1f}%"
+                        # 로그 상세화 (#N:신호번호, V:VIX, G:Gap, A:Acc, M60:MA60, M200:MA200, C:Chan)
+                        detail_log = f"#{idx}"
+                        if s3_p.get('use_daily_drop'): detail_log += f" D:{dr:+.1f}%"
                         if s3_p.get('use_ma60'): detail_log += f" M60({s3_p.get('ma60_limit', 0.0):+.1f}%)"
                         if s3_p.get('use_ma200'): detail_log += f" M200({s3_p.get('ma200_limit', 0.0):+.1f}%)"
                         if s3_p.get('use_vix_jump'): detail_log += f" V:{vix_jump_pct:+.1f}%"
                         if s3_p.get('use_gap_down'): detail_log += f" G:{row.get('Gap_Down', 0):+.1f}%"
                         if s3_p.get('use_drop_acc'): detail_log += f" A:{row.get('Drop_Acc', 0):+.1f}%"
+                        if s3_p.get('use_chandelier'): detail_log += f" C:ATR*{s3_p.get('chandelier_mult', 3.0)}"
 
                         s3_detail_val = detail_log
                         
@@ -757,7 +829,11 @@ class StrategyEngine:
                 if rebalance_cause == "시그널":
                     condition_label = signal_reason
                 elif "ATR" in rebalance_cause:
-                    condition_label = f"{rebalance_cause} (ATR:{prev_atr:.2f})"
+                    if "매도" in rebalance_cause or "샹들리에" in rebalance_cause:
+                        disp_atr = row.get(f"Prev_ATR_{params.get('atr_period_sell', 20)}", 0)
+                    else:
+                        disp_atr = row.get(f"Prev_ATR_{params.get('atr_period_buy', 20)}", 0)
+                    condition_label = f"{rebalance_cause} (ATR:{disp_atr:.2f})"
                 elif "고정" in rebalance_cause:
                     condition_label = f"{rebalance_cause} ({price_diff_pct:+.1f}%)"
                 else:
@@ -843,7 +919,7 @@ class StrategyEngine:
                     history[-1][f'{t}_Weight'] = (holdings[t] * prices.get(t, 0)) / current_total_val if current_total_val > 0 else 0
             history[-1][f'{base_asset}_Weight'] = (holdings.get(base_asset, 0) * prices.get(base_asset, 0)) / current_total_val if current_total_val > 0 else 0
 
-        return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades)
+        return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades), sell4_events
 
     @staticmethod
     @st.cache_data(ttl=3600, show_spinner=False)

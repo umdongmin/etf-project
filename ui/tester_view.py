@@ -55,7 +55,8 @@ class TesterView:
         sell_signals = []
         with col_sell:
             st.subheader("📤 Sell Conditions (OR)")
-            for i in range(1, 4):
+            # [수정] 매도 신호를 4개까지 설정할 수 있도록 반복문 범위 확장
+            for i in range(1, 5):
                 with st.expander(f"매도 신호 {i}", expanded=False):
                     p = current_params['sell_signals'][i-1] if i <= len(current_params['sell_signals']) else {}
                     sell_signals.append({
@@ -66,7 +67,12 @@ class TesterView:
                         'macd_signal_above': st.checkbox(f"MACD > Signal {i}", value=p.get('macd_signal_above', i==2), key=f"s_m_above_{i}"),
                         'macd_dead': st.checkbox(f"MACD Dead Cross {i}", value=p.get('macd_dead', i==3), key=f"s_m_dead_{i}"),
                         'di_minus_above': st.checkbox(f"매도 우세 (DI->DI+) {i}", value=p.get('di_minus_above', False), key=f"s_di_{i}"),
-                        'bb_upper': st.checkbox(f"Bollinger Upper {i}", value=p.get('bb_upper', False), key=f"s_bb_up_{i}")
+                        'bb_upper': st.checkbox(f"Bollinger Upper {i}", value=p.get('bb_upper', False), key=f"s_bb_up_{i}"),
+                        # [신규] 샹들리에 엑시트 (ATR 고점 추적) 조건 추가
+                        'use_chandelier': st.checkbox(f"샹들리에 엑시트 (고점방어) {i}", value=p.get('use_chandelier', i==4), key=f"s_chan_use_{i}"),
+                        'chandelier_mult': st.number_input(f"샹들리에 변동성 승수 {i}", 0.1, 10.0, float(p.get('chandelier_mult', 3.0)), 0.1, key=f"s_chan_mult_{i}"),
+                        # [신규] 파라볼릭 SAR 데드크로스 조건 추가
+                        'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"s_sar_use_{i}")
                     })
             
             st.write("---")
@@ -97,6 +103,11 @@ class TesterView:
                     gap_lim = st.number_input(f"시가 갭 기준 (%) {i}", -10.0, 0.0, p.get('gap_limit', -3.0), 0.1, format="%.1f", key=f"s_gap_lim_{i}")
                     use_acc = st.checkbox(f"급격한 하락 발생 {i} (-7% 이하)", value=p.get('use_drop_acc', False), key=f"s_acc_use_{i}")
                     acc_lim = st.number_input(f"누적 하락 기준 (%) {i}", -20.0, 0.0, p.get('acc_limit', -7.0), 0.1, format="%.1f", key=f"s_acc_lim_{i}")
+                    
+                    # [신규] S3 보호용 샹들리에 엑시트 옵션 추가
+                    use_chan = st.checkbox(f"S3 샹들리에 엑시트 사용 {i}", value=p.get('use_chandelier', False), key=f"s3_chan_use_{i}")
+                    chan_mult = st.number_input(f"S3 샹들리에 승수 {i}", 0.1, 10.0, float(p.get('chandelier_mult', 3.0)), 0.1, key=f"s3_chan_mult_{i}")
+                    
                     use_exit = st.checkbox(f"전량매도 (S0로 이동) {i}", value=p.get('use_exit_all', False), key=f"s_exit_all_{i}")
                     
                     s3_protection.append({
@@ -106,6 +117,7 @@ class TesterView:
                         'use_vix_jump': use_vj, 'vix_jump': vj_val,
                         'use_gap_down': use_gap, 'gap_limit': gap_lim,
                         'use_drop_acc': use_acc, 'acc_limit': acc_lim,
+                        'use_chandelier': use_chan, 'chandelier_mult': chan_mult,
                         'use_exit_all': use_exit
                     })
         
@@ -139,9 +151,13 @@ class TesterView:
                 'atr_mult_buy_up': st.number_input("매수 상향 승수 (불타기)", 0.1, 20.0, float(current_params.get('atr_mult_buy_up', 10.0)), 0.1, key="atr_m_buy_up", disabled=not use_atr),
                 'atr_mult_buy_down': st.number_input("매수 하향 승수 (물타기)", 0.1, 10.0, float(current_params.get('atr_mult_buy_down', 1.5)), 0.1, key="atr_m_buy_down", disabled=not use_atr),
                 'atr_mult_sell': st.number_input("매도 승수 (K2)", 0.1, 10.0, float(current_params.get('atr_mult_sell', 3.0)), 0.1, key="atr_m_sell", disabled=not use_atr),
+                
+                # [신규] ATR 기준일 개별 설정 추가
+                'atr_period_buy': st.selectbox("매수 ATR 기준일", [14, 20], index=0 if current_params.get('atr_period_buy', 20) == 14 else 1, key="atr_p_buy", disabled=not use_atr),
+                'atr_period_sell': st.selectbox("매도 ATR 기준일", [14, 20], index=1 if current_params.get('atr_period_sell', 20) == 20 else 0, key="atr_p_sell", disabled=not use_atr),
             }
             if use_atr:
-                st.caption("ℹ️ ATR 리밸런싱은 20일 ATR 기준으로 작동합니다.")
+                st.caption("ℹ️ 위 설정한 기준일(14/20일)의 ATR을 각각 매수와 매도 판단에 사용합니다.")
 
         # (3) 공통 설정 및 파라미터 취합
         with c3:

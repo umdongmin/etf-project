@@ -34,7 +34,10 @@
             "macd_signal_above": false,
             "macd_dead": false,
             "di_minus_above": false,
-            "bb_upper": false
+            "bb_upper": false,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
+            "use_sar": false
         },
         {
             "rsi_val": 0,
@@ -44,7 +47,10 @@
             "macd_signal_above": true,
             "macd_dead": false,
             "di_minus_above": false,
-            "bb_upper": false
+            "bb_upper": false,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
+            "use_sar": false
         },
         {
             "rsi_val": 0,
@@ -54,7 +60,23 @@
             "macd_signal_above": false,
             "macd_dead": true,
             "di_minus_above": true,
-            "bb_upper": false
+            "bb_upper": false,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
+            "use_sar": false
+        },
+        {
+            "rsi_val": 50,
+            "rsi_dead": false,
+            "rsi_dec": true,
+            "macd_dec": false,
+            "macd_signal_above": false,
+            "macd_dead": false,
+            "di_minus_above": true,
+            "bb_upper": false,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
+            "use_sar": true
         }
     ],
     "s3_protection": [
@@ -71,6 +93,8 @@
             "gap_limit": -3.0,
             "use_drop_acc": false,
             "acc_limit": -7.0,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
             "use_exit_all": false
         },
         {
@@ -86,6 +110,8 @@
             "gap_limit": -3.0,
             "use_drop_acc": true,
             "acc_limit": -7.0,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
             "use_exit_all": false
         },
         {
@@ -101,6 +127,8 @@
             "gap_limit": -3.0,
             "use_drop_acc": false,
             "acc_limit": -7.0,
+            "use_chandelier": false,
+            "chandelier_mult": 3.0,
             "use_exit_all": false
         }
     ],
@@ -117,6 +145,8 @@
     "atr_mult_buy_up": 10.0,
     "atr_mult_buy_down": 3.0,
     "atr_mult_sell": 10.0,
+    "atr_period_buy": 20,
+    "atr_period_sell": 20,
     "use_panic": true,
     "panic_ma": 200,
     "panic_rsi_s1": 27,
