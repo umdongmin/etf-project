@@ -1,0 +1,26 @@
+name: TQQQ Daily Alert Bot
+on:
+  schedule:
+    # 매주 화~토요일 한국시간 04:45 실행 (UTC 기준 전날 19:45)
+    # 서머타임 해제 시에는 20:45로 변경 필요
+    - cron: '45 19 * * 1-5'
+  workflow_dispatch: # 수동으로도 실행할 수 있게 하는 버튼
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 1. 코드 가져오기
+      uses: actions/checkout@v3
+    - name: 2. 파이썬 설치하기
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12' 
+    - name: 3. 라이브러리 설치하기
+      run: |
+        pip install -r requirements.txt
+    - name: 4. 알림 봇 실행하기
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        python alert_bot.py
