@@ -17,6 +17,7 @@ from ui.backtest_view import BacktestView
 from ui.history_view import HistoryLabView
 from ui.chart_view import ChartView
 from ui.tester_view import TesterView
+from ui.data_analysis_view import DataAnalysisView
 from utils.metrics import calculate_metrics
 
 class GoldenStrategyApp:
@@ -35,59 +36,59 @@ class GoldenStrategyApp:
     def run(self):
         # 사이드바 공통 메뉴
         st.sidebar.title("🚀 Golden Strategy v3.0")
-        menu = st.sidebar.radio("메인 메뉴", ["📊 실시간 백테스트", "📈 인사이트 센터", "📜 매매 전략 설정", "📰 주요 마켓 이슈"])
+        menu = st.sidebar.radio("메인 메뉴", ["📊 실시간 백테스트", "📈 인사이트 센터", "📜 매매 전략 설정", "📰 주요 마켓 이슈", "📉 데이터 분석"])
         
         # 세션 상태 초기화
         if 'current_params' not in st.session_state:
             st.session_state.current_params = {
                 'buy_signals': [
                     {'rsi_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40},
-                    {'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40}
+                    {'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40},
+                    {'rsi_val': 0, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False}
                 ],
                 'sell_signals': [
                     {'rsi_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
                     {'rsi_val': 0, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
-                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
-                    # [신규] 매도 시그널 4 기본값 (예비 또는 샹들리에 전용)
-                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': True, 'chandelier_mult': 3.0, 'use_sar': False}
+                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'di_minus_cross': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
+                    {'rsi_val': 50, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': True}
                 ],
                 's3_protection': [
                     {
-                        'only_s3': True, 'use_daily_drop': False, 'drop_limit': -3.0, 
+                        'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
                         'use_vix_jump': False, 'vix_jump': 15.0, 
                         'use_gap_down': True, 'gap_limit': -3.0,
                         'use_drop_acc': False, 'acc_limit': -7.0,
-                        'use_exit_all': False,
-                        # [신규] S3 보호 설정용 샹들리에 엑시트 옵션 추가
-                        'use_chandelier': False, 'chandelier_mult': 3.0
+                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
                     },
                     {
-                        'only_s3': True, 'use_daily_drop': False, 'drop_limit': -3.0, 
+                        'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
                         'use_vix_jump': False, 'vix_jump': 15.0, 
                         'use_gap_down': False, 'gap_limit': -3.0,
                         'use_drop_acc': True, 'acc_limit': -7.0,
-                        'use_exit_all': False,
-                        'use_chandelier': False, 'chandelier_mult': 3.0
+                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
                     },
                     {
-                        'only_s3': True, 'use_daily_drop': False, 'drop_limit': -3.0, 
+                        'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
                         'use_vix_jump': False, 'vix_jump': 15.0, 
                         'use_gap_down': False, 'gap_limit': -3.0,
                         'use_drop_acc': False, 'acc_limit': -7.0,
-                        'use_exit_all': False,
-                        'use_chandelier': False, 'chandelier_mult': 3.0
+                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
                     }
                 ],
-                'buy_reb_up': 0.02, 'buy_reb_down': -0.07, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
-                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0, 'trade_at': '종가',
-                'use_fixed_reb': True, 'use_atr_reb': False,
-                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 1.5, 'atr_mult_sell': 3.0,
-                'atr_period_buy': 14, 'atr_period_sell': 20,
+                'buy_reb_up': 0.018, 'buy_reb_down': -1.0, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
+                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
+                'use_fixed_reb': True, 'use_atr_reb': True,
+                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 3.0, 'atr_mult_sell': 10.0,
+                'atr_period_buy': 20, 'atr_period_sell': 20,
                 'use_panic': True, 'panic_ma': 200, 
-                'panic_rsi_s1': 27, 'panic_rsi_s2': 28, 'panic_rsi_s3': 30,
+                'panic_buy_signals': [
+                    {'rsi_val': 27, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False},
+                    {'rsi_val': 28, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False},
+                    {'rsi_val': 30, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False}
+                ],
                 'use_vix_safety': False, 'vix_exit': 31,
                 'use_rsi_turbo': False, 'rsi_turbo': 31
             }
@@ -108,43 +109,7 @@ class GoldenStrategyApp:
             st.error("데이터 로드 실패")
             st.stop()
             
-        # [복구] 사이드바 핵심 설정 (사용자 편의성 제고)
-        st.sidebar.header("📍 핵심 자산 설정")
-        base_asset_opts = ["QQQ", "QLD", "TQQQ", "SOXX", "USD", "SOXL"]
-        cp['base_asset'] = st.sidebar.selectbox("기준 자산 (시그널)", base_asset_opts, index=base_asset_opts.index(cp['base_asset']), format_func=lambda x: self.ticker_map[x])
-        
-        leverage_asset_opts = ["QLD", "TQQQ", "USD", "SOXL", "TMF"]
-        cp['leverage_asset'] = st.sidebar.selectbox("매매 대상 자산", leverage_asset_opts, index=leverage_asset_opts.index(cp['leverage_asset']), format_func=lambda x: self.ticker_map[x])
-        
-        cp['cash_ratio_pct'] = st.sidebar.slider(
-            "현금 비중 (%)", 0.0, 100.0, 
-            value=float(np.clip(cp.get('cash_ratio_pct', 0), 0.0, 100.0)), 
-            step=1.0
-        )
-        
-        trade_at_opts = ["종가", "익일 시가"]
-        cp['trade_at'] = st.sidebar.radio("매매 시점 선택", trade_at_opts, index=trade_at_opts.index(cp['trade_at']), horizontal=True)
-
-        # [수정] 세션 파라미터를 기반으로 로직 파라미터 구성
-        smart_params = {
-            'use_panic': cp['use_panic'], 
-            'panic_ma': cp['panic_ma'],
-            'panic_rsi_s1': cp['panic_rsi_s1'],
-            'panic_rsi_s2': cp['panic_rsi_s2'],
-            'panic_rsi_s3': cp['panic_rsi_s3'],
-            'use_vix_safety': cp['use_vix_safety'],
-            'vix_exit': cp['vix_exit'],
-            'use_rsi_turbo': cp['use_rsi_turbo'],
-            'rsi_turbo': cp['rsi_turbo'],
-            'use_sl_control': cp.get('use_sl_control', False),
-            'sl_control_limit': cp.get('sl_control_limit', -15)
-        }
-        cash_ratio = cp['cash_ratio_pct'] / 100.0
-        
-        # [수정] 날짜 선택 기능을 공통 사이드바로 이동하여 메뉴 이동 시에도 유지되도록 함
-        st.sidebar.divider()
-        st.sidebar.subheader("📅 분석 기간 설정")
-        
+        # [수정] 날짜 선택 및 파라미터 설정을 로직 최상단으로 이동 (UnboundLocalError 방지)
         start_d, end_d = None, None
         if 'QQQ' in data_dict:
             years = list(range(datetime.datetime.now().year, 2009, -1))
@@ -162,6 +127,8 @@ class GoldenStrategyApp:
                     st.session_state.start_input = datetime.date(yr, 1, 1)
                     st.session_state.end_input = datetime.date(yr, 12, 31)
 
+            st.sidebar.divider()
+            st.sidebar.subheader("📅 분석 기간 설정")
             st.sidebar.selectbox(
                 "연도 선택 (1/1 ~ 12/31 자동설정)", 
                 ["직접 선택"] + years,
@@ -171,6 +138,51 @@ class GoldenStrategyApp:
             
             start_d = st.sidebar.date_input("시작일", key="start_input")
             end_d = st.sidebar.date_input("종료일", key="end_input")
+
+        # [수정] 세션 파라미터를 기반으로 로직 파라미터 구성
+        smart_params = {
+            'use_panic': cp['use_panic'], 
+            'panic_ma': cp['panic_ma'],
+            'panic_buy_signals': cp.get('panic_buy_signals', []),
+            'use_vix_safety': cp['use_vix_safety'],
+            'vix_exit': cp['vix_exit'],
+            'use_rsi_turbo': cp['use_rsi_turbo'],
+            'rsi_turbo': cp['rsi_turbo'],
+            'use_sl_control': cp.get('use_sl_control', False),
+            'sl_control_limit': cp.get('sl_control_limit', -15.0),
+            # [신규] 개별 거래 세트 기준 손절 라인
+            'use_set_sl': cp.get('use_set_sl', False),
+            'set_sl_limit': cp.get('set_sl_limit', -15.0)
+        }
+        cash_ratio = cp['cash_ratio_pct'] / 100.0
+
+        # [신규] 실시간 시그널 프리뷰 처리 인터럽트
+        if st.session_state.get('trigger_preview'):
+            with st.spinner('실시간 신호를 계산 중입니다... (장마감 전 종가베팅 지원)'):
+                # 1. 현재가 수집
+                all_tickers = list(data_dict.keys())
+                cur_prices = DataService.fetch_current_prices(all_tickers)
+                
+                if cur_prices:
+                    # 2. 가상 종가 주입 및 지표 재계산
+                    virtual_dict = DataService.inject_virtual_close(data_dict, cur_prices)
+                    
+                    # 3. 오늘자 신호 예측
+                    pred = StrategyEngine.predict_today_signal(
+                        virtual_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], 
+                        cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params
+                    )
+                    
+                    if pred:
+                        st.session_state.preview_result = pred
+                        st.session_state.trigger_preview = False
+                        st.toast("✅ 실시간 신호 계산 완료!", icon="🚀")
+                    else:
+                        st.error("신호 예측에 실패했습니다.")
+                else:
+                    st.error("실시간 가격을 가져올 수 없습니다. 장중이 아니거나 네트워크 오류일 수 있습니다.")
+                
+            st.session_state.trigger_preview = False
                 
         # 메뉴별 렌더링
         if menu == "📊 실시간 백테스트":
@@ -190,6 +202,31 @@ class GoldenStrategyApp:
             HistoryLabView.render(data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, salt="v2.3 (CrashLogs)")
         elif menu == "📰 주요 마켓 이슈":
             MarketView.render(data_dict, macro_df, fetch_status, fetch_time, fg_df)
+        elif menu == "📉 데이터 분석":
+            if 'QQQ' in data_dict:
+                with st.spinner('데이터 분석 준비 중...'):
+                    # 벤치마크 데이터 생성 (기록 조회용)
+                    is_semi = cp['base_asset'] in ['SOXX', 'USD', 'SOXL'] or cp['leverage_asset'] in ['SOXX', 'USD', 'SOXL']
+                    bench_tickers = ['SOXX', 'USD', 'SOXL'] if is_semi else ['QQQ', 'QLD', 'TQQQ']
+                    bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, None, None) for t in bench_tickers}
+                    
+                    golden_history, closed_trades, signal_logs = StrategyEngine.run_golden_strategy(
+                        data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], 
+                        cash_ratio, None, None, cp, cp['trade_at'], smart_params=smart_params
+                    )
+                    
+                DataAnalysisView.render(
+                    signal_logs, 
+                    start_d, 
+                    end_d, 
+                    base_df=data_dict.get(cp['base_asset']), 
+                    base_name=cp['base_asset'],
+                    golden_history=golden_history,
+                    closed_trades=closed_trades,
+                    bh_histories=bh_histories
+                )
+            else:
+                st.error("데이터 로드 실패")
 
 if __name__ == "__main__":
     try:

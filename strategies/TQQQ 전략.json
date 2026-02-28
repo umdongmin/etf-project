@@ -1,6 +1,8 @@
 {
     "buy_signals": [
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 35,
             "rsi_val": 35,
             "rsi_cross": false,
             "rsi_inc": false,
@@ -10,9 +12,16 @@
             "use_adx": true,
             "adx_op": "<=",
             "adx_val": 40,
-            "bb_lower": false
+            "bb_lower": false,
+            "use_willr": false,
+            "willr_val": -80,
+            "di_plus_cross": false,
+            "di_minus_cross": false,
+            "use_sar": false
         },
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 35,
             "rsi_val": 0,
             "rsi_cross": true,
             "rsi_inc": false,
@@ -22,11 +31,37 @@
             "use_adx": true,
             "adx_op": "<=",
             "adx_val": 40,
-            "bb_lower": false
+            "bb_lower": false,
+            "use_willr": false,
+            "willr_val": -80,
+            "di_plus_cross": false,
+            "di_minus_cross": false,
+            "use_sar": false
+        },
+        {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 35,
+            "rsi_val": 0,
+            "rsi_cross": false,
+            "rsi_inc": false,
+            "macd_inc": false,
+            "macd_signal_below": false,
+            "macd_golden": false,
+            "use_adx": false,
+            "adx_op": "<=",
+            "adx_val": 40,
+            "bb_lower": false,
+            "use_willr": false,
+            "willr_val": -80,
+            "di_plus_cross": false,
+            "di_minus_cross": false,
+            "use_sar": false
         }
     ],
     "sell_signals": [
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 70,
             "rsi_val": 70,
             "rsi_dead": false,
             "rsi_dec": true,
@@ -34,12 +69,17 @@
             "macd_signal_above": false,
             "macd_dead": false,
             "di_minus_above": false,
+            "di_minus_cross": false,
             "bb_upper": false,
             "use_chandelier": false,
             "chandelier_mult": 3.0,
-            "use_sar": false
+            "use_sar": false,
+            "use_willr": false,
+            "willr_val": -20
         },
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 70,
             "rsi_val": 0,
             "rsi_dead": true,
             "rsi_dec": false,
@@ -47,12 +87,17 @@
             "macd_signal_above": true,
             "macd_dead": false,
             "di_minus_above": false,
+            "di_minus_cross": false,
             "bb_upper": false,
             "use_chandelier": false,
             "chandelier_mult": 3.0,
-            "use_sar": false
+            "use_sar": false,
+            "use_willr": false,
+            "willr_val": -20
         },
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 70,
             "rsi_val": 0,
             "rsi_dead": false,
             "rsi_dec": false,
@@ -60,12 +105,17 @@
             "macd_signal_above": false,
             "macd_dead": true,
             "di_minus_above": true,
+            "di_minus_cross": false,
             "bb_upper": false,
             "use_chandelier": false,
             "chandelier_mult": 3.0,
-            "use_sar": false
+            "use_sar": false,
+            "use_willr": false,
+            "willr_val": -20
         },
         {
+            "use_rsi_wait": false,
+            "rsi_wait_val": 70,
             "rsi_val": 50,
             "rsi_dead": false,
             "rsi_dec": true,
@@ -73,10 +123,13 @@
             "macd_signal_above": false,
             "macd_dead": false,
             "di_minus_above": true,
+            "di_minus_cross": false,
             "bb_upper": false,
             "use_chandelier": false,
             "chandelier_mult": 3.0,
-            "use_sar": true
+            "use_sar": true,
+            "use_willr": false,
+            "willr_val": -20
         }
     ],
     "s3_protection": [
@@ -177,6 +230,23 @@
                 "macd_signal_below": true,
                 "macd_golden": false,
                 "bb_lower": false
+            },
+            {
+                "rsi_val": 0,
+                "rsi_cross": false,
+                "rsi_inc": false,
+                "macd_inc": false,
+                "macd_signal_below": false,
+                "macd_golden": false,
+                "bb_lower": false,
+                "use_adx": false,
+                "adx_op": "<=",
+                "adx_val": 40,
+                "use_willr": false,
+                "willr_val": -80,
+                "di_plus_cross": false,
+                "di_minus_cross": true,
+                "use_sar": true
             }
         ],
         "sell_signals": [

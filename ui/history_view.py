@@ -117,8 +117,12 @@ class HistoryLabView:
                             
                             # 시그널 조건 동기화
                             for i, bp in enumerate(config.get('buy_signals', []), 1):
+                                # [신규] RSI 1차 대기(알람) 동기화
+                                st.session_state[f"b_rsi_wait_use_{i}"] = bp.get('use_rsi_wait', False)
+                                st.session_state[f"b_rsi_wait_val_{i}"] = bp.get('rsi_wait_val', 35)
                                 st.session_state[f"b_rsi_{i}"] = bp.get('rsi_val', 0)
                                 st.session_state[f"b_cross_{i}"] = bp.get('rsi_cross', False)
+
                                 st.session_state[f"b_inc_{i}"] = bp.get('rsi_inc', False)
                                 st.session_state[f"b_use_adx_{i}"] = bp.get('use_adx', False)
                                 st.session_state[f"b_adx_op_{i}"] = bp.get('adx_op', "<=")
@@ -127,12 +131,22 @@ class HistoryLabView:
                                 st.session_state[f"b_m_below_{i}"] = bp.get('macd_signal_below', False)
                                 st.session_state[f"b_m_golden_{i}"] = bp.get('macd_golden', False)
                                 st.session_state[f"b_bb_low_{i}"] = bp.get('bb_lower', False)
+                                st.session_state[f"b_willr_use_{i}"] = bp.get('use_willr', False)
+                                st.session_state[f"b_willr_val_{i}"] = bp.get('willr_val', -80)
+                                st.session_state[f"b_di_plus_cross_{i}"] = bp.get('di_plus_cross', False)
+                                st.session_state[f"b_di_minus_cross_{i}"] = bp.get('di_minus_cross', False)
+                                st.session_state[f"b_sar_use_{i}"] = bp.get('use_sar', False)
 
                             for i, sp in enumerate(config.get('sell_signals', []), 1):
+                                # [신규] RSI 1차 대기(알람) 동기화
+                                st.session_state[f"s_rsi_wait_use_{i}"] = sp.get('use_rsi_wait', False)
+                                st.session_state[f"s_rsi_wait_val_{i}"] = sp.get('rsi_wait_val', 70)
                                 st.session_state[f"s_rsi_{i}"] = sp.get('rsi_val', 0)
                                 st.session_state[f"s_dead_{i}"] = sp.get('rsi_dead', False)
                                 st.session_state[f"s_dec_{i}"] = sp.get('rsi_dec', False)
+
                                 st.session_state[f"s_di_{i}"] = sp.get('di_minus_above', False)
+                                st.session_state[f"s_di_minus_cross_{i}"] = sp.get('di_minus_cross', False)
                                 st.session_state[f"s_m_dec_{i}"] = sp.get('macd_dec', False)
                                 st.session_state[f"s_m_above_{i}"] = sp.get('macd_signal_above', False)
                                 st.session_state[f"s_m_dead_{i}"] = sp.get('macd_dead', False)
@@ -142,6 +156,9 @@ class HistoryLabView:
                                 st.session_state[f"s_chan_mult_{i}"] = float(sp.get('chandelier_mult', 3.0))
                                 # [신규] 파라볼릭 SAR 동기화
                                 st.session_state[f"s_sar_use_{i}"] = sp.get('use_sar', False)
+                                # [신규] Williams %R 동기화
+                                st.session_state[f"s_willr_use_{i}"] = sp.get('use_willr', False)
+                                st.session_state[f"s_willr_val_{i}"] = sp.get('willr_val', -20)
 
                             # S3 보호 설정 동기화 (최대 3개 신호 블록 처리)
                             s3_prots = config.get('s3_protection', [])
@@ -165,6 +182,26 @@ class HistoryLabView:
                                 st.session_state[f"s3_chan_use_{i}"] = s3p.get('use_chandelier', False)
                                 st.session_state[f"s3_chan_mult_{i}"] = float(s3p.get('chandelier_mult', 3.0))
                                 st.session_state[f"s_exit_all_{i}"] = s3p.get('use_exit_all', False)
+
+                            # [신규] 하락장 매수 신호(S1~S3) 동기화
+                            for i, pb in enumerate(config.get('panic_buy_signals', []), 1):
+                                st.session_state[f"pb_rsi_wait_use_{i}"] = pb.get('use_rsi_wait', False)
+                                st.session_state[f"pb_rsi_wait_val_{i}"] = pb.get('rsi_wait_val', 35)
+                                st.session_state[f"pb_rsi_{i}"] = pb.get('rsi_val', 27 if i==1 else (28 if i==2 else 30))
+                                st.session_state[f"pb_cross_{i}"] = pb.get('rsi_cross', False)
+                                st.session_state[f"pb_inc_{i}"] = pb.get('rsi_inc', False)
+                                st.session_state[f"pb_use_adx_{i}"] = pb.get('use_adx', False)
+                                st.session_state[f"pb_adx_op_{i}"] = pb.get('adx_op', "<=")
+                                st.session_state[f"pb_adx_{i}"] = pb.get('adx_val', 40)
+                                st.session_state[f"pb_m_inc_{i}"] = pb.get('macd_inc', False)
+                                st.session_state[f"pb_m_below_{i}"] = pb.get('macd_signal_below', False)
+                                st.session_state[f"pb_m_golden_{i}"] = pb.get('macd_golden', False)
+                                st.session_state[f"pb_bb_low_{i}"] = pb.get('bb_lower', False)
+                                st.session_state[f"pb_willr_use_{i}"] = pb.get('use_willr', False)
+                                st.session_state[f"pb_willr_val_{i}"] = pb.get('willr_val', -80)
+                                st.session_state[f"pb_di_plus_cross_{i}"] = pb.get('di_plus_cross', False)
+                                st.session_state[f"pb_di_minus_cross_{i}"] = pb.get('di_minus_cross', False)
+                                st.session_state[f"pb_sar_use_{i}"] = pb.get('use_sar', False)
 
                             # 리밸런싱 모드 및 ATR 설정 동기화
                             st.session_state.use_fixed_chk = config.get('use_fixed_reb', True)
@@ -191,7 +228,7 @@ class HistoryLabView:
             params_tuple = deep_tuple(params)
             smart_tuple = deep_tuple(smart_params)
             
-            golden_history, closed_trades, sell4_events = get_cached_strategy_result(
+            golden_history, closed_trades, all_signal_events = get_cached_strategy_result(
                 data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
                 start_date, end_date, params_tuple, trade_at, smart_tuple, salt
             )
@@ -261,18 +298,43 @@ class HistoryLabView:
         st.divider()
         HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
 
-        # [신규] 매도 신호 4번 (특수 엑시트) 발동 기록
+        # [신규] 하락장 매수 지연 해제 작동 기록
         st.divider()
-        st.subheader("📉 매도 신호 4번 (특수 엑시트) 발동 기록")
-        st.caption("파라볼릭 SAR, 샹들리에 등 특수 익절/손절 목적의 4번 시그널이 발동된 내역입니다.")
-        if sell4_events:
+        st.subheader("🛡️ 하락장 매수 지연 해제 기록")
+        st.caption("Panic Mode 발동 중 지정된 보조지표 조건이 완전히 충족되어 매수가 재개된 시점입니다.")
+        if all_signal_events:
             import pandas as pd
-            sell4_df = pd.DataFrame(sell4_events)
-            sell4_df['date'] = sell4_df['date'].dt.strftime('%Y-%m-%d')
-            sell4_df.columns = ['발생일', '진단명 (이유)', '기준가(종가)']
-            st.dataframe(sell4_df.set_index('발생일'), use_container_width=True)
+            panic_buy_list = [e for e in all_signal_events if str(e.get('type')).startswith('하락장매수해제')]
+            
+            if panic_buy_list:
+                pb_df = pd.DataFrame(panic_buy_list)
+                pb_df = pb_df[['date', 'type', 'reason', 'price']].copy()
+                pb_df['date'] = pb_df['date'].dt.strftime('%Y-%m-%d')
+                pb_df.columns = ['발생일', '해제 단계', '충족 조건 (이유)', '기준가(종가)']
+                st.dataframe(pb_df.set_index('발생일'), use_container_width=True)
+            else:
+                st.info("시뮬레이션 기간 내 하락장 매수 지연 해제 기록이 없습니다.")
+                
         else:
-            st.info("시뮬레이션 기간 내 매도 신호 4번 발동 기록이 없습니다.")
+            st.info("시뮬레이션 기간 내 기록된 신호가 없습니다.")
+
+        # [신규] 손절매(Stop-Loss) 작동 기록
+        st.divider()
+        st.subheader("🛑 손절매(Stop-Loss) 작동 기록")
+        st.caption("설정하신 '손절제어(매도차단)' 또는 '개별 거래 세트 손절'이 작동한 상세 내역입니다.")
+        if all_signal_events:
+            sl_events = [e for e in all_signal_events if '손절' in str(e.get('type'))]
+            if sl_events:
+                sl_df = pd.DataFrame(sl_events)
+                sl_df = sl_df[['date', 'type', 'reason', 'price', 'executed']].copy()
+                sl_df['date'] = sl_df['date'].dt.strftime('%Y-%m-%d')
+                sl_df['executed'] = sl_df['executed'].map({True: "✅ 체결(손절)", False: "🛡️ 차단(보호)"})
+                sl_df.columns = ['발생일', '항목', '상세 사유', '당시 가격', '처리 상태']
+                st.dataframe(sl_df.set_index('발생일'), use_container_width=True)
+            else:
+                st.info("시뮬레이션 기간 내 손절매 작동 기록이 없습니다.")
+        else:
+            st.info("기본 시그널 데이터가 없습니다.")
 
         # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
         st.divider()

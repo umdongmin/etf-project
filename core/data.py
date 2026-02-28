@@ -44,6 +44,40 @@ class DataService:
                 if k_col and d_col:
                     df['STOCH_K'] = stoch[k_col[0]]
                     df['STOCH_D'] = stoch[d_col[0]]
+        # [신규 추가] 보조지표(DMI, Williams %R, PSAR) 계산
+        if 'High' in df.columns and 'Low' in df.columns:
+            # 1. DMI(ADX) 추가 (14일 기준)
+            adx = ta.adx(df['High'], df['Low'], close_prices, length=14)
+            if adx is not None:
+                adx_col = [c for c in adx.columns if c.startswith('ADX_')]
+                dmp_col = [c for c in adx.columns if c.startswith('DMP_')]
+                dmn_col = [c for c in adx.columns if c.startswith('DMN_')]
+                if adx_col: df['ADX'] = adx[adx_col[0]]
+                if dmp_col: df['DMP'] = adx[dmp_col[0]]
+                if dmn_col: df['DMN'] = adx[dmn_col[0]]
+                
+            # 2. Williams %R 추가 (14일 기준)
+            willr = ta.willr(df['High'], df['Low'], close_prices, length=14)
+            if willr is not None:
+                # pandas_ta willr 반환 형태가 Series 인 경우를 고려
+                if isinstance(willr, pd.Series):
+                    df['WILLR'] = willr
+                else:
+                    willr_col = [c for c in willr.columns if 'WILLR' in c]
+                    if willr_col: df['WILLR'] = willr[willr_col[0]]
+                
+            # 3. PSAR 추가 (단기 및 장기 방향성 추적 점)
+            psar = ta.psar(df['High'], df['Low'], close_prices)
+            if psar is not None:
+                # 상승/하락 PSAR 컬럼 중 존재하는 값을 결합하여 단일 컬럼으로 만듦
+                l_col = [c for c in psar.columns if c.startswith('PSARl_')]
+                s_col = [c for c in psar.columns if c.startswith('PSARs_')]
+                
+                psar_combined = pd.Series(index=df.index, dtype=float)
+                if l_col: psar_combined = psar_combined.fillna(psar[l_col[0]])
+                if s_col: psar_combined = psar_combined.fillna(psar[s_col[0]])
+                df['PSAR'] = psar_combined
+                
         return df
 
     @classmethod
@@ -65,19 +99,31 @@ class DataService:
                     df = cls.calculate_indicators(df)
                     data_dict[ticker] = df
             
-            def fetch_symbol_robust(symbol):
-                try: 
-                    ticker_obj = yf.Ticker(symbol)
-                    d = ticker_obj.history(start=start_date, end=end_date)
-                    return d['Close'] if not d.empty else pd.Series()
-                except: return pd.Series()
-
-            vix_close = fetch_symbol_robust('^VIX')
-            vix_df = pd.DataFrame(vix_close).rename(columns={'Close': 'Close'}) if not vix_close.empty else pd.DataFrame()
+            # VIX 및 VXN 데이터 별도 수집 (동기화)
+            vix_close = yf.download('^VIX', start=start_date, end=end_date, progress=False)['Close']
+            vxn_close = yf.download('^VXN', start=start_date, end=end_date, progress=False)['Close']
             
-            if not vix_df.empty:
-                vix_df.index = vix_df.index.tz_localize(None)
-                vix_df = vix_df.ffill().bfill()
+            # VIX 및 VXN 데이터 별도 수집 (동기화)
+            try:
+                vix_close = yf.download('^VIX', start=start_date, end=end_date, progress=False)
+                vxn_close = yf.download('^VXN', start=start_date, end=end_date, progress=False)
+                
+                vix_df = pd.DataFrame()
+                if not vix_close.empty and not vxn_close.empty:
+                    vix_df = pd.concat([vix_close['Close'].rename('VIX'), vxn_close['Close'].rename('VXN')], axis=1)
+                elif not vix_close.empty:
+                    vix_df = vix_close[['Close']].rename(columns={'Close': 'VIX'})
+                elif not vxn_close.empty:
+                    vix_df = vxn_close[['Close']].rename(columns={'Close': 'VXN'})
+                
+                if not vix_df.empty:
+                    vix_df = vix_df.ffill()
+                    vix_df.index = vix_df.index.tz_localize(None).normalize()
+                    vix_df = vix_df.groupby(level=0).last()
+                    vix_df = vix_df.ffill().bfill()
+            except Exception as e:
+                print(f"VIX Download Error: {e}")
+                vix_df = pd.DataFrame()
         except Exception as e:
             print(f"Main Download Error: {e}")
             vix_df = pd.DataFrame()
@@ -111,13 +157,89 @@ class DataService:
             fetch_status['Macro'] = 'Error'
         
         if not vix_df.empty:
-            macro_data_map['VIX'] = vix_df['Close'].dropna().iloc[-1]
-            fetch_status['VIX'] = 'Success'
+            if 'VIX' in vix_df.columns:
+                vix_vals = vix_df['VIX'].dropna()
+                if not vix_vals.empty:
+                    macro_data_map['VIX'] = vix_vals.iloc[-1]
+                    fetch_status['VIX'] = 'Success'
+            if 'VXN' in vix_df.columns:
+                vxn_vals = vix_df['VXN'].dropna()
+                if not vxn_vals.empty:
+                    macro_data_map['VXN'] = vxn_vals.iloc[-1]
+                    fetch_status['VXN'] = 'Success'
         if not fg_df.empty: fetch_status['FearGreed'] = 'Success'
         
         macro_df = pd.DataFrame([macro_data_map])
         fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"데이터 수집 완료 ({len(data_dict)} 개 티커)")
         return data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time
+
+    @classmethod
+    def fetch_current_prices(cls, tickers):
+        """핵심 티커들의 현재가를 실시간으로 수집하여 반환 (장중 프리뷰용)"""
+        prices = {}
+        try:
+            # period='1d'로 가장 최근 1분봉 또는 마지막가를 가져옴
+            data = yf.download(tickers, period='1d', interval='1m', progress=False)
+            if not data.empty:
+                # pandas_ta 등으로 가공하지 않고 원본 종가만 취함
+                if len(tickers) > 1:
+                    close_data = data['Close']
+                    for ticker in tickers:
+                        if ticker in close_data.columns:
+                            prices[ticker] = close_data[ticker].dropna().iloc[-1]
+                else:
+                    prices[tickers[0]] = data['Close'].dropna().iloc[-1]
+            else:
+                # download 실패 시 t.fast_info 시도
+                for ticker in tickers:
+                    try:
+                        t = yf.Ticker(ticker)
+                        prices[ticker] = t.fast_info['last_price']
+                    except: pass
+        except Exception as e:
+            print(f"현재가 수집 오류: {e}")
+        return prices
+
+    @classmethod
+    def inject_virtual_close(cls, data_dict, current_prices):
+        """기존 데이터셋 마지막 행에 실시간 현재가를 '임시 종가'로 주입하고 지표 재계산"""
+        cloned_dict = {}
+        today = datetime.datetime.now().date()
+        
+        for ticker, df in data_dict.items():
+            if ticker in current_prices and not df.empty:
+                # 1. 원본 복사
+                new_df = df.copy()
+                price = current_prices[ticker]
+                
+                # 만약 마지막 데이터가 오늘이라면 덮어쓰기, 아니면 새로 추가
+                if new_df.index[-1].date() == today:
+                    new_df.loc[new_df.index[-1], 'Close'] = price
+                    if 'High' in new_df.columns: new_df.loc[new_df.index[-1], 'High'] = max(new_df.loc[new_df.index[-1], 'High'], price)
+                    if 'Low' in new_df.columns: new_df.loc[new_df.index[-1], 'Low'] = min(new_df.loc[new_df.index[-1], 'Low'], price)
+                else:
+                    # 새로운 행 추가
+                    last_row = new_df.iloc[-1].copy()
+                    new_row = pd.Series(index=new_df.columns, dtype=float)
+                    # 이전 행의 값들을 기본으로 하되 가격 정보는 현재가로 채움
+                    for col in new_df.columns:
+                        new_row[col] = last_row[col]
+                    
+                    new_row['Open'] = price
+                    new_row['High'] = price
+                    new_row['Low'] = price
+                    new_row['Close'] = price
+                    
+                    # 지표들은 calculate_indicators에서 갱신됨
+                    new_df = pd.concat([new_df, pd.DataFrame([new_row], index=[pd.Timestamp(today)])])
+                
+                # [중요] 지표 재계산 (RSI, MACD 등은 전체 데이터 기반이므로 다시 돌려야 함)
+                new_df = cls.calculate_indicators(new_df)
+                cloned_dict[ticker] = new_df
+            else:
+                cloned_dict[ticker] = df.copy()
+        return cloned_dict
 
     @staticmethod
     @st.cache_data(ttl=3600)

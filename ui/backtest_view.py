@@ -1,4 +1,5 @@
 import streamlit as st
+import datetime
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -14,6 +15,64 @@ class BacktestView:
             st.warning("⚠️ 선택하신 기간에 대한 백테스트 결과가 없습니다. (자산 상장일 이전이거나 데이터 수집 오류)")
             return
             
+        # [신규] 실시간 시그널 프리뷰 (Close Betting)
+        with st.container():
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown("### 🛑 실시간 시그널 프리뷰 (Beta)")
+                st.caption("장마감 전 현재가를 기준으로 오늘의 예상 매매 신호를 미리 도출합니다.")
+            with col2:
+                # 버튼 클릭 시 app.py에서 처리하도록 신호 전달
+                # 버튼을 누르면 예측 프로세스가 시작됨
+                if st.button("현재가 기준 신호 계산", use_container_width=True, type="primary"):
+                    st.session_state.trigger_preview = True
+            
+            # 프리뷰 결과가 세션에 있으면 표시
+            if st.session_state.get('preview_result'):
+                res = st.session_state['preview_result']
+                p_sig = str(res['signal'])
+                current_stage = int(golden_history.iloc[-1]['Stage'])
+                preview_stage = int(res.get('stage', current_stage))
+                
+                # 색상 결정
+                if p_sig.startswith("매도"): p_bg = "rgba(52, 152, 219, 0.2)"; p_txt = "#3498db"
+                elif p_sig.startswith("매수"): p_bg = "rgba(231, 76, 60, 0.2)"; p_txt = "#e74c3c"
+                else: p_bg = "rgba(127, 140, 141, 0.15)"; p_txt = "#555"
+                
+                # 상태 변화 체크
+                status_change = ""
+                if current_stage != preview_stage:
+                    status_change = f" <span style='color:#e67e22; font-size:14px;'>(⚠️ S{current_stage} → S{preview_stage} 변경 예상)</span>"
+                else:
+                    status_change = f" <span style='color:#27ae60; font-size:14px;'>(✅ S{current_stage} 상태 유지 예상)</span>"
+
+                # 시간 체크 (실시간 여부)
+                is_today = res['date'].date() == datetime.datetime.now().date()
+                time_label = "🔴 실시간(장중)" if is_today else "⚪ 장마감후(마지막 종가)"
+                
+                st.markdown(f"""
+                <div style="background-color:{p_bg}; border: 2px solid {p_txt}; padding:18px; border-radius:12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <span style="font-weight:bold; color:{p_txt}; font-size:16px;">오늘의 예상 시그널: <span style="font-size:22px; font-weight:900;">{p_sig}</span>{status_change}</span>
+                        <span style="font-size:12px; background:#eee; padding:3px 8px; border-radius:15px; color:#666;">{time_label}</span>
+                    </div>
+                    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; font-size:13px; color:#444; border-top:1px solid rgba(0,0,0,0.1); pt:10px; margin-top:10px; padding-top:10px;">
+                        <div><b>기준일:</b> {res['date'].strftime('%Y-%m-%d')}</div>
+                        <div><b>현재가:</b> ${res['price']:.2f}</div>
+                        <div><b>RSI:</b> {res['rsi']:.1f}</div>
+                        <div><b>VIX:</b> {res['vix']:.1f}</div>
+                    </div>
+                    <div style="margin-top:12px; font-size:14px; padding:8px; background:rgba(255,255,255,0.5); border-radius:6px;">
+                        📝 <b>전략 요약:</b> {res['summary']}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                if st.button("프리뷰 로그 닫기"):
+                    del st.session_state['preview_result']
+                    st.rerun()
+
+        st.divider()
         latest = golden_history.iloc[-1]
         st.subheader(f"📍 상태 요약 ({latest.name.date()})")
         
@@ -84,22 +143,25 @@ class BacktestView:
 
         if not normal_buys.empty:
             fig.add_trace(go.Scatter(x=normal_buys.index, y=normal_buys['Value']/10000, mode='markers', 
-                                     name='Normal Buy', marker=dict(symbol='triangle-up', size=8, color='green', opacity=0.6)))
+                                     name='Normal Buy', marker=dict(symbol='triangle-up', size=8, color='#af52de', opacity=0.8)))
         if not normal_sells.empty:
             fig.add_trace(go.Scatter(x=normal_sells.index, y=normal_sells['Value']/10000, mode='markers', 
-                                     name='Normal Sell', marker=dict(symbol='triangle-down', size=8, color='red', opacity=0.6)))
+                                     name='Normal Sell', marker=dict(symbol='triangle-down', size=8, color='#00b0ff', opacity=0.8)))
         if not turbo_buys.empty:
             fig.add_trace(go.Scatter(x=turbo_buys.index, y=turbo_buys['Value']/10000, mode='markers', 
-                                     name='Turbo Buy ▲', marker=dict(symbol='triangle-up', size=14, color='blue', line=dict(color='white', width=1))))
+                                     name='Turbo Buy ▲', marker=dict(symbol='triangle-up', size=14, color='#7b1fa2', line=dict(color='white', width=1))))
         if not safety_sells.empty:
             fig.add_trace(go.Scatter(x=safety_sells.index, y=safety_sells['Value']/10000, mode='markers', 
-                                     name='Safety Sell ▼', marker=dict(symbol='triangle-down', size=14, color='crimson', line=dict(color='white', width=1))))
+                                     name='Safety Sell ▼', marker=dict(symbol='triangle-down', size=14, color='#01579b', line=dict(color='white', width=1))))
 
         fig.update_layout(
             template='plotly_white', hovermode='x unified',
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             margin=dict(l=0, r=0, t=30, b=0), height=450
         )
+        fig.update_xaxes(tickformat="%Y-%m-%d")
+
+
 
         if smart_params:
             fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='red', opacity=0.2), name='Safety Mode (VIX↑)', showlegend=True, legendgroup='safety'))
@@ -160,7 +222,7 @@ class BacktestView:
                 journal_df = closed_trades.copy()
                 journal_df['Entry_Date'] = pd.to_datetime(journal_df['Entry_Date']).dt.date
                 journal_df['Exit_Date'] = pd.to_datetime(journal_df['Exit_Date']).dt.date
-                j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%'}
+                j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%', 'MDD': '{:.2f}%'}
                 st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), use_container_width=True, height=400)
 
         # [신규] 실시간 거래 체결 내역 (이미양식 대응 및 접기 기능 추가)

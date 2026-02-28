@@ -22,12 +22,16 @@ class TesterView:
         buy_signals = []
         with col_buy:
             st.subheader("📥 Buy Conditions (OR)")
-            for i in range(1, 3):
+            for i in range(1, 4):
                 with st.expander(f"매수 신호 {i}", expanded=False):
                     p = current_params['buy_signals'][i-1] if i <= len(current_params['buy_signals']) else {}
                     if i == 1: # B2: RSI 과매도
                         buy_signals.append({
+                            # [신규] RSI 1차 대기(알람) 기능 추가
+                            'use_rsi_wait': st.checkbox(f"RSI 1차 대기 사용 {i}", value=p.get('use_rsi_wait', False), key=f"b_rsi_wait_use_{i}"),
+                            'rsi_wait_val': st.number_input(f"대기 진입 RSI 기준 {i}", 0, 100, p.get('rsi_wait_val', 35), key=f"b_rsi_wait_val_{i}"),
                             'rsi_val': st.number_input(f"RSI 기준 {i}", 0, 100, p.get('rsi_val', 35), key=f"b_rsi_{i}"),
+
                             'rsi_cross': st.checkbox(f"RSI Golden Cross {i}", value=p.get('rsi_cross', False), key=f"b_cross_{i}"),
                             'rsi_inc': st.checkbox(f"RSI 증가 {i}", value=p.get('rsi_inc', False), key=f"b_inc_{i}"),
                             'macd_inc': st.checkbox(f"MACD 증가 {i}", value=p.get('macd_inc', False), key=f"b_m_inc_{i}"),
@@ -36,11 +40,20 @@ class TesterView:
                             'use_adx': st.checkbox(f"ADX 필터 사용 {i}", value=p.get('use_adx', False), key=f"b_use_adx_{i}"),
                             'adx_op': st.selectbox(f"ADX 연산자 {i}", ["<=", ">="], index=0 if p.get('adx_op', "<=") == "<=" else 1, key=f"b_adx_op_{i}"),
                             'adx_val': st.number_input(f"ADX 기준 {i}", 0, 100, p.get('adx_val', 40), key=f"b_adx_{i}"),
-                            'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}")
+                            'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}"),
+                            'use_willr': st.checkbox(f"Williams %R 상향 돌파 {i}", value=p.get('use_willr', False), key=f"b_willr_use_{i}"),
+                            'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
+                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
+                            'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) {i}", value=p.get('di_minus_cross', False), key=f"b_di_minus_cross_{i}"),
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
                         })
                     else: # B1: RSI 골든크로스 + MACD 상승
                         buy_signals.append({
+                            # [신규] RSI 1차 대기(알람) 기능 추가
+                            'use_rsi_wait': st.checkbox(f"RSI 1차 대기 사용 {i}", value=p.get('use_rsi_wait', False), key=f"b_rsi_wait_use_{i}"),
+                            'rsi_wait_val': st.number_input(f"대기 진입 RSI 기준 {i}", 0, 100, p.get('rsi_wait_val', 35), key=f"b_rsi_wait_val_{i}"),
                             'rsi_val': st.number_input(f"RSI 기준 {i}", 0, 100, p.get('rsi_val', 0), key=f"b_rsi_{i}"),
+
                             'rsi_cross': st.checkbox(f"RSI Golden Cross {i}", value=p.get('rsi_cross', True), key=f"b_cross_{i}"),
                             'rsi_inc': st.checkbox(f"RSI 증가 {i}", value=p.get('rsi_inc', False), key=f"b_inc_{i}"),
                             'macd_inc': st.checkbox(f"MACD 증가 {i}", value=p.get('macd_inc', True), key=f"b_m_inc_{i}"),
@@ -49,7 +62,12 @@ class TesterView:
                             'use_adx': st.checkbox(f"ADX 필터 사용 {i}", value=p.get('use_adx', False), key=f"b_use_adx_{i}"),
                             'adx_op': st.selectbox(f"ADX 연산자 {i}", ["<=", ">="], index=0 if p.get('adx_op', "<=") == "<=" else 1, key=f"b_adx_op_{i}"),
                             'adx_val': st.number_input(f"ADX 기준 {i}", 0, 100, p.get('adx_val', 40), key=f"b_adx_{i}"),
-                            'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}")
+                            'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}"),
+                            'use_willr': st.checkbox(f"Williams %R 상향 돌파 {i}", value=p.get('use_willr', False), key=f"b_willr_use_{i}"),
+                            'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
+                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
+                            'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) {i}", value=p.get('di_minus_cross', False), key=f"b_di_minus_cross_{i}"),
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
                         })
         
         sell_signals = []
@@ -60,19 +78,27 @@ class TesterView:
                 with st.expander(f"매도 신호 {i}", expanded=False):
                     p = current_params['sell_signals'][i-1] if i <= len(current_params['sell_signals']) else {}
                     sell_signals.append({
+                        # [신규] RSI 1차 대기(알람) 기능 추가
+                        'use_rsi_wait': st.checkbox(f"RSI 1차 대기 사용 {i}", value=p.get('use_rsi_wait', False), key=f"s_rsi_wait_use_{i}"),
+                        'rsi_wait_val': st.number_input(f"대기 진입 RSI 기준 {i}", 0, 100, p.get('rsi_wait_val', 70), key=f"s_rsi_wait_val_{i}"),
                         'rsi_val': st.number_input(f"RSI 기준 {i}", 0, 100, p.get('rsi_val', 70 if i==1 else 0), key=f"s_rsi_{i}"),
+
                         'rsi_dead': st.checkbox(f"RSI Dead Cross {i}", value=p.get('rsi_dead', i==2), key=f"s_dead_{i}"),
                         'rsi_dec': st.checkbox(f"RSI 감소 {i}", value=p.get('rsi_dec', i==1), key=f"s_dec_{i}"),
                         'macd_dec': st.checkbox(f"MACD 감소 {i}", value=p.get('macd_dec', i==2), key=f"s_m_dec_{i}"),
                         'macd_signal_above': st.checkbox(f"MACD > Signal {i}", value=p.get('macd_signal_above', i==2), key=f"s_m_above_{i}"),
                         'macd_dead': st.checkbox(f"MACD Dead Cross {i}", value=p.get('macd_dead', i==3), key=f"s_m_dead_{i}"),
-                        'di_minus_above': st.checkbox(f"매도 우세 (DI->DI+) {i}", value=p.get('di_minus_above', False), key=f"s_di_{i}"),
+                        'di_minus_above': st.checkbox(f"매도 우세 상태유지 (DI- > DI+) {i}", value=p.get('di_minus_above', False), key=f"s_di_{i}"),
+                        'di_minus_cross': st.checkbox(f"DI- 데드크로스 순간 (DI- > DI+) {i}", value=p.get('di_minus_cross', False), key=f"s_di_minus_cross_{i}"),
                         'bb_upper': st.checkbox(f"Bollinger Upper {i}", value=p.get('bb_upper', False), key=f"s_bb_up_{i}"),
                         # [신규] 샹들리에 엑시트 (ATR 고점 추적) 조건 추가
                         'use_chandelier': st.checkbox(f"샹들리에 엑시트 (고점방어) {i}", value=p.get('use_chandelier', i==4), key=f"s_chan_use_{i}"),
                         'chandelier_mult': st.number_input(f"샹들리에 변동성 승수 {i}", 0.1, 10.0, float(p.get('chandelier_mult', 3.0)), 0.1, key=f"s_chan_mult_{i}"),
                         # [신규] 파라볼릭 SAR 데드크로스 조건 추가
-                        'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"s_sar_use_{i}")
+                        'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"s_sar_use_{i}"),
+                        # [신규] Williams %R 하향 이탈 추가
+                        'use_willr': st.checkbox(f"Williams %R 하향 이탈 {i}", value=p.get('use_willr', False), key=f"s_willr_use_{i}"),
+                        'willr_val': st.number_input(f"W%R 하향 기준값 {i}", -100, 0, p.get('willr_val', -20), key=f"s_willr_val_{i}")
                     })
             
             st.write("---")
@@ -178,18 +204,43 @@ class TesterView:
                 'use_panic': c1.toggle("하락장 매수 지연 (Panic Mode)", value=current_params.get('use_panic', True)),
                 'panic_ma': c1.selectbox("지연 기준 이평선", [60, 120, 200], index=[60,120,200].index(current_params.get('panic_ma', 200))),
                 'use_vix_safety': c2.toggle("VIX 대피 시스템 (Safety)", value=current_params.get('use_vix_safety', True)),
-                'vix_exit': c2.slider("대피 VIX 레벨", 15, 45, current_params.get('vix_exit', 28)),
+                'vix_exit': c2.slider("대피 VIX 레벨", 15.0, 45.0, float(current_params.get('vix_exit', 28.0)), step=0.5),
                 'use_rsi_turbo': c2.toggle("RSI 과매도 가속 (Turbo)", value=current_params.get('use_rsi_turbo', True)),
-                'rsi_turbo': c2.slider("가속 RSI 레벨", 20, 45, current_params.get('rsi_turbo', 31)),
+                'rsi_turbo': c2.slider("가속 RSI 레벨", 20.0, 45.0, float(current_params.get('rsi_turbo', 31.0)), step=0.5),
                 'use_sl_control': st.toggle("손절제어 사용 (Stop-Loss Control)", value=current_params.get('use_sl_control', False)),
-                'sl_control_limit': st.slider("손절제어 임계값 (%) (이하일 때 매도차단)", -50, 0, current_params.get('sl_control_limit', -15))
+                'sl_control_limit': st.slider("손절제어 임계값 (%) (이하일 때 매도차단)", -50.0, 0.0, float(current_params.get('sl_control_limit', -15.0)), step=1.0),
+                # [신규] 개별 거래 세트 손절 제어
+                'use_set_sl': st.toggle("개별 거래 세트 기준 손절 라인 사용", value=current_params.get('use_set_sl', False)),
+                'set_sl_limit': st.slider("거래 세트별 손절 라인 (%) (도달 시 해당 물량만 즉시 매도)", -50.0, 0.0, float(current_params.get('set_sl_limit', -15.0)), step=1.0)
             }
-            st.write("**Panic Mode 상세 (매수 시 RSI 제한)**")
-            sc1, sc2, sc3 = st.columns(3)
-            smart_config.update({
-                'panic_rsi_s1': sc1.number_input("S1 제한 RSI", 20, 45, current_params.get('panic_rsi_s1', 27)),
-                'panic_rsi_s2': sc2.number_input("S2 제한 RSI", 20, 45, current_params.get('panic_rsi_s2', 28)),
-                'panic_rsi_s3': sc3.number_input("S3 제한 RSI", 20, 45, current_params.get('panic_rsi_s3', 30))
-            })
+            
+            st.write("**하락장 매수 지연 해제 조건 (Panic Buy Signals)**")
+            
+            panic_buy_signals_list = []
+            for i in range(1, 4):
+                with st.expander(f"하락장 매수 신호 S{i}", expanded=False):
+                    p_list = current_params.get('panic_buy_signals', [])
+                    p = p_list[i-1] if i <= len(p_list) else {}
+                    panic_buy_signals_list.append({
+                        'use_rsi_wait': st.checkbox(f"RSI 1차 대기 사용 (S{i})", value=p.get('use_rsi_wait', False), key=f"pb_rsi_wait_use_{i}"),
+                        'rsi_wait_val': st.number_input(f"대기 진입 RSI 기준 (S{i})", 0, 100, p.get('rsi_wait_val', 35), key=f"pb_rsi_wait_val_{i}"),
+                        'rsi_val': st.number_input(f"RSI 기준 (S{i})", 0, 100, p.get('rsi_val', 27 if i==1 else (28 if i==2 else 30)), key=f"pb_rsi_{i}"),
+                        'rsi_cross': st.checkbox(f"RSI Golden Cross (S{i})", value=p.get('rsi_cross', False), key=f"pb_cross_{i}"),
+                        'rsi_inc': st.checkbox(f"RSI 증가 (S{i})", value=p.get('rsi_inc', False), key=f"pb_inc_{i}"),
+                        'macd_inc': st.checkbox(f"MACD 증가 (S{i})", value=p.get('macd_inc', False), key=f"pb_m_inc_{i}"),
+                        'macd_signal_below': st.checkbox(f"MACD < Signal (S{i})", value=p.get('macd_signal_below', False), key=f"pb_m_below_{i}"),
+                        'macd_golden': st.checkbox(f"MACD Golden Cross (S{i})", value=p.get('macd_golden', False), key=f"pb_m_golden_{i}"),
+                        'use_adx': st.checkbox(f"ADX 필터 사용 (S{i})", value=p.get('use_adx', False), key=f"pb_use_adx_{i}"),
+                        'adx_op': st.selectbox(f"ADX 연산자 (S{i})", ["<=", ">="], index=0 if p.get('adx_op', "<=") == "<=" else 1, key=f"pb_adx_op_{i}"),
+                        'adx_val': st.number_input(f"ADX 기준 (S{i})", 0, 100, p.get('adx_val', 40), key=f"pb_adx_{i}"),
+                        'bb_lower': st.checkbox(f"Bollinger Lower (S{i})", value=p.get('bb_lower', False), key=f"pb_bb_low_{i}"),
+                        'use_willr': st.checkbox(f"Williams %R 상향 돌파 (S{i})", value=p.get('use_willr', False), key=f"pb_willr_use_{i}"),
+                        'willr_val': st.number_input(f"W%R 상향 기준값 (S{i})", -100, 0, p.get('willr_val', -80), key=f"pb_willr_val_{i}"),
+                        'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) (S{i})", value=p.get('di_plus_cross', False), key=f"pb_di_plus_cross_{i}"),
+                        'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) (S{i})", value=p.get('di_minus_cross', False), key=f"pb_di_minus_cross_{i}"),
+                        'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 (S{i})", value=p.get('use_sar', False), key=f"pb_sar_use_{i}")
+                    })
+            
+            smart_config['panic_buy_signals'] = panic_buy_signals_list
             
         return {**reb_params, **smart_config}
