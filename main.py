@@ -27,19 +27,45 @@ try:
 
     @app.route('/', methods=['GET', 'POST'])
     def handle_request():
-        """구글 서버 체크에 즉시 200 OK 응답을 보내고 분석을 시작합니다."""
-        print("✅ Received request. Starting analysis IMMEDIATELY (Fast-mode)...", flush=True)
+        import datetime
+        from flask import request
+        
+        # 한국 시간(KST) 구하기
+        now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+        hour = now_kst.hour
+        year = now_kst.year
+        
+        # 🌟 영구 서머타임 자동 계산 (3월 둘째 일요일 ~ 11월 첫째 일요일)
+        def get_dst_range(y):
+            # 3월 둘째 일요일 (KST 기준 일요일 오후 4시 전환)
+            first_march = datetime.datetime(y, 3, 1)
+            dst_start_day = first_march + datetime.timedelta(days=(6 - first_march.weekday() + 7) % 7 + 7)
+            # 11월 첫째 일요일 (KST 기준 일요일 오후 3시 전환)
+            first_nov = datetime.datetime(y, 11, 1)
+            dst_end_day = first_nov + datetime.timedelta(days=(6 - first_nov.weekday() + 7) % 7)
+            return dst_start_day.replace(hour=16), dst_end_day.replace(hour=15)
+
+        dst_start, dst_end = get_dst_range(year)
+        is_dst = dst_start <= now_kst.replace(tzinfo=None) < dst_end
+
+        # 🌟 스마트 시간 필터 (중복 알림 방지/자동 계절 대응)
+        is_scheduler = "Google-Cloud-Scheduler" in request.headers.get("User-Agent", "")
+        if is_scheduler:
+            if is_dst and hour == 5:
+                return "SKIP: Summer time, already handled at 04:40", 200
+            if not is_dst and hour == 4:
+                return "SKIP: Winter time, waiting for 05:40", 200
+
+        print(f"✅ Executing Request (Hour:{hour}, DST:{is_dst}, Scheduler:{is_scheduler})", flush=True)
         
         token = os.environ.get("TELEGRAM_BOT_TOKEN")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         
-        # 🌟 '비용 0원 & 쾌속' 모드: 대답(SUCCESS) 전에 분석을 끝내서 CPU 파워를 100% 확보합니다.
         if token and chat_id:
-            run_tqqq_bot(token, chat_id) # 🚀 동기식 실행
-            return "SUCCESS: Analysis complete and alert sent!", 200
+            run_tqqq_bot(token, chat_id)
+            return "SUCCESS: Daily report sent!", 200
         else:
-            print("⚠️ TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing.", flush=True)
-            return "ERROR: Missing settings.", 500
+            return "ERROR: Missing API Keys.", 500
 
     def run_tqqq_bot(token, chat_id):
         """무거운 라이브러리 임포트와 실제 데이터 분석 수행"""
