@@ -78,8 +78,24 @@ try:
 
             # 1. 파일 경로 (Cloud Run 환경)
             project_root = os.path.dirname(os.path.abspath(__file__))
-            strat_path = os.path.join(project_root, "strategies", "tqqq_strategy.json")
             
+            # 🌟 사용자의 요청에 따라 기본 전략(tqqq_strategy.json)을 우선 로드
+            default_path = os.path.join(project_root, "strategies", "tqqq_strategy.json")
+            optimized_path = os.path.join(project_root, "strategies", "tqqq_strategy_Optimized.json")
+            
+            def get_fn(p): return os.path.basename(p)
+
+            # [수정] 사용자가 tqqq_strategy.json을 명시적으로 원하므로 이를 우선 체크
+            if os.path.exists(default_path):
+                strat_path = default_path
+                print(f"📦 [알림] 프로젝트 전략을 로드합니다: {get_fn(strat_path)}")
+            elif os.path.exists(optimized_path):
+                strat_path = optimized_path
+                print(f"🚀 [알림] 최적화된 전략을 로드합니다: {get_fn(strat_path)}")
+            else:
+                print(f"❌ 분석 실패: 전략 파일을 찾지 못했습니다.")
+                return
+
             if not os.path.exists(strat_path):
                 print(f"❌ 분석 실패: 전략 파일을 찾지 못했습니다 -> {strat_path}", flush=True)
                 return
@@ -93,13 +109,15 @@ try:
             
             print(f"📡 분석 대상: {fetch_start_date} ~ 오늘")
             
-            # 2-1. 데이터 수집 (PCCR 제거 버전 적용)
-            data_raw, fg, vix, _, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
+            # 2-1. 데이터 수집
+            data_raw, fg_raw, vix_raw, _, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
             all_tickers = list(data_raw.keys())
-            current_prices = DataService.fetch_current_prices(all_tickers)
+            # VIX/VXN 실시간 조회를 위해 티커 추가
+            preview_tickers = all_tickers + ['^VIX', '^VXN']
+            current_prices = DataService.fetch_current_prices(preview_tickers)
             
-            # 2-2. 🌟 가상 종가 주입 (UI의 '실시간 시그널 프리뷰'와 동일한 로직)
-            data = DataService.inject_virtual_close(data_raw, current_prices)
+            # 2-2. 🌟 가상 종가 주입 (반환값 할당 버그 수정: Data, VIX, FG 3개 수령)
+            data, vix, fg = DataService.inject_virtual_close(data_raw, current_prices, vix_df=vix_raw, fg_df=fg_raw)
 
             gh, _, events = StrategyEngine.run_golden_strategy(
                 data, fg, vix, 
@@ -110,7 +128,7 @@ try:
                 datetime.date.today(), 
                 strat, 
                 strat.get('trade_at', '종가'), 
-                salt='vFinal_Final_Live'
+                salt='vFinal_Batch_Live'
             )
 
             # 3. 알림 전송

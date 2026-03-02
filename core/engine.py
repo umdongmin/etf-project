@@ -2,13 +2,28 @@ import pandas as pd
 import numpy as np
 import pandas_ta as ta
 import streamlit as st
+import datetime
 
 class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @st.cache_data(ttl=3600, show_spinner=False)
     @staticmethod
     def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가", smart_params=None, salt=None):
-        if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame()
+        if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame(), []
+        
+        # [신규] 파라미터 정규화 (JSON 로드 시 중첩된 params/smart_params 제거 및 최상위 병합)
+        if params is not None:
+            params = params.copy()
+            # 1. 중첩된 'params'가 있으면 최상위로 덮어씀 (레거시 호환 및 명시적 설정 우선)
+            if 'params' in params and isinstance(params['params'], dict):
+                inner_p = params.pop('params')
+                params.update(inner_p)
+            
+            # 2. 중첩된 'smart_params'가 있으면 최상위로 덮어씀 (일관성 확보)
+            if 'smart_params' in params and isinstance(params['smart_params'], dict):
+                inner_s = params.pop('smart_params')
+                params.update(inner_s)
+        
         base_df = data_dict[base_asset]
         combined = base_df[['Close', 'RSI']].copy()
         
@@ -125,16 +140,20 @@ class StrategyEngine:
         # [신규] 자산 상장일 고려: 모든 자산의 실제 데이터가 존재하는 날부터 시작
         leverage_df = data_dict.get(leverage_asset, pd.DataFrame())
         
-        # [수정] dropna()를 사용하여 실제 데이터가 있는 날짜 탐색
+        # [수정] dropna()를 사용하여 실제 데이터가 있는 날짜 탐색 (NaT 방어)
         b_min = base_df.dropna(subset=['Close']).index.min()
         l_min = leverage_df.dropna(subset=['Close']).index.min() if not leverage_df.empty else b_min
+        
+        # 둘 중 하나라도 NaT이면 다른 쪽을 사용, 둘 다 NaT이면 에러 방지용으로 오늘 날짜 사용
+        if pd.isna(b_min): b_min = pd.Timestamp.now().normalize()
+        if pd.isna(l_min): l_min = b_min
         common_start = max(b_min, l_min)
         
         dates = combined.index
         dates = dates[dates >= common_start]
         if start_date: dates = dates[dates.date >= start_date]
         if end_date: dates = dates[dates.date <= end_date]
-        if len(dates) == 0: return pd.DataFrame(), pd.DataFrame()
+        if len(dates) == 0: return pd.DataFrame(), pd.DataFrame(), []
 
         portfolio_value, cash = 10000.0, 10000.0 * cash_ratio
         current_planned_asset, rebalance_stage, last_entry_price = base_asset, 0, 0
@@ -198,14 +217,35 @@ class StrategyEngine:
             # [추가] 시그널 참조용 변수 초기화 (매매 실행 시 플래그 전환용)
             current_signal_ref = None
             
+            # [수정] 필수 변수 초기화 및 prices/check_targets 생성 (안정성 강화)
+            effective_lev_asset = leverage_asset 
+            try:
+                currently_holding = [t for t, qty in holdings.items() if qty > 0]
+                check_targets = list(set([base_asset, leverage_asset, effective_lev_asset] + currently_holding + target_group))
+                
+                # [수정] loc 대신 asof를 사용하여 데이터 결측 시에도 가장 가까운 과거 가격 활용
+                prices = {}
+                for t in check_targets:
+                    if t not in data_dict: continue
+                    if date in data_dict[t].index:
+                        prices[t] = data_dict[t].loc[date, 'Close']
+                    else:
+                        prices[t] = data_dict[t]['Close'].asof(date)
+                
+                if base_asset not in prices or pd.isna(prices[base_asset]):
+                    continue
+            except Exception as e:
+                if salt: print(f"DEBUG: Price extraction failed for {date}: {e}")
+                continue
+            
+            # (중략) 이후 로직 동일
+            
             # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
             if trade_at == "익일 시가" and pending_rebalance is not None:
                 # 오늘 시가(Open)로 체결 (데이터가 없는 경우 종가로 대체, 그것도 없으면 건너뜀)
                 try:
-                    
                     trade_prices = {}
-                    # [수정] 모든 스위칭 후보 자산의 시가를 확보
-                    check_targets = list(set([base_asset, leverage_asset] + target_group))
+                    # [수정] 이미 위에서 수립된 check_targets를 안전하게 사용함
                     for t in check_targets:
                         if t not in data_dict: continue
                         if date in data_dict[t].index:
@@ -214,11 +254,10 @@ class StrategyEngine:
                             trade_prices[t] = data_dict[t]['Close'].asof(date)
                     
                     # 필수 자산(현재 보유 중인 것 + 갈아탈 것)의 가격이 없으면 스킵
-                    required = [t for t, qty in holdings.items() if qty > 0] + [pending_rebalance['planned']]
+                    required = currently_holding + [pending_rebalance['planned']]
                     if any(t not in trade_prices or pd.isna(trade_prices[t]) for t in required):
                         continue
                 except:
-                    # 데이터 부재 시 체결 지연
                     continue
                 
                 # 거래 시점의 자산 가치 재계산
@@ -585,14 +624,7 @@ class StrategyEngine:
                     if use_vxn or smart_params.get('use_rsi_turbo'):
                         smart_reason = "정상(Normal)"
 
-            try:
-                currently_holding = [t for t, qty in holdings.items() if qty > 0]
-                check_targets = list(set([base_asset, leverage_asset, effective_lev_asset] + currently_holding + target_group))
-                prices = {t: data_dict[t].loc[date, 'Close'] for t in data_dict.keys() if date in data_dict[t].index}
-                if base_asset not in prices or any(t not in prices for t in currently_holding):
-                    continue
-            except (KeyError, ValueError):
-                continue 
+            # (기존 prices 위치 삭제됨 - 상단으로 이동)
             
             current_total_val = cash + sum(holdings.get(t, 0) * prices.get(t, 0) for t in holdings if t in prices)
             
@@ -1163,20 +1195,26 @@ class StrategyEngine:
                     history[-1][f'{t}_Weight'] = (holdings[t] * prices.get(t, 0)) / current_total_val if current_total_val > 0 else 0
             history[-1][f'{base_asset}_Weight'] = (holdings.get(base_asset, 0) * prices.get(base_asset, 0)) / current_total_val if current_total_val > 0 else 0
 
+        if not history:
+            return pd.DataFrame(columns=['Value', 'Stage', 'Asset', 'Trade_Label']), pd.DataFrame(), []
         return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades), signal_events
 
     @staticmethod
     def predict_today_signal(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params, trade_at, smart_params):
         """가상 종가가 주입된 데이터를 바탕으로 '오늘' 발생할 예상 신호만 추출"""
         try:
-            # [수정] 메인 백테스트와 동일한 분석 기간(start_date, end_date)을 사용하여 상태 정합성 유지
+            # [수정] 프리뷰 시에는 모든 가상 데이터를 시뮬레이션에 포함시키기 위해 종료일 필터를 제거(None)
+            # 대신 salt를 이용해 분 단위로 새로운 계산을 유도함
+            dyn_salt = f"preview_{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
+            
             golden_history, _, signal_events = StrategyEngine.run_golden_strategy(
                 data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, 
-                start_date, end_date, params, trade_at, smart_params, salt="preview"
+                start_date, None, params, trade_at, smart_params, salt=dyn_salt
             )
             
             if not golden_history.empty:
                 latest = golden_history.iloc[-1]
+                print(f"PREVIEW SUCCESS: Date={latest.name}, Signal={latest.get('Trade_Label')}")
                 return {
                     'date': latest.name,
                     'signal': latest.get('Trade_Label', '중립'),
@@ -1186,8 +1224,26 @@ class StrategyEngine:
                     'vxn': latest.get('VXN', 0),
                     'stage': latest.get('Stage', 0)
                 }
+            if not golden_history.empty:
+                latest = golden_history.iloc[-1]
+                print(f"PREVIEW SUCCESS: Date={latest.name}, Signal={latest.get('Trade_Label')}")
+                return {
+                    'date': latest.name,
+                    'signal': latest.get('Trade_Label', '중립'),
+                    'summary': latest.get('Summary', '특이사항 없음'),
+                    'price': latest.get('Close', 0),
+                    'rsi': latest.get('RSI', 0),
+                    'vxn': latest.get('VXN', 0),
+                    'stage': latest.get('Stage', 0)
+                }
+            else:
+                print(f"PREVIEW FAILURE: golden_history is empty. Check data_dict keys={list(data_dict.keys())}")
+                if base_asset in data_dict:
+                    print(f"Base asset ({base_asset}) data range: {data_dict[base_asset].index[0]} ~ {data_dict[base_asset].index[-1]}")
         except Exception as e:
+            import traceback
             print(f"신호 예측 오류: {e}")
+            traceback.print_exc()
         return None
 
     @staticmethod

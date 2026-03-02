@@ -90,14 +90,32 @@ class DataService:
         
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
+        
+        # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 계산 (장중 데이터 필터링용)
+        # KST-14시간(낮) 또는 KST-13시간(서머타임) 대략 계산
+        now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5) 
+        today_est = now_est.date()
+
         try:
+            print(f"메인 티커 데이터 다운로드 중: {tickers}...")
             full_data = yf.download(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
+            print("메인 데이터 다운로드 완료. 처리 중...")
             for ticker in tickers:
                 if ticker in full_data and not full_data[ticker].empty:
                     df = full_data[ticker].copy()
+                    
+                    # [신규] 장중 불완전한 데이터 필터링
+                    # 만약 마지막 데이터의 날짜가 오늘의 US 날짜와 같다면, 
+                    # 이는 아직 확정되지 않은 종가이므로 베이스 데이터에서 제외함 (프리뷰에서만 활용)
+                    if df.index[-1].date() >= today_est:
+                        # 장 마감 직후(EST 16:00, KST 익일 06:00) 이후라면 확정된 종가로 볼 수 있으나,
+                        # 안전하게 베이스에서는 전일까지로 제한하고 프리뷰로 '오늘'을 처리하게 함
+                        df = df[df.index.date < today_est]
+                        
                     df = df.ffill().bfill() 
                     df = cls.calculate_indicators(df)
                     data_dict[ticker] = df
+            print(f"티커별 지표 계산 완료 ({len(data_dict)}개 티커)")
             
             # VIX 및 VXN 데이터 별도 수집 (동기화)
             # VIX 및 VXN 데이터 별도 수집 (동기화)
@@ -106,6 +124,7 @@ class DataService:
                 v_tickers = {'VIX': '^VIX', 'VXN': '^VXN'}
                 v_data_list = []
                 for name, ticker in v_tickers.items():
+                    print(f"{name} ({ticker}) 다운로드 중...")
                     raw = yf.download(ticker, start=start_date, end=end_date, progress=False)
                     if not raw.empty:
                         c_data = raw['Close']
@@ -120,6 +139,11 @@ class DataService:
                 if v_data_list:
                     vix_df = pd.concat(v_data_list, axis=1)
                     vix_df = vix_df[~vix_df.index.duplicated(keep='first')]
+                    
+                    # [신규] VIX/VXN도 장중 데이터 필터링 (메인 티커와 기조를 맞춤)
+                    if not vix_df.empty and vix_df.index[-1].date() >= today_est:
+                        vix_df = vix_df[vix_df.index.date < today_est]
+                        
                     vix_df = vix_df.ffill().bfill()
             except Exception as e:
                 print(f"VIX/VXN Download Error: {e}")
@@ -203,44 +227,62 @@ class DataService:
         return prices
 
     @classmethod
-    def inject_virtual_close(cls, data_dict, current_prices):
+    def inject_virtual_close(cls, data_dict, current_prices, vix_df=None, fg_df=None):
         """기존 데이터셋 마지막 행에 실시간 현재가를 '임시 종가'로 주입하고 지표 재계산"""
         cloned_dict = {}
-        today = datetime.datetime.now().date()
+        # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 계산
+        now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5) 
+        today_ts = pd.Timestamp(now_est.date())
         
+        # 1. 메인 티커 데이터 주입
         for ticker, df in data_dict.items():
             if ticker in current_prices and not df.empty:
-                # 1. 원본 복사
                 new_df = df.copy()
+                new_df.index = new_df.index.normalize()
                 price = current_prices[ticker]
                 
-                # 만약 마지막 데이터가 오늘이라면 덮어쓰기, 아니면 새로 추가
-                if new_df.index[-1].date() == today:
-                    new_df.loc[new_df.index[-1], 'Close'] = price
-                    if 'High' in new_df.columns: new_df.loc[new_df.index[-1], 'High'] = max(new_df.loc[new_df.index[-1], 'High'], price)
-                    if 'Low' in new_df.columns: new_df.loc[new_df.index[-1], 'Low'] = min(new_df.loc[new_df.index[-1], 'Low'], price)
+                if new_df.index[-1] == today_ts:
+                    new_df.loc[today_ts, 'Close'] = price
                 else:
-                    # 새로운 행 추가
                     last_row = new_df.iloc[-1].copy()
                     new_row = pd.Series(index=new_df.columns, dtype=float)
-                    # 이전 행의 값들을 기본으로 하되 가격 정보는 현재가로 채움
                     for col in new_df.columns:
                         new_row[col] = last_row[col]
-                    
                     new_row['Open'] = price
                     new_row['High'] = price
                     new_row['Low'] = price
                     new_row['Close'] = price
-                    
-                    # 지표들은 calculate_indicators에서 갱신됨
-                    new_df = pd.concat([new_df, pd.DataFrame([new_row], index=[pd.Timestamp(today)])])
+                    # 인덱스 이름(Date 등) 유지
+                    new_df = pd.concat([new_df, pd.DataFrame([new_row], index=[today_ts])])
                 
-                # [중요] 지표 재계산 (RSI, MACD 등은 전체 데이터 기반이므로 다시 돌려야 함)
                 new_df = cls.calculate_indicators(new_df)
                 cloned_dict[ticker] = new_df
             else:
                 cloned_dict[ticker] = df.copy()
-        return cloned_dict
+
+        # 2. VIX/VXN 데이터 주입 (있는 경우)
+        new_vix_df = vix_df.copy() if vix_df is not None else pd.DataFrame()
+        if not new_vix_df.empty:
+            new_vix_df.index = new_vix_df.index.normalize()
+            vix_val = current_prices.get('^VIX')
+            vxn_val = current_prices.get('^VXN')
+            
+            # [수정] 0.0 값도 유효하므로 'is not None'으로 체크
+            if (vix_val is not None) or (vxn_val is not None):
+                if new_vix_df.index[-1] == today_ts:
+                    if vix_val is not None: new_vix_df.loc[today_ts, 'VIX'] = vix_val
+                    if vxn_val is not None: new_vix_df.loc[today_ts, 'VXN'] = vxn_val
+                else:
+                    new_v_row = new_vix_df.iloc[-1].copy()
+                    if vix_val is not None: new_v_row['VIX'] = vix_val
+                    if vxn_val is not None: new_v_row['VXN'] = vxn_val
+                    new_vix_df = pd.concat([new_vix_df, pd.DataFrame([new_v_row], index=[today_ts])])
+
+        # 3. Fear & Greed 주입 (현재가 수집 시 같이 가져왔다면 - 향후 확장 대비)
+        new_fg_df = fg_df.copy() if fg_df is not None else pd.DataFrame()
+        # (현재 Fear & Greed는 실시간 API 수집이 번거로우므로 기존 값 ffill 하도록 둠)
+
+        return cloned_dict, new_vix_df, new_fg_df
 
     @staticmethod
     @st.cache_data(ttl=3600)

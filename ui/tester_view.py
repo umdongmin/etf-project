@@ -201,17 +201,20 @@ class TesterView:
         with st.expander("🛡️ 하락장 및 스마트 대응 설정 (Smart Filter)"):
             c1, c2 = st.columns(2)
             smart_config = {
-                'use_panic': c1.toggle("하락장 매수 지연 (Panic Mode)", value=current_params.get('use_panic', True)),
-                'panic_ma': c1.selectbox("지연 기준 이평선", [60, 120, 200], index=[60,120,200].index(current_params.get('panic_ma', 200))),
-                'use_vxn_safety': c2.toggle("VXN 대피 시스템 (Safety)", value=current_params.get('use_vxn_safety', current_params.get('use_vix_safety', True))),
-                'vxn_exit': c2.slider("대피 VXN 레벨", 15.0, 45.0, float(current_params.get('vxn_exit', current_params.get('vix_exit', 28.0))), step=0.5),
-                'use_rsi_turbo': c2.toggle("RSI 과매도 가속 (Turbo)", value=current_params.get('use_rsi_turbo', True)),
-                'rsi_turbo': c2.slider("가속 RSI 레벨", 20.0, 45.0, float(current_params.get('rsi_turbo', 31.0)), step=0.5),
-                'use_sl_control': st.toggle("손절제어 사용 (Stop-Loss Control)", value=current_params.get('use_sl_control', False)),
-                'sl_control_limit': st.slider("손절제어 임계값 (%) (이하일 때 매도차단)", -50.0, 0.0, float(current_params.get('sl_control_limit', -15.0)), step=1.0),
-                # [신규] 개별 거래 세트 손절 제어
-                'use_set_sl': st.toggle("개별 거래 세트 기준 손절 라인 사용", value=current_params.get('use_set_sl', False)),
-                'set_sl_limit': st.slider("거래 세트별 손절 라인 (%) (도달 시 해당 물량만 즉시 매도)", -50.0, 0.0, float(current_params.get('set_sl_limit', -15.0)), step=1.0)
+                'use_panic': c1.toggle("하락장 매수 지연 (Panic Mode)", value=current_params.get('use_panic', True), key="use_panic_chk"),
+                'panic_ma': c1.selectbox("지연 기준 이평선", [60, 120, 200], index=[60,120,200].index(current_params.get('panic_ma', 200)), key="panic_ma_sel"),
+                'use_vxn_safety': c2.toggle("VXN 대피 시스템 (Safety)", value=current_params.get('use_vxn_safety', current_params.get('use_vix_safety', True)), key="use_vxn_safety_chk"),
+                'vxn_exit': c2.slider("대피 VXN 레벨", 15.0, 45.0, float(current_params.get('vxn_exit', current_params.get('vix_exit', 28.0))), step=0.5, key="vxn_exit_sli"),
+                'use_rsi_turbo': c2.toggle("RSI 과매도 가속 (Turbo)", value=current_params.get('use_rsi_turbo', True), key="use_rsi_turbo_chk"),
+                'rsi_turbo': c2.slider("가속 RSI 레벨", 20.0, 45.0, float(current_params.get('rsi_turbo', 31.0)), step=0.5, key="rsi_turbo_sli"),
+                'use_sl_control': st.toggle("손절제어 사용 (Stop-Loss Control)", value=current_params.get('use_sl_control', False), key="use_sl_control_chk"),
+                'sl_control_limit': st.slider("손절제어 임계값 (%) (이하일 때 매도차단)", -50.0, 0.0, float(current_params.get('sl_control_limit', -15.0)), step=1.0, key="sl_control_lim_sli"),
+                'use_set_sl': st.toggle("개별 거래 세트 기준 손절 라인 사용", value=current_params.get('use_set_sl', False), key="use_set_sl_chk"),
+                'set_sl_limit': st.slider("거래 세트별 손절 라인 (%) (도달 시 해당 물량만 즉시 매도)", -50.0, 0.0, float(current_params.get('set_sl_limit', -15.0)), step=1.0, key="set_sl_lim_sli"),
+                # [신규] 누락된 하락장 단계별 RSI 기준 데이터 유지
+                'panic_rsi_s1': current_params.get('panic_rsi_s1', 27),
+                'panic_rsi_s2': current_params.get('panic_rsi_s2', 28),
+                'panic_rsi_s3': current_params.get('panic_rsi_s3', 30)
             }
             
             st.write("**하락장 매수 지연 해제 조건 (Panic Buy Signals)**")

@@ -144,6 +144,9 @@ class GoldenStrategyApp:
             'use_panic': cp['use_panic'], 
             'panic_ma': cp['panic_ma'],
             'panic_buy_signals': cp.get('panic_buy_signals', []),
+            'panic_rsi_s1': cp.get('panic_rsi_s1', 27),
+            'panic_rsi_s2': cp.get('panic_rsi_s2', 28),
+            'panic_rsi_s3': cp.get('panic_rsi_s3', 30),
             'use_vxn_safety': cp['use_vxn_safety'],
             'vxn_exit': cp['vxn_exit'],
             'use_rsi_turbo': cp['use_rsi_turbo'],
@@ -159,28 +162,39 @@ class GoldenStrategyApp:
         # [신규] 실시간 시그널 프리뷰 처리 인터럽트
         if st.session_state.get('trigger_preview'):
             with st.spinner('실시간 신호를 계산 중입니다... (장마감 전 종가베팅 지원)'):
-                # 1. 현재가 수집
-                all_tickers = list(data_dict.keys())
+                # 1. 현재가 및 VIX/VXN 수집
+                all_tickers = list(data_dict.keys()) + ['^VIX', '^VXN']
                 cur_prices = DataService.fetch_current_prices(all_tickers)
                 
                 if cur_prices:
-                    # 2. 가상 종가 주입 및 지표 재계산
-                    virtual_dict = DataService.inject_virtual_close(data_dict, cur_prices)
-                    
-                    # 3. 오늘자 신호 예측
-                    pred = StrategyEngine.predict_today_signal(
-                        virtual_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], 
-                        cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params
-                    )
+                    # 2. 가상 종가 주입 및 지표 재계산 (VIX/VXN 포함)
+                    try:
+                        v_dict, v_vix_df, v_fg_df = DataService.inject_virtual_close(data_dict, cur_prices, vix_df, fg_df)
+                    except Exception as ve:
+                        st.error(f"데이터 주입 오류: {ve}")
+                        v_dict = None
+
+                    if v_dict:
+                        try:
+                            # 3. 오늘자 신호 예측
+                            pred = StrategyEngine.predict_today_signal(
+                                v_dict, v_fg_df, v_vix_df, cp['leverage_asset'], cp['base_asset'], 
+                                cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params
+                            )
+                        except Exception as e:
+                            pred = None
+                            st.error(f"예측 엔진 오류: {e}")
+                    else:
+                        pred = None
                     
                     if pred:
                         st.session_state.preview_result = pred
                         st.session_state.trigger_preview = False
                         st.toast("✅ 실시간 신호 계산 완료!", icon="🚀")
                     else:
-                        st.error("신호 예측에 실패했습니다.")
+                        st.error("신호 예측에 실패했습니다. (결과 데이터 없음 - 엔진 내부 필터링 확인 필요)")
                 else:
-                    st.error("실시간 가격을 가져올 수 없습니다. 장중이 아니거나 네트워크 오류일 수 있습니다.")
+                    st.error("실시간 가격을 전혀 가져올 수 없습니다. 네트워크 상태를 확인해 주세요.")
                 
             st.session_state.trigger_preview = False
                 

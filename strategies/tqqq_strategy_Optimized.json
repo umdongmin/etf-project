@@ -174,18 +174,6 @@
             "use_exit_all": false,
             "use_chandelier": false,
             "chandelier_mult": 3.0
-        },
-        {
-            "use_daily_drop": false,
-            "drop_limit": -3.0,
-            "use_ma60": false,
-            "use_ma200": false,
-            "use_gap_down": false,
-            "use_drop_acc": false,
-            "acc_limit": -7.0,
-            "use_exit_all": false,
-            "use_chandelier": false,
-            "chandelier_mult": 3.0
         }
     ],
     "buy_reb_up": 0.018,

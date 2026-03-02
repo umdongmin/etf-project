@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 from core.storage import StrategyStorage
 from core.engine import StrategyEngine
 from ui.tester_view import TesterView
+from ui.optimizer_view import OptimizerView
 
 # [신규] 시뮬레이션 캐싱 래퍼 (성능 최적화 및 안정성 확보)
 def deep_tuple(obj):
@@ -92,43 +93,84 @@ class HistoryLabView:
                     if load_submitted and target_strat != "선택 안 함":
                         config = StrategyStorage.load_strategy(target_strat)
                         if config:
+                            # [신규] 로드 전 세션 상태 초기화 (이전 전략 오염 방지)
+                            # app.py의 초기값을 복사하거나, 최소한 주요 리스트들은 비워야 함
+                            # 여기서는 app.py의 기본 구조를 세션에 다시 설정함
+                            st.session_state.current_params = {
+                                'buy_signals': [], 'sell_signals': [], 's3_protection': [], 'panic_buy_signals': [],
+                                'buy_reb_up': 0.018, 'buy_reb_down': -1.0, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
+                                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
+                                'use_fixed_reb': True, 'use_atr_reb': True,
+                                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 3.0, 'atr_mult_sell': 10.0,
+                                'atr_period_buy': 20, 'atr_period_sell': 20,
+                                'use_panic': True, 'panic_ma': 200, 
+                                'use_vxn_safety': False, 'vxn_exit': 31,
+                                'use_rsi_turbo': False, 'rsi_turbo': 31
+                            }
+
+                            # [수정] 중첩 데이터 평활화 (Flatten) - overwrite (update) 사용
+                            if 'params' in config and isinstance(config['params'], dict):
+                                inner_p = config.pop('params')
+                                config.update(inner_p) # Overwrite top-level with specific params
+                            if 'smart_params' in config and isinstance(config['smart_params'], dict):
+                                inner_s = config.pop('smart_params')
+                                config.update(inner_s) # Overwrite top-level with smart params
+                            
+                            # [신규] 레거시 키 호환성 (VIX -> VXN)
+                            legacy_mapping = {
+                                'use_vix_safety': 'use_vxn_safety',
+                                'vix_exit': 'vxn_exit'
+                            }
+                            for old_k, new_k in legacy_mapping.items():
+                                if old_k in config and new_k not in config:
+                                    config[new_k] = config[old_k]
+
                             # 1. 메인 파라미터 업데이트
                             st.session_state.current_params.update(config)
                             
                             # 2. UI 위젯 상태 강제 동기화 (Widget Keys)
-                            # 리밸런싱 및 기본 설정 매핑
                             key_map = {
                                 'buy_reb_up': 'r_b_u', 'buy_reb_down': 'r_b_d', 
                                 'sell_reb_up': 'r_s_u', 'sell_reb_down': 'r_s_d',
                                 'cash_ratio_pct': 'conf_cash', 'base_asset': 'conf_base',
-                                'leverage_asset': 'conf_lev', 'trade_at': 'conf_trade_at'
+                                'leverage_asset': 'conf_lev', 'trade_at': 'conf_trade_at',
+                                # 스마트 필터 위젯 키 매핑 강화
+                                'use_panic': 'use_panic_chk',
+                                'panic_ma': 'panic_ma_sel',
+                                'use_vxn_safety': 'use_vxn_safety_chk',
+                                'vxn_exit': 'vxn_exit_sli',
+                                'use_rsi_turbo': 'use_rsi_turbo_chk',
+                                'rsi_turbo': 'rsi_turbo_sli',
+                                'use_sl_control': 'use_sl_control_chk',
+                                'sl_control_limit': 'sl_control_lim_sli',
+                                'use_set_sl': 'use_set_sl_chk',
+                                'set_sl_limit': 'set_sl_lim_sli'
                             }
+
                             for p_key, w_key in key_map.items():
                                 if p_key in config:
                                     val = config[p_key]
-                                    # 리밸런싱 비율들은 소수점(0.01)으로 저장되므로 UI(1%)를 위해 100을 곱함
                                     if p_key.endswith('_up') or p_key.endswith('_down'):
                                         st.session_state[w_key] = float(val) * 100.0
-                                    # 현금 비중(cash_ratio_pct)은 이미 퍼센트(10)로 저장됨
                                     elif p_key == 'cash_ratio_pct':
                                         st.session_state[w_key] = float(val)
                                     else:
                                         st.session_state[w_key] = val
                             
-                            # 시그널 조건 동기화
-                            for i, bp in enumerate(config.get('buy_signals', []), 1):
-                                # [신규] RSI 1차 대기(알람) 동기화
+                            # 시그널 조건 동기화 (최대 3개)
+                            buy_sig_list = config.get('buy_signals', [])
+                            for i in range(1, 4):
+                                bp = buy_sig_list[i-1] if i <= len(buy_sig_list) else {}
                                 st.session_state[f"b_rsi_wait_use_{i}"] = bp.get('use_rsi_wait', False)
                                 st.session_state[f"b_rsi_wait_val_{i}"] = bp.get('rsi_wait_val', 35)
-                                st.session_state[f"b_rsi_{i}"] = bp.get('rsi_val', 0)
-                                st.session_state[f"b_cross_{i}"] = bp.get('rsi_cross', False)
-
+                                st.session_state[f"b_rsi_{i}"] = bp.get('rsi_val', 35 if i==1 else 0)
+                                st.session_state[f"b_cross_{i}"] = bp.get('rsi_cross', False if i==1 else True)
                                 st.session_state[f"b_inc_{i}"] = bp.get('rsi_inc', False)
                                 st.session_state[f"b_use_adx_{i}"] = bp.get('use_adx', False)
                                 st.session_state[f"b_adx_op_{i}"] = bp.get('adx_op', "<=")
                                 st.session_state[f"b_adx_{i}"] = bp.get('adx_val', 40)
-                                st.session_state[f"b_m_inc_{i}"] = bp.get('macd_inc', False)
-                                st.session_state[f"b_m_below_{i}"] = bp.get('macd_signal_below', False)
+                                st.session_state[f"b_m_inc_{i}"] = bp.get('macd_inc', False if i==1 else True)
+                                st.session_state[f"b_m_below_{i}"] = bp.get('macd_signal_below', False if i==1 else True)
                                 st.session_state[f"b_m_golden_{i}"] = bp.get('macd_golden', False)
                                 st.session_state[f"b_bb_low_{i}"] = bp.get('bb_lower', False)
                                 st.session_state[f"b_willr_use_{i}"] = bp.get('use_willr', False)
@@ -137,26 +179,24 @@ class HistoryLabView:
                                 st.session_state[f"b_di_minus_cross_{i}"] = bp.get('di_minus_cross', False)
                                 st.session_state[f"b_sar_use_{i}"] = bp.get('use_sar', False)
 
-                            for i, sp in enumerate(config.get('sell_signals', []), 1):
-                                # [신규] RSI 1차 대기(알람) 동기화
+                            # 매도 시그널 조건 동기화 (최대 4개)
+                            sell_sig_list = config.get('sell_signals', [])
+                            for i in range(1, 5):
+                                sp = sell_sig_list[i-1] if i <= len(sell_sig_list) else {}
                                 st.session_state[f"s_rsi_wait_use_{i}"] = sp.get('use_rsi_wait', False)
                                 st.session_state[f"s_rsi_wait_val_{i}"] = sp.get('rsi_wait_val', 70)
-                                st.session_state[f"s_rsi_{i}"] = sp.get('rsi_val', 0)
-                                st.session_state[f"s_dead_{i}"] = sp.get('rsi_dead', False)
-                                st.session_state[f"s_dec_{i}"] = sp.get('rsi_dec', False)
-
+                                st.session_state[f"s_rsi_{i}"] = sp.get('rsi_val', 70 if i==1 else 0)
+                                st.session_state[f"s_dead_{i}"] = sp.get('rsi_dead', i==2)
+                                st.session_state[f"s_dec_{i}"] = sp.get('rsi_dec', i==1)
                                 st.session_state[f"s_di_{i}"] = sp.get('di_minus_above', False)
                                 st.session_state[f"s_di_minus_cross_{i}"] = sp.get('di_minus_cross', False)
-                                st.session_state[f"s_m_dec_{i}"] = sp.get('macd_dec', False)
-                                st.session_state[f"s_m_above_{i}"] = sp.get('macd_signal_above', False)
-                                st.session_state[f"s_m_dead_{i}"] = sp.get('macd_dead', False)
+                                st.session_state[f"s_m_dec_{i}"] = sp.get('macd_dec', i==2)
+                                st.session_state[f"s_m_above_{i}"] = sp.get('macd_signal_above', i==2)
+                                st.session_state[f"s_m_dead_{i}"] = sp.get('macd_dead', i==3)
                                 st.session_state[f"s_bb_up_{i}"] = sp.get('bb_upper', False)
-                                # [신규] 샹들리에 엑시트 파라미터 동기화
-                                st.session_state[f"s_chan_use_{i}"] = sp.get('use_chandelier', False)
+                                st.session_state[f"s_chan_use_{i}"] = sp.get('use_chandelier', i==4)
                                 st.session_state[f"s_chan_mult_{i}"] = float(sp.get('chandelier_mult', 3.0))
-                                # [신규] 파라볼릭 SAR 동기화
                                 st.session_state[f"s_sar_use_{i}"] = sp.get('use_sar', False)
-                                # [신규] Williams %R 동기화
                                 st.session_state[f"s_willr_use_{i}"] = sp.get('use_willr', False)
                                 st.session_state[f"s_willr_val_{i}"] = sp.get('willr_val', -20)
 
@@ -183,8 +223,10 @@ class HistoryLabView:
                                 st.session_state[f"s3_chan_mult_{i}"] = float(s3p.get('chandelier_mult', 3.0))
                                 st.session_state[f"s_exit_all_{i}"] = s3p.get('use_exit_all', False)
 
-                            # [신규] 하락장 매수 신호(S1~S3) 동기화
-                            for i, pb in enumerate(config.get('panic_buy_signals', []), 1):
+                            # [신규] 하락장 매수 신호(S1~S3) 동기화 (최대 3개)
+                            pb_sig_list = config.get('panic_buy_signals', [])
+                            for i in range(1, 4):
+                                pb = pb_sig_list[i-1] if i <= len(pb_sig_list) else {}
                                 st.session_state[f"pb_rsi_wait_use_{i}"] = pb.get('use_rsi_wait', False)
                                 st.session_state[f"pb_rsi_wait_val_{i}"] = pb.get('rsi_wait_val', 35)
                                 st.session_state[f"pb_rsi_{i}"] = pb.get('rsi_val', 27 if i==1 else (28 if i==2 else 30))
@@ -247,130 +289,110 @@ class HistoryLabView:
             bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
             bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
             
-        if golden_history.empty:
-            st.warning("분석할 데이터가 충분하지 않습니다.")
-            return
-
         st.divider()
-        st.subheader("⚖️ 리밸런싱 실행 설정 (병합 사용 가능)")
-        st.caption("고정 비율과 ATR 방식을 각각 활성화하여 병합 사용할 수 있습니다. (체크 시 즉시 입력창 활성화)")
-        
-        # [신규] 반응성 확보를 위해 체크박스를 폼 외부로 이동
-        c_sel1, c_sel2, _ = st.columns(3)
-        use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
-        use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
-        
-        # 세션 파라미터 즉시 동기화 (TesterView 렌더링용)
-        st.session_state.current_params['use_fixed_reb'] = use_fixed
-        st.session_state.current_params['use_atr_reb'] = use_atr
+        tab1, tab2, tab3 = st.tabs(["📊 분석 결과 & 상세 로그", "📝 매매 전략 설정", "🚀 AI 최적화 탐색 (Optimizer)"])
 
-        ticker_map = {
-            "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
-            "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
-            "TMF": "채권 3배 (TMF)", "TLT": "채권 1배 (TLT)"
-        }
-
-        # [수정] 모든 설정을 하나의 폼으로 통합
-        with st.form("strategy_config_combined_form"):
-            # 1. 상단 섹션 (기준 자산 및 매매 시그널)
-            new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
-            
-            # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
-            new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
-            
-            st.write("---")
-            col_btn1, col_btn2 = st.columns(2)
-            if col_btn1.form_submit_button("🚀 전체 설정 반영 및 재시뮬레이션", use_container_width=True):
-                # 모든 파라미터 통합 업데이트
-                st.session_state.current_params.update(new_params_top)
-                st.session_state.current_params.update(new_params_bottom)
-                st.rerun()
-            
-            if col_btn2.form_submit_button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", use_container_width=True):
-                st.cache_data.clear()
-                st.success("캐시가 성공적으로 삭제되었습니다.")
-                st.rerun()
-
-        st.divider()
-        st.subheader("📊 전체 기간 요약")
-        HistoryLabView.render_overall_summary(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
-        
-        st.divider()
-        HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
-
-        # [신규] 하락장 매수 지연 해제 작동 기록
-        st.divider()
-        st.subheader("🛡️ 하락장 매수 지연 해제 기록")
-        st.caption("Panic Mode 발동 중 지정된 보조지표 조건이 완전히 충족되어 매수가 재개된 시점입니다.")
-        if all_signal_events:
-            import pandas as pd
-            panic_buy_list = [e for e in all_signal_events if str(e.get('type')).startswith('하락장매수해제')]
-            
-            if panic_buy_list:
-                pb_df = pd.DataFrame(panic_buy_list)
-                pb_df = pb_df[['date', 'type', 'reason', 'price']].copy()
-                pb_df['date'] = pb_df['date'].dt.strftime('%Y-%m-%d')
-                pb_df.columns = ['발생일', '해제 단계', '충족 조건 (이유)', '기준가(종가)']
-                st.dataframe(pb_df.set_index('발생일'), use_container_width=True)
+        with tab1:
+            if golden_history.empty:
+                st.warning("분석할 데이터가 충분하지 않습니다.")
             else:
-                st.info("시뮬레이션 기간 내 하락장 매수 지연 해제 기록이 없습니다.")
+                st.subheader("📊 전체 기간 요약")
+                HistoryLabView.render_overall_summary(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
                 
-        else:
-            st.info("시뮬레이션 기간 내 기록된 신호가 없습니다.")
+                st.divider()
+                HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
 
-        # [신규] 손절매(Stop-Loss) 작동 기록
-        st.divider()
-        st.subheader("🛑 손절매(Stop-Loss) 작동 기록")
-        st.caption("설정하신 '손절제어(매도차단)' 또는 '개별 거래 세트 손절'이 작동한 상세 내역입니다.")
-        if all_signal_events:
-            sl_events = [e for e in all_signal_events if '손절' in str(e.get('type'))]
-            if sl_events:
-                sl_df = pd.DataFrame(sl_events)
-                sl_df = sl_df[['date', 'type', 'reason', 'price', 'executed']].copy()
-                sl_df['date'] = sl_df['date'].dt.strftime('%Y-%m-%d')
-                sl_df['executed'] = sl_df['executed'].map({True: "✅ 체결(손절)", False: "🛡️ 차단(보호)"})
-                sl_df.columns = ['발생일', '항목', '상세 사유', '당시 가격', '처리 상태']
-                st.dataframe(sl_df.set_index('발생일'), use_container_width=True)
-            else:
-                st.info("시뮬레이션 기간 내 손절매 작동 기록이 없습니다.")
-        else:
-            st.info("기본 시그널 데이터가 없습니다.")
-
-        # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
-        st.divider()
-        st.subheader("⚠️ S3 보호 및 긴급 매도 진단 로그 (분석용)")
-        st.caption("레버리지 3단계(S3) 상태에서 보호 로직이나 특정 매도 신호가 작동한 기록입니다.")
-        
-        col_diag1, col_diag2 = st.columns(2)
-        with col_diag1:
-            with st.expander("🚩 S3 보호(Emergency) 작동 기록", expanded=False):
-                st.caption("이평선 하회, VXN 급등, 시가 갭락 등으로 인해 보호 매도가 작동한 내역입니다.")
-                if 'S3_Detail' in golden_history.columns:
-                    s3_emerg = golden_history[golden_history['S3_Detail'] != ""].copy()
-                    if not s3_emerg.empty:
-                        s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VXN']].copy()
-                        s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
-                        s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VXN']
-                        st.dataframe(s3_emerg_display, use_container_width=True)
+                # [신규] 하락장 매수 지연 해제 작동 기록
+                st.divider()
+                st.subheader("🛡️ 하락장 매수 지연 해제 기록")
+                if all_signal_events:
+                    panic_buy_list = [e for e in all_signal_events if str(e.get('type')).startswith('하락장매수해제')]
+                    if panic_buy_list:
+                        pb_df = pd.DataFrame(panic_buy_list)
+                        pb_df = pb_df[['date', 'type', 'reason', 'price']].copy()
+                        pb_df['date'] = pb_df['date'].dt.strftime('%Y-%m-%d')
+                        pb_df.columns = ['발생일', '해제 단계', '충족 조건 (이유)', '기준가(종가)']
+                        st.dataframe(pb_df.set_index('발생일'), use_container_width=True)
                     else:
-                        st.info("기록된 S3 보호 작동 내역이 없습니다.")
-                else:
-                    st.warning("데이터가 부족합니다.")
-
-        with col_diag2:
-            with st.expander("🚩 S3 + 매도신호3(MACD데드+매도우세) 기록", expanded=False):
-                st.caption("S3 상태에서 매도신호3 조건으로 비중이 조절된 내역입니다.")
-                if 'S3_Sell3_Event' in golden_history.columns:
-                    sell3_days = golden_history[golden_history['S3_Sell3_Event'] == 1].copy()
-                    if not sell3_days.empty:
-                        s3_sell3_display = sell3_days[['RSI', 'MACD', 'VXN', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
-                        s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
-                        s3_sell3_display.columns = ['RSI', 'MACD', 'VXN', 'ADX', 'DI+', 'DI-', '보유자산']
-                        st.dataframe(s3_sell3_display, use_container_width=True)
+                        st.info("시뮬레이션 기간 내 하락장 매수 지연 해제 기록이 없습니다.")
+                
+                # [신규] 손절매(Stop-Loss) 작동 기록
+                st.divider()
+                st.subheader("🛑 손절매(Stop-Loss) 작동 기록")
+                if all_signal_events:
+                    sl_events = [e for e in all_signal_events if '손절' in str(e.get('type'))]
+                    if sl_events:
+                        sl_df = pd.DataFrame(sl_events)
+                        sl_df = sl_df[['date', 'type', 'reason', 'price', 'executed']].copy()
+                        sl_df['date'] = sl_df['date'].dt.strftime('%Y-%m-%d')
+                        sl_df['executed'] = sl_df['executed'].map({True: "✅ 체결(손절)", False: "🛡️ 차단(보호)"})
+                        sl_df.columns = ['발생일', '항목', '상세 사유', '당시 가격', '처리 상태']
+                        st.dataframe(sl_df.set_index('발생일'), use_container_width=True)
                     else:
-                        st.info("S3 + 매도신호3 작동 기록이 없습니다.")
-                else:
-                    st.warning("데이터가 부족합니다.")
+                        st.info("시뮬레이션 기간 내 손절매 작동 기록이 없습니다.")
+
+                # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
+                st.divider()
+                st.subheader("⚠️ S3 보호 및 긴급 매도 진단 로그 (분석용)")
+                col_diag1, col_diag2 = st.columns(2)
+                with col_diag1:
+                    with st.expander("🚩 S3 보호(Emergency) 작동 기록", expanded=False):
+                        if 'S3_Detail' in golden_history.columns:
+                            s3_emerg = golden_history[golden_history['S3_Detail'] != ""].copy()
+                            if not s3_emerg.empty:
+                                s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VXN']].copy()
+                                s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
+                                s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VXN']
+                                st.dataframe(s3_emerg_display, use_container_width=True)
+                            else:
+                                st.info("기록된 S3 보호 작동 내역이 없습니다.")
+                with col_diag2:
+                    with st.expander("🚩 S3 + 매도신호3(MACD데드+매도우세) 기록", expanded=False):
+                        if 'S3_Sell3_Event' in golden_history.columns:
+                            sell3_days = golden_history[golden_history['S3_Sell3_Event'] == 1].copy()
+                            if not sell3_days.empty:
+                                s3_sell3_display = sell3_days[['RSI', 'MACD', 'VXN', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
+                                s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
+                                s3_sell3_display.columns = ['RSI', 'MACD', 'VXN', 'ADX', 'DI+', 'DI-', '보유자산']
+                                st.dataframe(s3_sell3_display, use_container_width=True)
+                            else:
+                                st.info("S3 + 매도신호3 작동 기록이 없습니다.")
+
+        with tab2:
+            st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
+            c_sel1, c_sel2, _ = st.columns(3)
+            use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
+            use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
+            
+            st.session_state.current_params['use_fixed_reb'] = use_fixed
+            st.session_state.current_params['use_atr_reb'] = use_atr
+
+            ticker_map = {
+                "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
+                "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
+                "TMF": "채권 3배 (TMF)", "TLT": "채권 1배 (TLT)"
+            }
+
+            with st.form("strategy_config_combined_form"):
+                # 1. 상단 섹션 (기준 자산 및 매매 시그널)
+                new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
+                # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
+                new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
+                
+                st.write("---")
+                col_btn1, col_btn2 = st.columns(2)
+                if col_btn1.form_submit_button("🚀 전체 설정 반영 및 재시뮬레이션", use_container_width=True):
+                    st.session_state.current_params.update(new_params_top)
+                    st.session_state.current_params.update(new_params_bottom)
+                    st.rerun()
+                
+                if col_btn2.form_submit_button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", use_container_width=True):
+                    st.cache_data.clear()
+                    st.success("캐시가 성공적으로 삭제되었습니다.")
+                    st.rerun()
+
+        with tab3:
+            OptimizerView.render(data_dict, fg_df, vix_df, st.session_state.current_params)
 
     @staticmethod
     def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None, selected_comparisons=[]):

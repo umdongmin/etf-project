@@ -42,11 +42,13 @@ def calculate_metrics(history):
     # MAR 지수 계산
     mar = cagr / abs(mdd) if mdd != 0 else 0
     
-    # 승률 및 손익비 계산
-    winning_days = df[df['Daily_Return'] > 0]['Daily_Return']
-    losing_days = df[df['Daily_Return'] < 0]['Daily_Return']
+    # 승률 및 손익비 계산 (일별 수익률 기반)
+    valid_returns = df['Daily_Return'].dropna()
+    winning_days = valid_returns[valid_returns > 0]
+    losing_days = valid_returns[valid_returns < 0]
     
-    win_rate = len(winning_days) / len(df.dropna()) if len(df.dropna()) > 0 else 0
+    total_valid_days = len(valid_returns)
+    win_rate = len(winning_days) / total_valid_days if total_valid_days > 0 else 0
     
     gross_profit = winning_days.sum()
     gross_loss = abs(losing_days.sum())
