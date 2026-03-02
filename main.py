@@ -1,65 +1,77 @@
 import os
 import sys
 import threading
-
-# 🌟 [1단계] 어떤 임포트보다 최상단에서 Streamlit 에러를 원천 차단합니다.
-class DummyStreamlit:
-    def __getattr__(self, name): return lambda *args, **kwargs: DummyStreamlit()
-    def __call__(self, *args, **kwargs): return DummyStreamlit()
-sys.modules['streamlit'] = DummyStreamlit()
-print("✅ Streamlit Mocking Success")
-
 import functions_framework
+
+# 🌟 [해결] Cloud Run 환경에는 streamlit이 없으므로, core 모듈 임포트 시 충돌을 막기 위해 '가짜' 모듈을 주입합니다.
+# 특히 @st.cache_data 같은 데코레이터 에러를 완벽히 차단합니다.
+class Dummy:
+    def __getattr__(self, name):
+        # cache_data 등을 호출하면 함수를 그대로 돌려주는(identity) 데코레이터를 반환합니다.
+        if name in ('cache_data', 'cache_resource'):
+            return lambda *args, **kwargs: (lambda f: f)
+        # st.columns 같은 호출을 대비해 리스트 등을 반환해야 할 경우를 처리합니다.
+        if name == 'columns':
+            return lambda *args, **kwargs: [Dummy()] * 10
+        # 그 외 모든 접근은 호출 가능한 Dummy 객체를 반환합니다.
+        return lambda *args, **kwargs: Dummy()
+    
+    def __call__(self, *args, **kwargs):
+        return Dummy()
+
+    def __bool__(self):
+        return True
+
+# streamlit 모듈 전체를 Dummy 객체로 대체합니다.
+sys.modules['streamlit'] = Dummy()
+print("✅ Streamlit Mocking Success (With Decorator Support)")
 
 @functions_framework.http
 def alert_handler(request):
     """
-    구글 서버가 8080 포트를 찌르면 즉시 응답을 보내 배포를 성공시킵니다.
+    구글 서버의 8080 포트 체크(Health Check)에 즉시 응답 성공(200 OK)을 보냅니다.
     """
-    print("✅ alert_handler triggered")
+    print("✅ Health Check received. Starting analysis in background...")
     
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     
-    if not token or not chat_id:
-        print("⚠️ 환경변수 TELEGRAM_BOT_TOKEN/CHAT_ID가 누락되었습니다.")
-        return "Env Missing", 200
+    if token and chat_id:
+        # 실제 데이터 분석 및 알림 작업은 구글 서버를 안심시킨 뒤 백그라운드에서 진행합니다.
+        t = threading.Thread(target=run_analysis_in_background, args=(token, chat_id))
+        t.start()
+        return "OK", 200
+    
+    print("⚠️ Environment variables (TOKEN/ID) are missing.")
+    return "OK (Missing configuration)", 200
 
-    # 분석 작업은 별도 쓰레드에서 실행하여 부팅 타임아웃을 방지합니다.
-    t = threading.Thread(target=safe_run_logic, args=(token, chat_id))
-    t.start()
-    return "OK: Logic started in background.", 200
-
-def safe_run_logic(token, chat_id):
+def run_analysis_in_background(token, chat_id):
     """
-    모든 과정을 try-except로 감싸서 에러가 나도 서버가 죽지 않게 하고, 로그를 남깁니다.
+    배포가 완료된 후 조용히 실행되는 실제 로직입니다.
     """
     try:
-        print("🚀 [분석시작] 라이브러리 및 데이터 로드 중...")
+        print("🚀 [분석작업] 라이브러리 및 데이터 로딩 시작...")
         import json
         import datetime
         import requests
         from core.data import DataService
         from core.engine import StrategyEngine
 
-        # 전략 파일 경로 확인 (영어 파일명 사용 권장: tqqq_strategy.json)
+        # 1. 영어로 된 전략 파일 로드
         project_root = os.path.dirname(os.path.abspath(__file__))
         strat_path = os.path.join(project_root, "strategies", "tqqq_strategy.json")
         
         if not os.path.exists(strat_path):
             print(f"❌ 에러: 전략 파일을 찾을 수 없습니다: {strat_path}")
-            # 파일이 없으면 혹시 모르니 strategies 폴더 목록을 찍어봅니다.
-            if os.path.exists(os.path.join(project_root, 'strategies')):
-                print(f"📂 폴더 목록: {os.listdir(os.path.join(project_root, 'strategies'))}")
             return
 
         with open(strat_path, 'r', encoding='utf-8') as f:
             strat = json.load(f)
 
-        # 데이터 수집 및 엔진 실행
+        # 2. 실시간 데이터 수집
         data_dict, fg_df, vix_df, _, _, _ = DataService.fetch_live_data()
         
-        # 전략 실행
+        # 3. 전략 분석 실행
         gh, _, events = StrategyEngine.run_golden_strategy(
             data_dict, fg_df, vix_df, 
             strat.get('leverage_asset', 'TQQQ'), 
@@ -69,9 +81,10 @@ def safe_run_logic(token, chat_id):
             datetime.date.today(), 
             strat, 
             strat.get('trade_at', '종가'), 
-            salt='final_v5'
+            salt='final_alert_v5'
         )
 
+        # 4. 분석 결과가 있으면 텔레그램 전송
         if not gh.empty:
             latest = gh.iloc[-1]
             last_date = latest.name.strftime('%Y-%m-%d')
@@ -94,15 +107,15 @@ def safe_run_logic(token, chat_id):
                           json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, 
                           timeout=15)
             print("✅ [분석작업] 알림 전송 완료!")
-
+            
     except Exception as e:
-        print(f"❌ [분석작업] 치명적 에러 발생: {e}")
+        print(f"❌ [분석작업] 에러 발생: {e}")
         import traceback
-        traceback.print_exc() # 상세 에러 로그 기록
+        traceback.print_exc()
 
 if __name__ == "__main__":
     from functions_framework._cli import _cli
-    # 0.0.0.0 호스트 명시와 PORT 8080 연결이 Cloud Run 성공의 핵심입니다.
+    # 0.0.0.0과 PORT 지정을 통해 Cloud Run의 포트 체크를 통과합니다.
     port = os.environ.get("PORT", "8080")
-    print(f"🚀 [최종모드] {port} 포트에서 대기 중...")
+    print(f"🚀 Cloud Run Mode: Listening on port {port}")
     _cli(["--target", "alert_handler", "--port", port, "--host", "0.0.0.0"])
