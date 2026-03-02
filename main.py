@@ -119,14 +119,31 @@ try:
                 signal = str(latest.get('Trade_Label', ''))
                 
                 # 🌟 [수정] 매수 또는 매도 신호가 있을 때만 알람 발송
-                # '진행중', '중립' 등 액션이 필요 없는 날은 조용히 넘어갑니다.
                 if "매수" in signal or "매도" in signal:
-                    msg = f"🔔 **TQQQ 매매 시그널 발생!**\n\n📌 신호: `{signal}`\n🛡️ 결과 포지션: `{latest['Asset']}`\n📊 RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
+                    # 🔹 매수/매도 종류 강조
+                    signal_type = "🔴 매도" if "매도" in signal else "🟢 매수"
+                    
+                    # 🔹 포지션 변화 추출 (현재 vs 결과)
+                    # gh.iloc[-2]가 존재하면 변경 전 포지션으로 사용
+                    prev_summary = gh.iloc[-2]['Summary'] if len(gh) > 1 else "정보 없음"
+                    new_summary = latest['Summary']
+                    
+                    # 🔹 메시지 생성
+                    msg = (
+                        f"🔔 **TQQQ 매매 시그널 발생! ({signal_type})**\n\n"
+                        f"� **상세 신호**: `{signal}`\n"
+                        f"� **포지션 변화**:\n"
+                        f" - [기존] `{prev_summary}`\n"
+                        f" - [변경] `{new_summary}`\n\n"
+                        f"📊 **주요 지표**:\n"
+                        f" - RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
+                    )
+                    
                     requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
                                    json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=15)
-                    print(f"✅ [Worker] Trade signal detected ({signal}). Alert sent!", flush=True)
+                    print(f"✅ [Worker] Trade signal detected. Alert sent!", flush=True)
                 else:
-                    print(f"ℹ️ [Worker] Current status: {signal}. No action needed today. Skipping alert.", flush=True)
+                    print(f"ℹ️ [Worker] Current status: {signal}. No action needed. Skipping alert.", flush=True)
         except Exception as e:
             print(f"❌ [Worker Error]: {e}", flush=True)
             import traceback
