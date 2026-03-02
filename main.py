@@ -98,3 +98,15 @@ def run_daily_signal_check(token, chat_id):
     msg += f"• MACD: `{latest_data['MACD']:.2f}` / ADX: `{latest_data['ADX']:.1f}`\n"
     
     send_telegram(token, chat_id, "🔔 TQQQ GCF 알림", msg)
+
+# [추가] Cloud Run/GCF 통합 환경에서 8080 포트 에러 방지용 실행 로직
+if __name__ == "__main__":
+    from functions_framework._cli import _cli
+    import sys
+    
+    # 8080 포트에서 대기하도록 설정 (이 코드가 있어야 Cloud Run이 응답 실패로 간주하지 않습니다)
+    port = os.environ.get("PORT", "8080")
+    print(f"🚀 Cloud Run 통합 모드 실행 중... (Port: {port})")
+    
+    # functions-framework를 이용해 alert_handler를 8080 포트로 띄웁니다.
+    _cli(["--target", "alert_handler", "--port", port])
