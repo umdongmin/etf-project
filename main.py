@@ -116,10 +116,17 @@ try:
             # 3. 알림 전송
             if not gh.empty:
                 latest = gh.iloc[-1]
-                msg = f"🔔 **TQQQ 실시간 시그널**\n\n🛡️ 현재 포지션: `{latest['Asset']}`\n📊 RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
-                requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                              json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=15)
-                print("✅ [Worker] Analysis complete and alert sent!", flush=True)
+                signal = str(latest.get('Trade_Label', ''))
+                
+                # 🌟 [수정] 매수 또는 매도 신호가 있을 때만 알람 발송
+                # '진행중', '중립' 등 액션이 필요 없는 날은 조용히 넘어갑니다.
+                if "매수" in signal or "매도" in signal:
+                    msg = f"🔔 **TQQQ 매매 시그널 발생!**\n\n📌 신호: `{signal}`\n🛡️ 결과 포지션: `{latest['Asset']}`\n📊 RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
+                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                                   json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=15)
+                    print(f"✅ [Worker] Trade signal detected ({signal}). Alert sent!", flush=True)
+                else:
+                    print(f"ℹ️ [Worker] Current status: {signal}. No action needed today. Skipping alert.", flush=True)
         except Exception as e:
             print(f"❌ [Worker Error]: {e}", flush=True)
             import traceback
