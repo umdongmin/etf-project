@@ -1,7 +1,6 @@
-streamlit
-pandas
-numpy
-pandas_ta
 yfinance
+pandas
+pandas_ta
+numpy
 requests
-plotly
+functions-framework
