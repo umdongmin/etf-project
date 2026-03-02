@@ -1,110 +1,98 @@
 import os
 import json
 import datetime
-import functions_framework
-from core.data import DataService
-from core.engine import StrategyEngine
+import threading
+import http.server
+import socketserver
+import requests
 
-# 1. 텔레그램 알림 전송 함수
-def send_telegram(token, chat_id, title, message):
-    import requests
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    text = f"*{title}*\n\n{message}"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, json=payload, timeout=15)
-    except Exception as e:
-        print(f"텔레그램 전송 실패: {e}")
-
-# 2. 메인 로직 (알림 생성 및 전송)
-def run_daily_signal_check(token, chat_id):
-    project_root = os.path.dirname(os.path.abspath(__file__))
-    strat_path = os.path.join(project_root, "strategies", "TQQQ 전략.json")
-    
-    if not os.path.exists(strat_path):
-        raise FileNotFoundError(f"Strategy file not found: {strat_path}")
-        
-    with open(strat_path, 'r', encoding='utf-8') as f:
-        strat = json.load(f)
-
-    # 실시간 데이터 수집 (VXN/VIX 등 포함)
-    data_dict, fg_df, vix_df, _, _, _ = DataService.fetch_live_data()
-    
-    base_asset = strat.get('base_asset', 'QQQ')
-    lev_asset = strat.get('leverage_asset', 'TQQQ')
-    
-    start_date = datetime.date(2010, 1, 1)
-    end_date = datetime.date.today()
-    
-    # 전략 실행
-    golden_history, _, all_signal_events = StrategyEngine.run_golden_strategy(
-        data_dict, fg_df, vix_df, lev_asset, base_asset, 
-        strat.get('cash_ratio_pct', 0.0) / 100.0, 
-        start_date, end_date, strat, 
-        strat.get('trade_at', '종가'), 
-        strat.get('smart_params', {}), 
-        salt='alert_bot_gcf'
-    )
-
-    if golden_history.empty:
-        return
-
-    latest_data = golden_history.iloc[-1]
-    last_date = latest_data.name.strftime('%Y-%m-%d')
-    prev_data = golden_history.iloc[-2] if len(golden_history) > 1 else latest_data
-    
-    current_asset = latest_data['Asset']
-    prev_asset = prev_data['Asset']
-    
-    msg = f"📅 **기준일:** {last_date}\n\n"
-    
-    if current_asset != prev_asset:
-        msg += f"🚨 **포지션 스위칭 발생!**\n기존 `{prev_asset}` ➡️ 신규 `{current_asset}`\n\n"
-    else:
-        msg += f"🛡️ **현재 포지션 유지 중:** `{current_asset}`\n\n"
-        
-    today_events = [e for e in all_signal_events if e['date'].strftime('%Y-%m-%d') == last_date]
-    if today_events:
-        msg += "🎯 **오늘 감지된 시그널:**\n"
-        for ev in today_events:
-            emoji = "🟢" if "매수" in ev['type'] else "🔴"
-            msg += f"{emoji} {ev['type']} 발동\n👉 이유: {ev['reason']}\n"
-        msg += "\n"
-    
-    msg += f"📊 **주요 지표 상태:**\n"
-    msg += f"• RSI: `{latest_data['RSI']:.1f}` / VXN: `{latest_data['VXN']:.1f}`\n"
-    msg += f"• MACD: `{latest_data['MACD']:.2f}` / ADX: `{latest_data['ADX']:.1f}`\n"
-    
-    send_telegram(token, chat_id, "🔔 TQQQ GCF 알림", msg)
-
-# 3. GCF/Cloud Run 진입점 함수
-@functions_framework.http
-def alert_handler(request):
-    """
-    Cloud Scheduler 또는 HTTP 요청에 의해 호출됨
-    """
-    print("🔄 GCF 알림 로직 실행 중...")
-    
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+# 1. 시그널 계산 및 텔레그램 전송 (메인 로직)
+def run_logic_background():
+    print("🚀 [배경작업] 시그널 분석 및 알림 전송 시작...")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     
-    if not bot_token or not chat_id:
-        return "Error: Environment variables missing.", 500
-
+    if not token or not chat_id:
+        print("❌ 환경변수(TOKEN/ID)가 누락되었습니다.")
+        return
+    
     try:
-        run_daily_signal_check(bot_token, chat_id)
-        return "Success: Alert sent.", 200
-    except Exception as e:
-        print(f"Error: {e}")
-        return f"Error: {e}", 500
+        from core.data import DataService
+        from core.engine import StrategyEngine
+        
+        # 전략 설정 파일 로드
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        strat_path = os.path.join(project_root, "strategies", "TQQQ 전략.json")
+        with open(strat_path, 'r', encoding='utf-8') as f:
+            strat = json.load(f)
 
-# 4. [중요] Cloud Run 통합 환경용 실행 로직 (8080 포트 바인딩)
+        # 실시간 데이터 수집 (VXN 등 포함)
+        data_dict, fg_df, vix_df, _, _, _ = DataService.fetch_live_data()
+        
+        # 전략 실행
+        golden_history, _, all_signal_events = StrategyEngine.run_golden_strategy(
+            data_dict, fg_df, vix_df, strat.get('leverage_asset', 'TQQQ'), strat.get('base_asset', 'QQQ'),
+            strat.get('cash_ratio_pct', 0.0) / 100.0, datetime.date(2010, 1, 1), datetime.date.today(), strat, 
+            strat.get('trade_at', '종가'), salt='alert_bot_final_v2'
+        )
+
+        if not golden_history.empty:
+            latest = golden_history.iloc[-1]
+            last_date = latest.name.strftime('%Y-%m-%d')
+            current_asset = latest['Asset']
+            
+            msg = f"� **TQQQ 알림 (Cloud Run)**\n\n"
+            msg += f"� **기준일:** {last_date}\n"
+            msg += f"🛡️ **현재 포지션:** `{current_asset}`\n"
+            
+            today_events = [e for e in all_signal_events if e['date'].strftime('%Y-%m-%d') == last_date]
+            if today_events:
+                msg += "\n🎯 **감지된 시그널:**\n"
+                for ev in today_events:
+                    msg += f"👉 {ev['type']}: {ev['reason']}\n"
+            
+            msg += f"\n📊 RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
+            
+            # 텔레그램 전송
+            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                          json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, 
+                          timeout=15)
+            print("✅ [배경작업] 알림 전송 완료!")
+    except Exception as e:
+        print(f"❌ [배경작업] 에러 발생: {e}")
+
+# 2. 아주 단순한 웹 서버 (구글의 8080 찌르기에 즉각 대답용)
+class SimpleHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_success()
+        
+    def do_POST(self):
+        self.send_success()
+        
+    def send_success(self):
+        # 구글 서버에게 0.001초 만에 "나 살아있어!"라고 먼저 보고합니다.
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+        
+        # 실제 데이터 수집 로직은 구글 응답과 별개로 뒤에서(Thread) 천천히 실행합니다.
+        threading.Thread(target=run_logic_background).start()
+
+    def log_message(self, format, *args):
+        # 지저분한 로그 출력 방지
+        pass
+
+# 3. 메인 실행부 (포트 8080 열고 무한 대기)
 if __name__ == "__main__":
-    from functions_framework._cli import _cli
-    import sys
+    # 구글 클라우드가 요구하는 PORT 환경변수를 읽어 8080 포트를 점유합니다.
+    port = int(os.environ.get("PORT", "8080"))
+    print(f"🚀 [최종모드] {port} 포트에서 8080 에러 방어 중...")
     
-    # 0.0.0.0 호스트 명시는 Cloud Run의 헬스체크(PORT 8080) 성공을 위해 필수입니다.
-    port = os.environ.get("PORT", "8080")
-    print(f"🚀 Cloud Run 통합 모드 실행 시작 (Port: {port}, Host: 0.0.0.0)")
-    
-    _cli(["--target", "alert_handler", "--port", port, "--host", "0.0.0.0"])
+    with socketserver.TCPServer(("0.0.0.0", port), SimpleHandler) as httpd:
+        # 이 무한 루프가 돌아가야 구글 클라우드가 서비스가 살아있다고 판단합니다.
+        httpd.serve_forever()
+
+# [함수 진입점] 혹시라도 필요할까봐 남겨두는 더미 코드
+def alert_handler(request):
+    return "OK", 200
