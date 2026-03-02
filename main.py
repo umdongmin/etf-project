@@ -5,60 +5,38 @@ import functions_framework
 from core.data import DataService
 from core.engine import StrategyEngine
 
-# GCF용 진입점 함수 (GitHub 연동 시 이 함수명을 '진입점'으로 사용하세요)
-@functions_framework.http
-def alert_handler(request):
-    """
-    Cloud Scheduler(HTTP) 또는 직접 호출에 의해 실행되는 핸들러
-    """
-    print("🔄 GCF 알림 봇 실행 시작...")
-    
-    # 텔레그램 설정 로드 (GCF 환경 변수 사용 권장)
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    
-    if not bot_token or not chat_id:
-        return "Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID environment variables are missing.", 500
-
-    try:
-        run_daily_signal_check(bot_token, chat_id)
-        return "Success: Alert sent.", 200
-    except Exception as e:
-        print(f"Error during execution: {e}")
-        return f"Error: {e}", 500
-
+# 1. 텔레그램 알림 전송 함수
 def send_telegram(token, chat_id, title, message):
     import requests
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     text = f"*{title}*\n\n{message}"
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    requests.post(url, json=payload, timeout=15)
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload, timeout=15)
+    except Exception as e:
+        print(f"텔레그램 전송 실패: {e}")
 
+# 2. 메인 로직 (알림 생성 및 전송)
 def run_daily_signal_check(token, chat_id):
     project_root = os.path.dirname(os.path.abspath(__file__))
-    
-    # 1. 전략 파일 로드 (TQQQ 전략.json 경로 확인)
     strat_path = os.path.join(project_root, "strategies", "TQQQ 전략.json")
+    
     if not os.path.exists(strat_path):
         raise FileNotFoundError(f"Strategy file not found: {strat_path}")
         
     with open(strat_path, 'r', encoding='utf-8') as f:
         strat = json.load(f)
 
-    # 2. 기초 데이터 로드 (VXN 등 동기화 완료된 실시간 데이터)
+    # 실시간 데이터 수집 (VXN/VIX 등 포함)
     data_dict, fg_df, vix_df, _, _, _ = DataService.fetch_live_data()
     
     base_asset = strat.get('base_asset', 'QQQ')
     lev_asset = strat.get('leverage_asset', 'TQQQ')
     
-    # 3. 전략 엔진 실행
     start_date = datetime.date(2010, 1, 1)
     end_date = datetime.date.today()
     
+    # 전략 실행
     golden_history, _, all_signal_events = StrategyEngine.run_golden_strategy(
         data_dict, fg_df, vix_df, lev_asset, base_asset, 
         strat.get('cash_ratio_pct', 0.0) / 100.0, 
@@ -99,14 +77,34 @@ def run_daily_signal_check(token, chat_id):
     
     send_telegram(token, chat_id, "🔔 TQQQ GCF 알림", msg)
 
-# [추가] Cloud Run/GCF 통합 환경에서 8080 포트 에러 방지용 실행 로직
+# 3. GCF/Cloud Run 진입점 함수
+@functions_framework.http
+def alert_handler(request):
+    """
+    Cloud Scheduler 또는 HTTP 요청에 의해 호출됨
+    """
+    print("🔄 GCF 알림 로직 실행 중...")
+    
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    
+    if not bot_token or not chat_id:
+        return "Error: Environment variables missing.", 500
+
+    try:
+        run_daily_signal_check(bot_token, chat_id)
+        return "Success: Alert sent.", 200
+    except Exception as e:
+        print(f"Error: {e}")
+        return f"Error: {e}", 500
+
+# 4. [중요] Cloud Run 통합 환경용 실행 로직 (8080 포트 바인딩)
 if __name__ == "__main__":
     from functions_framework._cli import _cli
     import sys
     
-    # 8080 포트에서 대기하도록 설정 (이 코드가 있어야 Cloud Run이 응답 실패로 간주하지 않습니다)
+    # 0.0.0.0 호스트 명시는 Cloud Run의 헬스체크(PORT 8080) 성공을 위해 필수입니다.
     port = os.environ.get("PORT", "8080")
-    print(f"🚀 Cloud Run 통합 모드 실행 중... (Port: {port})")
+    print(f"🚀 Cloud Run 통합 모드 실행 시작 (Port: {port}, Host: 0.0.0.0)")
     
-    # functions-framework를 이용해 alert_handler를 8080 포트로 띄웁니다.
-    _cli(["--target", "alert_handler", "--port", port])
+    _cli(["--target", "alert_handler", "--port", port, "--host", "0.0.0.0"])
