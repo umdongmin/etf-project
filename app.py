@@ -56,7 +56,7 @@ class GoldenStrategyApp:
                     {
                         'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vix_jump': False, 'vix_jump': 15.0, 
+                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
                         'use_gap_down': True, 'gap_limit': -3.0,
                         'use_drop_acc': False, 'acc_limit': -7.0,
                         'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
@@ -64,7 +64,7 @@ class GoldenStrategyApp:
                     {
                         'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vix_jump': False, 'vix_jump': 15.0, 
+                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
                         'use_gap_down': False, 'gap_limit': -3.0,
                         'use_drop_acc': True, 'acc_limit': -7.0,
                         'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
@@ -72,7 +72,7 @@ class GoldenStrategyApp:
                     {
                         'use_daily_drop': False, 'drop_limit': -3.0, 
                         'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vix_jump': False, 'vix_jump': 15.0, 
+                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
                         'use_gap_down': False, 'gap_limit': -3.0,
                         'use_drop_acc': False, 'acc_limit': -7.0,
                         'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
@@ -89,7 +89,7 @@ class GoldenStrategyApp:
                     {'rsi_val': 28, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False},
                     {'rsi_val': 30, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False}
                 ],
-                'use_vix_safety': False, 'vix_exit': 31,
+                'use_vxn_safety': False, 'vxn_exit': 31,
                 'use_rsi_turbo': False, 'rsi_turbo': 31
             }
         
@@ -144,8 +144,8 @@ class GoldenStrategyApp:
             'use_panic': cp['use_panic'], 
             'panic_ma': cp['panic_ma'],
             'panic_buy_signals': cp.get('panic_buy_signals', []),
-            'use_vix_safety': cp['use_vix_safety'],
-            'vix_exit': cp['vix_exit'],
+            'use_vxn_safety': cp['use_vxn_safety'],
+            'vxn_exit': cp['vxn_exit'],
             'use_rsi_turbo': cp['use_rsi_turbo'],
             'rsi_turbo': cp['rsi_turbo'],
             'use_sl_control': cp.get('use_sl_control', False),

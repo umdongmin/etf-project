@@ -29,7 +29,7 @@ class MarketView:
         l10y = macro_df.get('US10Y', pd.Series([0.0])).iloc[-1]
         if l10y > 15: l10y /= 10.0
         m1.metric("미 국채 10년물 금리", f"{l10y:.2f}%")
-        m2.metric("VIX 공포 지수", f"{macro_df.get('VIX', pd.Series([15.0])).iloc[-1]:.2f}")
+        m2.metric("VXN 공포 지수", f"{macro_df.get('VXN', pd.Series([20.0])).iloc[-1]:.2f}")
         
         pccr_val = macro_df.get('PCCR')
         pccr_display = f"{pccr_val.iloc[-1]:.2f}" if pccr_val is not None and not pccr_val.empty else "N/A"

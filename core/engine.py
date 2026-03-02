@@ -26,18 +26,17 @@ class StrategyEngine:
             combined = combined.join(fg_clean['FearGreed'].rename('FG'), how='left')
         
         if not vix_clean.empty:
-            if 'VIX' in vix_clean.columns:
-                combined = combined.join(vix_clean['VIX'].rename('VIX'), how='left')
-            if 'VXN' in vix_clean.columns:
-                combined = combined.join(vix_clean['VXN'].rename('VXN'), how='left')
-            if 'VVIX' in vix_clean.columns:
-                combined = combined.join(vix_clean['VVIX'], how='left')
-            if 'PCCR' in vix_clean.columns:
-                combined = combined.join(vix_clean['PCCR'], how='left')
+            # [수정] 인덱스 정렬 및 reindex를 통한 안정적 데이터 매칭
+            vix_clean = vix_clean.sort_index()
+            for col in ['VIX', 'VXN', 'VVIX', 'PCCR']:
+                if col in vix_clean.columns:
+                    # 데이터가 있는 날짜만 가져오고 빈 자리는 전방 채우기(ffill)
+                    combined[col] = vix_clean[col].reindex(combined.index, method='ffill')
         
         # [추가] 필수 컬럼 부재 시 기본값으로 생성 (KeyError 방지)
         if 'FG' not in combined.columns: combined['FG'] = 50.0
         if 'VIX' not in combined.columns: combined['VIX'] = 15.0
+        if 'VXN' not in combined.columns: combined['VXN'] = 20.0
         if 'ADX' not in combined.columns: combined['ADX'] = 0.0
         if 'DMP' not in combined.columns: combined['DMP'] = 0.0
         if 'DMN' not in combined.columns: combined['DMN'] = 0.0
@@ -323,13 +322,13 @@ class StrategyEngine:
                     
                 pending_rebalance = None # 처리 완료
             
-            rsi, fg, vix, macd_val, signal_line, rsi_sma = row['RSI'], row['FG'], row['VIX'], row['MACD'], row['Signal_Line'], row['RSI_SMA']
+            rsi, fg, vxn, macd_val, signal_line, rsi_sma = row['RSI'], row['FG'], row.get('VXN', row.get('VIX', 20.0)), row['MACD'], row['Signal_Line'], row['RSI_SMA']
             macd_hist = row['MACD_Hist']
             bb_l, bb_u = row.get('BB_Lower', 0), row.get('BB_Upper', 0)
             prev_rsi, prev_rsi_sma, prev_macd, prev_macd_hist = row['Prev_RSI'], row['Prev_RSI_SMA'], row['Prev_MACD'], row['Prev_MACD_Hist']
             prev2_macd_hist = row['Prev2_MACD_Hist']
-            prev_vix = row.get('Prev_VIX', 0)
-            vix_jump_pct = ((vix / prev_vix - 1) * 100) if prev_vix > 0 else 0
+            prev_vxn = row.get('Prev_VXN', row.get('Prev_VIX', 0))
+            vxn_jump_pct = ((vxn / prev_vxn - 1) * 100) if prev_vxn > 0 else 0
             
             # [신규] 다이버전스용 고점 추적
             if current_planned_asset != base_asset:
@@ -573,15 +572,17 @@ class StrategyEngine:
             smart_reason = ""
             
             if smart_params:
-                if smart_params.get('use_vix_safety') and vix > smart_params.get('vix_exit', 31):
+                use_vxn = smart_params.get('use_vxn_safety', smart_params.get('use_vix_safety', False))
+                exit_val = smart_params.get('vxn_exit', smart_params.get('vix_exit', 31))
+                if use_vxn and vxn > exit_val:
                     effective_lev_asset = target_group[0]
-                    smart_reason = f"대피(VIX:{vix:.1f})"
+                    smart_reason = f"대피(VXN:{vxn:.1f})"
                 elif smart_params.get('use_rsi_turbo') and rsi < smart_params.get('rsi_turbo', 31):
                     effective_lev_asset = target_group[2]
                     smart_reason = f"가속(RSI:{rsi:.1f})"
                 else:
                     effective_lev_asset = leverage_asset
-                    if smart_params.get('use_vix_safety') or smart_params.get('use_rsi_turbo'):
+                    if use_vxn or smart_params.get('use_rsi_turbo'):
                         smart_reason = "정상(Normal)"
 
             try:
@@ -812,8 +813,8 @@ class StrategyEngine:
                         is_ma200_ok = (price < sma200 * (1 + limit / 100.0))
 
                     is_vix_ok = True
-                    if s3_p.get('use_vix_jump'):
-                        is_vix_ok = (vix_jump_pct >= s3_p.get('vix_jump', 15.0))
+                    if s3_p.get('use_vxn_jump', s3_p.get('use_vix_jump', False)):
+                        is_vix_ok = (vxn_jump_pct >= s3_p.get('vxn_jump', s3_p.get('vix_jump', 15.0)))
                     
                     is_gap_ok = True
                     if s3_p.get('use_gap_down'):
@@ -845,7 +846,7 @@ class StrategyEngine:
                     if s3_p.get('use_daily_drop'): active_conditions.append(is_drop_ok)
                     if s3_p.get('use_ma60'): active_conditions.append(is_ma60_ok)
                     if s3_p.get('use_ma200'): active_conditions.append(is_ma200_ok)
-                    if s3_p.get('use_vix_jump'): active_conditions.append(is_vix_ok)
+                    if s3_p.get('use_vxn_jump', s3_p.get('use_vix_jump', False)): active_conditions.append(is_vix_ok)
                     if s3_p.get('use_gap_down'): active_conditions.append(is_gap_ok)
                     if s3_p.get('use_drop_acc'): active_conditions.append(is_acc_ok)
                     if s3_p.get('use_chandelier'): active_conditions.append(is_s3_chan_ok)
@@ -861,7 +862,7 @@ class StrategyEngine:
                         if s3_p.get('use_daily_drop'): detail_log += f" D:{dr:+.1f}%"
                         if s3_p.get('use_ma60'): detail_log += f" M60({s3_p.get('ma60_limit', 0.0):+.1f}%)"
                         if s3_p.get('use_ma200'): detail_log += f" M200({s3_p.get('ma200_limit', 0.0):+.1f}%)"
-                        if s3_p.get('use_vix_jump'): detail_log += f" V:{vix_jump_pct:+.1f}%"
+                        if s3_p.get('use_vxn_jump', s3_p.get('use_vix_jump', False)): detail_log += f" VXN:{vxn_jump_pct:+.1f}%"
                         if s3_p.get('use_gap_down'): detail_log += f" G:{row.get('Gap_Down', 0):+.1f}%"
                         if s3_p.get('use_drop_acc'): detail_log += f" A:{row.get('Drop_Acc', 0):+.1f}%"
                         if s3_p.get('use_chandelier'): detail_log += f" C:ATR*{s3_p.get('chandelier_mult', 3.0)}"
@@ -1092,6 +1093,26 @@ class StrategyEngine:
                 if current_planned_asset != base_asset:
                     log_asset_name = f"{current_planned_asset}(S3)"
 
+            # [신규] 개별 지표 시그널 상태 진단 (로그용)
+            rsi_sig = "-"
+            if params:
+                if rsi <= params.get('rsi_lower', 35): rsi_sig = "과매도"
+                elif rsi >= params.get('rsi_upper', 70): rsi_sig = "과매수"
+                if is_rsi_golden_cross: rsi_sig = "골든크로스"
+                elif is_rsi_dead_cross: rsi_sig = "데드크로스"
+            
+            macd_sig = "Neutral"
+            if is_macd_golden_cross: macd_sig = "골든크로스"
+            elif is_macd_dead_cross: macd_sig = "데드크로스"
+            elif macd_hist > 0: macd_sig = "양선"
+            else: macd_sig = "음선"
+            
+            willr_sig = "-"
+            if willr_val <= -80: willr_sig = "과매도"
+            elif willr_val >= -20: willr_sig = "과매수"
+            if (prev_willr <= -80) and (willr_val > -80): willr_sig = "과매도이탈"
+            elif (prev_willr >= -20) and (willr_val < -20): willr_sig = "과매수이탈"
+
             history.append({
                 'Date': date,
                 'Value': current_total_val,
@@ -1111,19 +1132,31 @@ class StrategyEngine:
                 'Trade_Entry_Date': trade_entry_date_val,
                 'Close': prices[base_asset],
                 'RSI': rsi,
+                'RSI_Sig': rsi_sig,
                 'MACD': macd_val,
+                'MACD_Sig': macd_sig,
+                'WILLR_Sig': willr_sig,
                 'FG': fg,
-                'VIX': vix,
-                'VXN': row.get('VXN', 0),
+                'VIX': row.get('VIX', 0),
+                'VXN': vxn,
                 'ADX': row.get('ADX', 0),
                 'DMP': row.get('DMP', 0),
                 'DMN': row.get('DMN', 0),
+                'WILLR': row.get('WILLR', 0),
+                'SAR': row.get('SAR', 0),
                 'Smart_Mode': smart_reason,
                 'SMA200': row.get('SMA200', 0),
                 'SMA60': row.get('SMA60', 0),
                 'Target': f"{new_planned}(S{new_stage})" if new_stage < 3 else new_planned,
                 'STOCH_K': row.get('STOCH_K', 0),
-                'STOCH_D': row.get('STOCH_D', 0)
+                'STOCH_D': row.get('STOCH_D', 0),
+                'BB_Lower': bb_l,
+                'BB_Upper': bb_u,
+                'Signal_Line': signal_line,
+                'MACD_Hist': macd_hist,
+                'ATR_14': row.get('ATR_14', 0),
+                'ATR_20': row.get('ATR_20', 0),
+                'Peak_Price': peak_price
             })
             for t in lev_candidates:
                 if t in holdings:
@@ -1150,7 +1183,7 @@ class StrategyEngine:
                     'summary': latest.get('Summary', '특이사항 없음'),
                     'price': latest.get('Close', 0),
                     'rsi': latest.get('RSI', 0),
-                    'vix': latest.get('VIX', 0),
+                    'vxn': latest.get('VXN', 0),
                     'stage': latest.get('Stage', 0)
                 }
         except Exception as e:

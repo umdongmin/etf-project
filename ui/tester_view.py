@@ -123,8 +123,8 @@ class TesterView:
                         use_ma200 = st.checkbox(f"200일 이평선 하회 {i}", value=p.get('use_ma200', False), key=f"s_ma200_use_{i}")
                         ma200_lim = st.number_input(f"200일 기준 (%) {i}", -50.0, 50.0, p.get('ma200_limit', 0.0), 0.1, format="%.1f", key=f"s_ma200_lim_{i}")
                     
-                    use_vj = st.checkbox(f"VIX 급등 시그널 사용 {i}", value=p.get('use_vix_jump', False), key=f"s_vj_use_{i}")
-                    vj_val = st.number_input(f"VIX 급등 기준 (%) {i}", 0.0, 100.0, p.get('vix_jump', 15.0), 0.1, format="%.1f", key=f"s_vj_{i}")
+                    use_vj = st.checkbox(f"VXN 급등 시그널 사용 {i}", value=p.get('use_vxn_jump', p.get('use_vix_jump', False)), key=f"s_vj_use_{i}")
+                    vj_val = st.number_input(f"VXN 급등 기준 (%) {i}", 0.0, 100.0, p.get('vxn_jump', p.get('vix_jump', 15.0)), 0.1, format="%.1f", key=f"s_vj_{i}")
                     use_gap = st.checkbox(f"패닉 시가 갭 발생 {i} (-3% 이하)", value=p.get('use_gap_down', False), key=f"s_gap_use_{i}")
                     gap_lim = st.number_input(f"시가 갭 기준 (%) {i}", -10.0, 0.0, p.get('gap_limit', -3.0), 0.1, format="%.1f", key=f"s_gap_lim_{i}")
                     use_acc = st.checkbox(f"급격한 하락 발생 {i} (-7% 이하)", value=p.get('use_drop_acc', False), key=f"s_acc_use_{i}")
@@ -140,7 +140,7 @@ class TesterView:
                         'use_daily_drop': use_drop, 'drop_limit': drop_lim,
                         'use_ma60': use_ma60, 'ma60_limit': ma60_lim,
                         'use_ma200': use_ma200, 'ma200_limit': ma200_lim,
-                        'use_vix_jump': use_vj, 'vix_jump': vj_val,
+                        'use_vxn_jump': use_vj, 'vxn_jump': vj_val,
                         'use_gap_down': use_gap, 'gap_limit': gap_lim,
                         'use_drop_acc': use_acc, 'acc_limit': acc_lim,
                         'use_chandelier': use_chan, 'chandelier_mult': chan_mult,
@@ -203,8 +203,8 @@ class TesterView:
             smart_config = {
                 'use_panic': c1.toggle("하락장 매수 지연 (Panic Mode)", value=current_params.get('use_panic', True)),
                 'panic_ma': c1.selectbox("지연 기준 이평선", [60, 120, 200], index=[60,120,200].index(current_params.get('panic_ma', 200))),
-                'use_vix_safety': c2.toggle("VIX 대피 시스템 (Safety)", value=current_params.get('use_vix_safety', True)),
-                'vix_exit': c2.slider("대피 VIX 레벨", 15.0, 45.0, float(current_params.get('vix_exit', 28.0)), step=0.5),
+                'use_vxn_safety': c2.toggle("VXN 대피 시스템 (Safety)", value=current_params.get('use_vxn_safety', current_params.get('use_vix_safety', True))),
+                'vxn_exit': c2.slider("대피 VXN 레벨", 15.0, 45.0, float(current_params.get('vxn_exit', current_params.get('vix_exit', 28.0))), step=0.5),
                 'use_rsi_turbo': c2.toggle("RSI 과매도 가속 (Turbo)", value=current_params.get('use_rsi_turbo', True)),
                 'rsi_turbo': c2.slider("가속 RSI 레벨", 20.0, 45.0, float(current_params.get('rsi_turbo', 31.0)), step=0.5),
                 'use_sl_control': st.toggle("손절제어 사용 (Stop-Loss Control)", value=current_params.get('use_sl_control', False)),

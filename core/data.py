@@ -81,12 +81,12 @@ class DataService:
         return df
 
     @classmethod
-    def fetch_live_data(cls):
-        print("라이브 데이터 수집 시작...")
+    def fetch_live_data(cls, start_date='2010-01-01'):
+        print(f"라이브 데이터 수집 시작 (시작일: {start_date})...")
         # KST(UTC+9) 강제 적용
         now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
         end_date = now_kst.strftime('%Y-%m-%d')
-        start_date = '2010-01-01'
+        # start_date = '2010-01-01'  # 🌟 파라미터로 대체됨
         
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
@@ -100,29 +100,29 @@ class DataService:
                     data_dict[ticker] = df
             
             # VIX 및 VXN 데이터 별도 수집 (동기화)
-            vix_close = yf.download('^VIX', start=start_date, end=end_date, progress=False)['Close']
-            vxn_close = yf.download('^VXN', start=start_date, end=end_date, progress=False)['Close']
-            
             # VIX 및 VXN 데이터 별도 수집 (동기화)
             try:
-                vix_close = yf.download('^VIX', start=start_date, end=end_date, progress=False)
-                vxn_close = yf.download('^VXN', start=start_date, end=end_date, progress=False)
+                # 개별 다운로드로 MultiIndex 문제 회피 및 안정성 확보
+                v_tickers = {'VIX': '^VIX', 'VXN': '^VXN'}
+                v_data_list = []
+                for name, ticker in v_tickers.items():
+                    raw = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                    if not raw.empty:
+                        c_data = raw['Close']
+                        s = c_data.iloc[:, 0].copy() if isinstance(c_data, pd.DataFrame) else c_data.copy()
+                        s.name = name
+                        # 인덱스 정규화 (시간 제거)
+                        try: s.index = s.index.tz_localize(None).normalize()
+                        except: s.index = s.index.normalize()
+                        v_data_list.append(s)
                 
                 vix_df = pd.DataFrame()
-                if not vix_close.empty and not vxn_close.empty:
-                    vix_df = pd.concat([vix_close['Close'].rename('VIX'), vxn_close['Close'].rename('VXN')], axis=1)
-                elif not vix_close.empty:
-                    vix_df = vix_close[['Close']].rename(columns={'Close': 'VIX'})
-                elif not vxn_close.empty:
-                    vix_df = vxn_close[['Close']].rename(columns={'Close': 'VXN'})
-                
-                if not vix_df.empty:
-                    vix_df = vix_df.ffill()
-                    vix_df.index = vix_df.index.tz_localize(None).normalize()
-                    vix_df = vix_df.groupby(level=0).last()
+                if v_data_list:
+                    vix_df = pd.concat(v_data_list, axis=1)
+                    vix_df = vix_df[~vix_df.index.duplicated(keep='first')]
                     vix_df = vix_df.ffill().bfill()
             except Exception as e:
-                print(f"VIX Download Error: {e}")
+                print(f"VIX/VXN Download Error: {e}")
                 vix_df = pd.DataFrame()
         except Exception as e:
             print(f"Main Download Error: {e}")

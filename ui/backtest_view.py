@@ -20,7 +20,31 @@ class BacktestView:
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.markdown("### 🛑 실시간 시그널 프리뷰 (Beta)")
-                st.caption("장마감 전 현재가를 기준으로 오늘의 예상 매매 신호를 미리 도출합니다.")
+                
+                # [신규] 서머타임 기간 판별 (현재 2026년 기준: 3/8 ~ 11/1)
+                now = datetime.datetime.now()
+                dst_start = datetime.datetime(now.year, 3, 8) # 2026년 3월 둘째 일요일
+                dst_end = datetime.datetime(now.year, 11, 1)  # 2026년 11월 첫째 일요일
+                is_dst = dst_start <= now < dst_end
+                
+                dst_status = "☀️ **현재 서머타임 적용 중**" if is_dst else "❄️ **현재 서머타임 해제 중**"
+                dst_color = "#e67e22" if is_dst else "#3498db"
+                
+                # [신규] 분석 기간 정보 (사용자 투자 시작일 반영 여부 확인용)
+                analysis_start = golden_history.index.min().strftime('%Y-%m-%d')
+                analysis_end = golden_history.index.max().strftime('%Y-%m-%d')
+                
+                st.markdown(f"""
+                <div style="font-size: 13px; color: #444; background: #f8f9fa; padding: 10px; border-radius: 8px; border-left: 4px solid {dst_color}; margin-bottom: 10px;">
+                    🇺🇸 <b>미국 정규장 운영 시간 (한국 기준):</b><br>
+                    • <b>서머타임 (03/08 ~ 11/01):</b> 22:30 ~ 05:00<br>
+                    • <b>평시/겨울 (11/02 ~ 03/07):</b> 23:30 ~ 06:00<br>
+                    <div style="margin-top: 5px; color: {dst_color}; font-size: 14px;">{dst_status}</div>
+                    <hr style="margin: 8px 0; border: 0.5px solid #eee;">
+                    📊 <b>분석 기준 기간:</b> <span style="color:#d35400; font-weight:bold;">{analysis_start} ~ {analysis_end}</span> (데이터 최신화 완료)
+                </div>
+                """, unsafe_allow_html=True)
+                st.caption(f"분석 시작일({analysis_start}) 기준의 상태를 바탕으로 오늘({analysis_end})의 예상 매매 신호를 도출합니다.")
             with col2:
                 # 버튼 클릭 시 app.py에서 처리하도록 신호 전달
                 # 버튼을 누르면 예측 프로세스가 시작됨
@@ -60,7 +84,7 @@ class BacktestView:
                         <div><b>기준일:</b> {res['date'].strftime('%Y-%m-%d')}</div>
                         <div><b>현재가:</b> ${res['price']:.2f}</div>
                         <div><b>RSI:</b> {res['rsi']:.1f}</div>
-                        <div><b>VIX:</b> {res['vix']:.1f}</div>
+                        <div><b>VXN:</b> {res['vxn']:.1f}</div>
                     </div>
                     <div style="margin-top:12px; font-size:14px; padding:8px; background:rgba(255,255,255,0.5); border-radius:6px;">
                         📝 <b>전략 요약:</b> {res['summary']}
@@ -207,14 +231,54 @@ class BacktestView:
             log_df.index = log_df.index.date
             
             base_w_col = f'{base_asset}_Weight'
-            lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
+            lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ'] if f'{t}_Weight' in log_df.columns]
             # 가치 관련 컬럼을 가장 앞쪽에 배치하여 확인 용이하도록 수정
-            cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX', 'STOCH_K', 'STOCH_D']
+            cols = [
+                'Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'
+            ] + lev_group_cols + [
+                base_w_col, 
+                'RSI', 'RSI_Sig', 
+                'MACD', 'Signal_Line', 'MACD_Hist', 'MACD_Sig', 
+                'BB_Lower', 'BB_Upper', 'Peak_Price', 'ATR_20',
+                'WILLR', 'WILLR_Sig', 
+                'ADX', 'DMP', 'DMN', 'SAR', 'STOCH_K', 'STOCH_D', 'VXN'
+            ]
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
-            formats = {'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'FG': '{:.0f}', 'VIX': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}'}
+            # 컬럼명 리네임 (가독성 향상)
+            display_df = display_df.rename(columns={
+                'RSI_Sig': 'RSI Signal',
+                'MACD_Sig': 'MACD Signal',
+                'WILLR_Sig': 'Williams Signal',
+                'WILLR': 'Williams',
+                'DMP': 'DI+',
+                'DMN': 'DI-',
+                'SAR': 'Parabolic'
+            })
+            
+            formats = {
+                'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 
+                'RSI': '{:.1f}', 'MACD': '{:.2f}', 'Signal_Line': '{:.2f}', 'MACD_Hist': '{:.2f}', 
+                'BB_Lower': '${:.2f}', 'BB_Upper': '${:.2f}', 'Peak_Price': '${:.2f}', 'ATR_20': '{:.2f}',
+                'VXN': '{:.1f}', 'ADX': '{:.1f}', 
+                'Williams': '{:.1f}', 'DI+': '{:.1f}', 'DI-': '{:.1f}', 'Parabolic': '{:.2f}',
+                'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}'
+            }
             formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
-            st.dataframe(display_df.style.apply(style_signal, axis=1).format(formats, na_rep='-'), use_container_width=True, height=600)
+            
+            def highlight_signals(val):
+                if any(x in str(val) for x in ['골든크로스', '과매도', '양선', '이탈']):
+                    return 'color: #e74c3c; font-weight: bold'
+                if any(x in str(val) for x in ['데드크로스', '과매수', '음선']):
+                    return 'color: #3498db; font-weight: bold'
+                return ''
+
+            st.dataframe(
+                display_df.style.apply(style_signal, axis=1)
+                .applymap(highlight_signals, subset=[c for c in ['RSI Signal', 'MACD Signal', 'Williams Signal'] if c in display_df.columns])
+                .format(formats, na_rep='-'), 
+                use_container_width=True, height=600
+            )
 
         if closed_trades is not None and not closed_trades.empty:
             st.divider()
@@ -236,26 +300,38 @@ class BacktestView:
                 
                 # 이미지 양식에 맞춘 고정 컬럼 구성
                 # 모든 자산 비중 컬럼이 존재하도록 보장 (없으면 0.0)
-                all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', 'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_asset}_Weight']
+                all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', f'{base_asset}_Weight']
                 for col in all_weight_cols:
                     if col not in exec_df.columns:
                         exec_df[col] = 0.0
                 
                 # 최종 출력 컬럼 순서 (이미지 양식과 동일 + Stage 추가)
                 e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'QLD_Weight', 'TQQQ_Weight', 
-                          'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_asset}_Weight', 
-                          'Cash_Weight', 'RSI', 'MACD', 'VIX']
+                          f'{base_asset}_Weight', 
+                          'RSI', 'MACD', 'VXN', 'ADX', 'WILLR', 'DMP', 'DMN', 'SAR']
                 
                 display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
+                
+                # 컬럼명 리네임
+                display_exec_df = display_exec_df.rename(columns={
+                    'WILLR': 'Williams',
+                    'DMP': 'DI+',
+                    'DMN': 'DI-',
+                    'SAR': 'Parabolic'
+                })
                 
                 # 포맷팅 설정
                 e_formats = {
                     'Value': '${:,.0f}', 
                     'Lev_Weight': '{:.1%}', 
-                    'Cash_Weight': '{:.1%}', 
                     'RSI': '{:.1f}', 
                     'MACD': '{:.2f}', 
-                    'VIX': '{:.1f}'
+                    'VXN': '{:.1f}',
+                    'ADX': '{:.1f}',
+                    'Williams': '{:.1f}',
+                    'DI+': '{:.1f}',
+                    'DI-': '{:.1f}',
+                    'Parabolic': '{:.2f}'
                 }
                 e_formats.update({c: '{:.1%}' for c in all_weight_cols})
                 

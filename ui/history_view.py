@@ -344,13 +344,13 @@ class HistoryLabView:
         col_diag1, col_diag2 = st.columns(2)
         with col_diag1:
             with st.expander("🚩 S3 보호(Emergency) 작동 기록", expanded=False):
-                st.caption("이평선 하회, VIX 급등, 시가 갭락 등으로 인해 보호 매도가 작동한 내역입니다.")
+                st.caption("이평선 하회, VXN 급등, 시가 갭락 등으로 인해 보호 매도가 작동한 내역입니다.")
                 if 'S3_Detail' in golden_history.columns:
                     s3_emerg = golden_history[golden_history['S3_Detail'] != ""].copy()
                     if not s3_emerg.empty:
-                        s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VIX']].copy()
+                        s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VXN']].copy()
                         s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
-                        s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VIX']
+                        s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VXN']
                         st.dataframe(s3_emerg_display, use_container_width=True)
                     else:
                         st.info("기록된 S3 보호 작동 내역이 없습니다.")
@@ -363,9 +363,9 @@ class HistoryLabView:
                 if 'S3_Sell3_Event' in golden_history.columns:
                     sell3_days = golden_history[golden_history['S3_Sell3_Event'] == 1].copy()
                     if not sell3_days.empty:
-                        s3_sell3_display = sell3_days[['RSI', 'MACD', 'VIX', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
+                        s3_sell3_display = sell3_days[['RSI', 'MACD', 'VXN', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
                         s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
-                        s3_sell3_display.columns = ['RSI', 'MACD', 'VIX', 'ADX', 'DI+', 'DI-', '보유자산']
+                        s3_sell3_display.columns = ['RSI', 'MACD', 'VXN', 'ADX', 'DI+', 'DI-', '보유자산']
                         st.dataframe(s3_sell3_display, use_container_width=True)
                     else:
                         st.info("S3 + 매도신호3 작동 기록이 없습니다.")

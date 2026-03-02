@@ -63,17 +63,31 @@ try:
                 strat = json.load(f)
 
             # 2. 분석 실행 (실시간 데이터 수집 및 시그널 계산)
-            data, fg, vix, _, _, _ = DataService.fetch_live_data()
+            # 🌟 설정: 사용자님의 실제 투자 시작일(2026-01-01)로 시뮬레이션 시작을 맞춥니다.
+            sim_start_date = datetime.date(2026, 1, 1)
+            fetch_start_date = (sim_start_date - datetime.timedelta(days=365)).strftime('%Y-%m-%d')
+            
+            print(f"📡 데이터 수집 기간: {fetch_start_date} ~ 오늘")
+            
+            # 2-1. 과거 데이터 및 실시간 현재가 수집
+            data_raw, fg, vix, _, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
+            all_tickers = list(data_raw.keys())
+            current_prices = DataService.fetch_current_prices(all_tickers)
+            
+            # 2-2. 🌟 가상 종가 주입 (UI의 '실시간 시그널 프리뷰'와 동일한 로직 적용)
+            # 장중 현재가를 오늘자의 종가로 간주하여 정확한 실시간 시그널 도출
+            data = DataService.inject_virtual_close(data_raw, current_prices)
+
             gh, _, events = StrategyEngine.run_golden_strategy(
                 data, fg, vix, 
                 strat.get('leverage_asset', 'TQQQ'), 
                 strat.get('base_asset', 'QQQ'),
                 0.0, 
-                datetime.date(2010,1,1), 
+                sim_start_date, 
                 datetime.date.today(), 
                 strat, 
                 strat.get('trade_at', '종가'), 
-                salt='vFinal_Production'
+                salt='vFinal_Production_v3_Live'
             )
 
             # 3. 알림 전송

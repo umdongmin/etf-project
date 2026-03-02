@@ -282,10 +282,34 @@ class DataAnalysisView:
                 
                 base_w_col = f'{base_name}_Weight'
                 lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
-                cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'] + lev_group_cols + [base_w_col, 'Cash_Weight', 'RSI', 'MACD', 'FG', 'VIX', 'VXN', 'STOCH_K', 'STOCH_D']
+                cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'] + lev_group_cols + [
+                    base_w_col, 'Cash_Weight', 
+                    'RSI', 'RSI_Sig', 
+                    'MACD', 'Signal_Line', 'MACD_Hist', 'MACD_Sig', 
+                    'BB_Lower', 'BB_Upper', 'Peak_Price', 'ATR_20',
+                    'WILLR', 'WILLR_Sig', 
+                    'ADX', 'DMP', 'DMN', 'SAR', 'STOCH_K', 'STOCH_D', 'FG', 'VIX', 'VXN'
+                ]
                 display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
                 
-                formats = {'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'FG': '{:.0f}', 'VIX': '{:.1f}', 'VXN': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}'}
+                # 컬럼명 리네임 (가독성 향상)
+                display_df = display_df.rename(columns={
+                    'RSI_Sig': 'RSI Signal',
+                    'MACD_Sig': 'MACD Signal',
+                    'WILLR_Sig': 'Williams Signal',
+                    'WILLR': 'Williams',
+                    'DMP': 'DI+',
+                    'DMN': 'DI-',
+                    'SAR': 'Parabolic'
+                })
+
+                formats = {
+                    'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 
+                    'RSI': '{:.1f}', 'MACD': '{:.2f}', 'Signal_Line': '{:.2f}', 'MACD_Hist': '{:.2f}', 
+                    'BB_Lower': '${:.2f}', 'BB_Upper': '${:.2f}', 'Peak_Price': '${:.2f}', 'ATR_20': '{:.2f}',
+                    'FG': '{:.0f}', 'VIX': '{:.1f}', 'VXN': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}',
+                    'ADX': '{:.1f}', 'Williams': '{:.1f}', 'DI+': '{:.1f}', 'DI-': '{:.1f}', 'Parabolic': '{:.2f}'
+                }
                 formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
                 st.dataframe(display_df.style.apply(style_signal, axis=1).format(formats, na_rep='-'), use_container_width=True, height=600)
 
