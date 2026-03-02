@@ -147,7 +147,8 @@ class DataService:
         m_tickers_raw = ['^TNX', '^IRX', '^PCCR']
         try:
             m_data = yf.download(m_tickers_raw, period='5d', progress=False, group_by='ticker')
-            m_map = {'^TNX': 'US10Y', '^IRX': 'US03M', '^PCCR': 'PCCR'}
+            # 🌟 속도 저하의 주범인 PCCR(유령 티커)을 제거했습니다.
+            m_map = {'^TNX': 'US10Y', '^IRX': 'US03M'} 
             for t_raw, t_name in m_map.items():
                 if t_raw in m_data and not m_data[t_raw].empty:
                     val = m_data[t_raw]['Close'].dropna().iloc[-1]
