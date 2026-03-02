@@ -1,59 +1,74 @@
 import os
+import sys
 import threading
 import functions_framework
 
-# 🌟 핵심: 무거운 라이브러리(pandas, yfinance 등) 임포트를 작업 함수 안으로 이동합니다.
-# 이렇게 하면 서버가 0.1초 만에 실행되어 구글의 8080 포트 체크(Health Check)를 통과합니다.
+# 🌟 [해결책] Streamlit 없는 환경(GCF/Cloud Run)에서 core 모듈 임포트 시 발생하는 에러 방지
+class DummyStreamlit:
+    def cache_data(self, *args, **kwargs):
+        return lambda x: x
+    def cache_resource(self, *args, **kwargs):
+        return lambda x: x
+    def write(self, *args, **kwargs): pass
+    def error(self, *args, **kwargs): pass
+    def success(self, *args, **kwargs): pass
+    def warning(self, *args, **kwargs): pass
+    def info(self, *args, **kwargs): pass
+    def sidebar(self, *args, **kwargs): return self
+    def columns(self, *args, **kwargs): return [self] * 10
+    def container(self, *args, **kwargs): return self
+
+# GCF에는 streamlit이 설치되어 있지 않으므로 가짜 모듈을 주입합니다.
+sys.modules['streamlit'] = DummyStreamlit()
 
 @functions_framework.http
 def alert_handler(request):
     """
-    구글 서버가 8080 포트를 찌르면 즉시 성공 응답을 보내 배포 실패를 방지합니다.
-    실제 무거운 작업은 백그라운드 쓰레드에서 조용히 실행합니다.
+    구글 헬스체크를 통과하기 위해 0.1초 만에 응답을 보내고, 
+    실제 분석 작업은 백그라운드 쓰레드에서 수행합니다.
     """
-    print("✅ 구글 헬스체크 수신! 즉각 응답하여 배포 에러를 방지합니다.")
+    print("✅ 구글 헬스체크 수신 성공! 즉시 응답합니다.")
     
-    # 텔레그램 토큰 설정 확인
+    # 텔레그램 토큰 확인
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     
-    if not token or not chat_id:
-        print("⚠️ 환경변수(TOKEN/ID)가 설정되지 않았습니다.")
-        # 배포 성공을 위해 일단 200 OK를 리턴합니다.
-        return "Warning: Env missing, but health check passed.", 200
-
-    # 무거운 작업(데이터 수집, 전략 분석)은 배경 쓰레드에서 실행
-    t = threading.Thread(target=run_heavy_logic_in_background, args=(token, chat_id))
-    t.start()
+    if token and chat_id:
+        # 무거운 작업은 별도 쓰레드에서 실행 (부팅 타임아웃 방지)
+        t = threading.Thread(target=run_logic_task, args=(token, chat_id))
+        t.start()
+        return "OK: Logic started.", 200
     
-    return "OK: Logic started in background.", 200
+    print("⚠️ 텔레그램 환경변수 누락됨 (TOKEN/ID)")
+    return "OK: But environment variables missing.", 200 # 배포 성공을 위해 200 리턴
 
-def run_heavy_logic_in_background(token, chat_id):
+def run_logic_task(token, chat_id):
     """
-    구글 서버 응답이 끝난 뒤, 여기서 무거운 라이브러리를 불러오고 작업을 수행합니다.
+    실제 데이터 수집 및 시그널 분석 로직
     """
     try:
-        print("🚀 [배경작업] 무거운 라이브러리 및 데이터 분석 시작...")
-        
-        # 여기서 비로소 무거운 라이브러리를 임포트합니다.
+        print("🚀 [배경작업] 라이브러리 로딩 및 분석 시작...")
         import json
         import datetime
         import requests
         from core.data import DataService
         from core.engine import StrategyEngine
 
-        # 1. 전략 설정 파일 로드
+        # 1. 전략 로드
         project_root = os.path.dirname(os.path.abspath(__file__))
         strat_path = os.path.join(project_root, "strategies", "TQQQ 전략.json")
+        if not os.path.exists(strat_path):
+            print(f"❌ 전략 파일을 찾을 수 없음: {strat_path}")
+            return
+
         with open(strat_path, 'r', encoding='utf-8') as f:
             strat = json.load(f)
 
-        # 2. 실시간 데이터 수집 (VXN/VIX 등 포함)
-        # 이 과정이 5~10초 걸리기 때문에 배경작업이 필수입니다.
+        # 2. 데이터 수집 (VXN/VIX 등 포함)
         data_dict, fg_df, vix_df, _, _, _ = DataService.fetch_live_data()
         
-        # 3. 전략 엔진 실행
-        golden_history, _, all_signal_events = StrategyEngine.run_golden_strategy(
+        # 3. 전략 실행
+        gh, _, events = StrategyEngine.run_golden_strategy(
             data_dict, fg_df, vix_df, 
             strat.get('leverage_asset', 'TQQQ'), 
             strat.get('base_asset', 'QQQ'),
@@ -62,20 +77,22 @@ def run_heavy_logic_in_background(token, chat_id):
             datetime.date.today(), 
             strat, 
             strat.get('trade_at', '종가'), 
-            salt='alert_bot_fixed_v3'
+            salt='alert_bot_final_fix'
         )
 
-        # 4. 결과 분석 및 알림 전송
-        if not golden_history.empty:
-            latest = golden_history.iloc[-1]
+        # 4. 결과 전송
+        if not gh.empty:
+            latest = gh.iloc[-1]
             last_date = latest.name.strftime('%Y-%m-%d')
-            current_asset = latest['Asset']
             
             msg = f"🔔 **TQQQ 실시간 알림**\n\n"
             msg += f"📅 **기준일:** {last_date}\n"
-            msg += f"🛡️ **현재 포지션:** `{current_asset}`\n"
+            msg += f"🛡️ **현재 포지션:** `{latest['Asset']}`\n"
             
-            today_events = [e for e in all_signal_events if e['date'].strftime('%Y-%m-%d') == last_date]
+            today_events = [e for e in all_signal_events if e['date'].strftime('%Y-%m-%d') == last_date] if 'all_signal_events' in locals() else []
+            # 위 변수명이 전략마다 다를 수 있어 events(엔진 리턴값) 사용 권장
+            today_events = [e for e in events if e['date'].strftime('%Y-%m-%d') == last_date]
+            
             if today_events:
                 msg += "\n🎯 **감지된 시그널:**\n"
                 for ev in today_events:
@@ -83,18 +100,16 @@ def run_heavy_logic_in_background(token, chat_id):
             
             msg += f"\n📊 RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
             
-            # 텔레그램 전송
             requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
                           json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, 
                           timeout=15)
-            print("✅ [배경작업] 알림 전송 완료!")
+            print("✅ [배경작업] 텔레그램 알림 전송 완료!")
             
     except Exception as e:
-        print(f"❌ [배경작업] 치명적 에러 발생: {e}")
+        print(f"❌ [배경작업] 에러 발생: {e}")
 
-# Cloud Run/GCF 강제 실행용 (삭제하면 안 됨)
 if __name__ == "__main__":
     from functions_framework._cli import _cli
     port = os.environ.get("PORT", "8080")
-    # --host 0.0.0.0 이 있어야 외부 헬스체크 신호를 받을 수 있습니다.
+    # --host 0.0.0.0 필수
     _cli(["--target", "alert_handler", "--port", port, "--host", "0.0.0.0"])
