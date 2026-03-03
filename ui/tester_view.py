@@ -43,9 +43,9 @@ class TesterView:
                             'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}"),
                             'use_willr': st.checkbox(f"Williams %R 상향 돌파 {i}", value=p.get('use_willr', False), key=f"b_willr_use_{i}"),
                             'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
-                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
-                            'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) {i}", value=p.get('di_minus_cross', False), key=f"b_di_minus_cross_{i}"),
-                            'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
+                            'di_plus_above': st.checkbox(f"매수 우세 상태유지 (DI+ > DI-) {i}", value=p.get('di_plus_above', False), key=f"b_di_plus_above_{i}"),
+                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 순간 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
                         })
                     else: # B1: RSI 골든크로스 + MACD 상승
                         buy_signals.append({
@@ -65,9 +65,9 @@ class TesterView:
                             'bb_lower': st.checkbox(f"Bollinger Lower {i}", value=p.get('bb_lower', False), key=f"b_bb_low_{i}"),
                             'use_willr': st.checkbox(f"Williams %R 상향 돌파 {i}", value=p.get('use_willr', False), key=f"b_willr_use_{i}"),
                             'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
-                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
-                            'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) {i}", value=p.get('di_minus_cross', False), key=f"b_di_minus_cross_{i}"),
-                            'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
+                            'di_plus_above': st.checkbox(f"매수 우세 상태유지 (DI+ > DI-) {i}", value=p.get('di_plus_above', False), key=f"b_di_plus_above_{i}"),
+                            'di_plus_cross': st.checkbox(f"DI+ 골든크로스 순간 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
                         })
         
         sell_signals = []
@@ -239,9 +239,9 @@ class TesterView:
                         'bb_lower': st.checkbox(f"Bollinger Lower (S{i})", value=p.get('bb_lower', False), key=f"pb_bb_low_{i}"),
                         'use_willr': st.checkbox(f"Williams %R 상향 돌파 (S{i})", value=p.get('use_willr', False), key=f"pb_willr_use_{i}"),
                         'willr_val': st.number_input(f"W%R 상향 기준값 (S{i})", -100, 0, p.get('willr_val', -80), key=f"pb_willr_val_{i}"),
-                        'di_plus_cross': st.checkbox(f"DI+ 골든크로스 (DI+ > DI-) (S{i})", value=p.get('di_plus_cross', False), key=f"pb_di_plus_cross_{i}"),
-                        'di_minus_cross': st.checkbox(f"DI- 데드크로스 (DI- > DI+) (S{i})", value=p.get('di_minus_cross', False), key=f"pb_di_minus_cross_{i}"),
-                        'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 (S{i})", value=p.get('use_sar', False), key=f"pb_sar_use_{i}")
+                        'di_plus_above': st.checkbox(f"매수 우세 상태유지 (DI+ > DI-) (S{i})", value=p.get('di_plus_above', False), key=f"pb_di_plus_above_{i}"),
+                        'di_plus_cross': st.checkbox(f"DI+ 골든크로스 순간 (DI+ > DI-) (S{i})", value=p.get('di_plus_cross', False), key=f"pb_di_plus_cross_{i}"),
+                        'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 (S{i})", value=p.get('use_sar', False), key=f"pb_sar_use_{i}")
                     })
             
             smart_config['panic_buy_signals'] = panic_buy_signals_list

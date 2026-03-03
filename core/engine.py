@@ -435,25 +435,25 @@ class StrategyEngine:
                         c &= (price <= bb_l); a = True
                         rs.append("BB 하단 터치")
                     
+                    if bp.get('di_plus_above'):
+                        c &= (d_plus > d_minus); a = True
+                        rs.append("DI+우세(상태유지)")
+
                     if bp.get('di_plus_cross'):
                         c &= ((row.get('Prev_DMP', 0) < row.get('Prev_DMN', 0)) and (d_plus > d_minus))
                         a = True
-                        rs.append("DI+골든크로스")
+                        rs.append("DI+골든크로스(순간)")
                     
                     if bp.get('use_willr'):
                         w_val = bp.get('willr_val', -80)
                         c &= ((prev_willr <= w_val) and (willr_val > w_val))
                         a = True
                         
-                    if bp.get('di_minus_cross'):
-                        c &= ((row.get('Prev_DMN', 0) < row.get('Prev_DMP', 0)) and (d_minus > d_plus))
-                        a = True
-                        rs.append("DI-데드크로스")
-                    
                     if bp.get('use_sar'):
-                        c &= ((row.get('Prev_Close', 0) > row.get('Prev_SAR', 0)) and (price < row.get('SAR', 0)))
+                        # 상향 돌파: 전날 종가는 SAR 아래, 오늘 종가는 SAR 위
+                        c &= ((row.get('Prev_Close', 0) < row.get('Prev_SAR', 0)) and (price > row.get('SAR', 0)))
                         a = True
-                        rs.append("파라볼릭SAR 하향이탈")
+                        rs.append("파라볼릭SAR 상향돌파")
 
                     return a, c, rs
 

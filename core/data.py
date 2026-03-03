@@ -91,10 +91,12 @@ class DataService:
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
         
-        # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 계산 (장중 데이터 필터링용)
-        # KST-14시간(낮) 또는 KST-13시간(서머타임) 대략 계산
+        # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 및 장 마감 여부 계산
+        # 현재는 단순 5시간 차이로 계산 (서머타임 고려 시 4시간)
         now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5) 
         today_est = now_est.date()
+        # [신규] 장 마감(16:00) 이후거나 주말인 경우 '오늘' 데이터도 확정으로 간주
+        is_market_closed = now_est.hour >= 16 or now_est.weekday() >= 5
 
         try:
             print(f"메인 티커 데이터 다운로드 중: {tickers}...")
@@ -104,13 +106,14 @@ class DataService:
                 if ticker in full_data and not full_data[ticker].empty:
                     df = full_data[ticker].copy()
                     
-                    # [신규] 장중 불완전한 데이터 필터링
-                    # 만약 마지막 데이터의 날짜가 오늘의 US 날짜와 같다면, 
-                    # 이는 아직 확정되지 않은 종가이므로 베이스 데이터에서 제외함 (프리뷰에서만 활용)
+                    # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
                     if df.index[-1].date() >= today_est:
-                        # 장 마감 직후(EST 16:00, KST 익일 06:00) 이후라면 확정된 종가로 볼 수 있으나,
-                        # 안전하게 베이스에서는 전일까지로 제한하고 프리뷰로 '오늘'을 처리하게 함
-                        df = df[df.index.date < today_est]
+                        if not is_market_closed:
+                            # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
+                            df = df[df.index.date < today_est]
+                        else:
+                            # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
+                            pass
                         
                     df = df.ffill().bfill() 
                     df = cls.calculate_indicators(df)
@@ -140,9 +143,10 @@ class DataService:
                     vix_df = pd.concat(v_data_list, axis=1)
                     vix_df = vix_df[~vix_df.index.duplicated(keep='first')]
                     
-                    # [신규] VIX/VXN도 장중 데이터 필터링 (메인 티커와 기조를 맞춤)
+                    # [신규] VIX/VXN도 장중 데이터 필터링 (마켓 클로즈 여부 반영)
                     if not vix_df.empty and vix_df.index[-1].date() >= today_est:
-                        vix_df = vix_df[vix_df.index.date < today_est]
+                        if not is_market_closed:
+                            vix_df = vix_df[vix_df.index.date < today_est]
                         
                     vix_df = vix_df.ffill().bfill()
             except Exception as e:
