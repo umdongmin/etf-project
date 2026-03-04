@@ -290,9 +290,22 @@ class HistoryLabView:
             bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
             
         st.divider()
-        tab1, tab2, tab3 = st.tabs(["📊 분석 결과 & 상세 로그", "📝 매매 전략 설정", "🚀 AI 최적화 탐색 (Optimizer)"])
+        
+        # [수정] 탭 상태 유지를 위한 세션 상태 기반 탭 시스템 구현
+        tab_list = ["📊 분석 결과 & 상세 로그", "📝 매매 전략 설정", "🚀 AI 최적화 탐색 (Optimizer)"]
+        if 'history_active_tab' not in st.session_state:
+            st.session_state.history_active_tab = tab_list[0]
+            
+        # 가로형 라디오 버튼을 탭처럼 활용 (label_visibility="collapsed"로 깔끔하게)
+        active_tab = st.radio("Navigation", tab_list, 
+                             index=tab_list.index(st.session_state.history_active_tab),
+                             horizontal=True, label_visibility="collapsed")
+        st.session_state.history_active_tab = active_tab
+        
+        st.write("") # 간격 조절
 
-        with tab1:
+        if active_tab == tab_list[0]:
+            # tab1 내용
             if golden_history.empty:
                 st.warning("분석할 데이터가 충분하지 않습니다.")
             else:
@@ -358,7 +371,7 @@ class HistoryLabView:
                             else:
                                 st.info("S3 + 매도신호3 작동 기록이 없습니다.")
 
-        with tab2:
+        elif active_tab == tab_list[1]:
             st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
             c_sel1, c_sel2, _ = st.columns(3)
             use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
@@ -391,7 +404,7 @@ class HistoryLabView:
                     st.success("캐시가 성공적으로 삭제되었습니다.")
                     st.rerun()
 
-        with tab3:
+        elif active_tab == tab_list[2]:
             OptimizerView.render(data_dict, fg_df, vix_df, st.session_state.current_params)
 
     @staticmethod

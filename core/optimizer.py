@@ -22,30 +22,118 @@ class StrategyOptimizer:
         self.db_path = f"sqlite:///{db_dir}/optimization_history.db"
 
     def run_simulation(self, cfg, s_date, e_date, trade_at):
-        """단일 시뮬레이션 수행 및 점수 계산"""
+        """단일 시뮬레이션 수행 및 상세 성과 지표 계산"""
         try:
             hist, _, _ = StrategyEngine.run_golden_strategy(
                 self.data_dict, self.fg_df, self.vix_df, 
                 cfg['leverage_asset'], cfg['base_asset'], 
                 0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
             )
-            if hist.empty: return -999, 0, 0
+            if hist.empty: 
+                return {'score': -999, 'cagr': 0, 'mdd': 0}
+                
             m = calculate_metrics(hist)
             cagr, mdd = m['CAGR']*100, abs(m['MDD']*100)
+            
+            # [정형화 데이터 설계] 다양한 지표를 조합한 커스텀 스코어링 (Calmar Ratio 기반)
             score = cagr - 0.5 * mdd
-            return score, cagr, mdd
+            
+            return {
+                'score': score,
+                'cagr': cagr,
+                'mdd': mdd,
+                'sharpe': m.get('Sharpe', 0),
+                'pf': m.get('Profit_Factor', 0),
+                'win_rate': m.get('Win_Rate', 0) * 100,
+                'max_rec': m.get('Max_Recovery', 0)
+            }
         except Exception as e:
-            return -999, 0, 0
+            print(f"Simulation Error: {e}")
+            return {'score': -999, 'cagr': 0, 'mdd': 0}
 
-    def optimize(self, base_cfg, n_iter, s_date, e_date, targets, trade_at, progress_callback=None):
-        """Optuna 기반 베이지안 최적화 수행"""
+    def _get_ctx_tag(self, leverage, base, targets, wfa_ratio=0.0):
+        """최적화 컨텍스트 고유 태그 생성 (오타 정규화 및 수치 정밀도 보정)Log 확보)"""
+        # [정규화] "벨" 오타를 "밸"로 통일하여 매칭 확률 극대화
+        clean_targets = [t.replace("벨", "밸") for t in targets]
+        tag = f"{leverage}/{base}|{','.join(sorted(clean_targets))}"
+        if wfa_ratio > 0:
+            # 소수점 2자리까지 고정하여 문자열 불일치 방지
+            tag += f"|WFA:{wfa_ratio:.2f}"
+        return tag
+
+    def run_monte_carlo(self, cfg, s_date, e_date, trade_at, n_sim=20):
+        """가격 데이터에 노이즈를 섞어 전략의 생존력을 확률적으로 검증 (몬테카를로)"""
+        results = []
+        import numpy as np
         
-        # 0. 현금 비중 강제 0% 고정 (사용자 요청)
-        base_cfg['cash_ratio_pct'] = 0.0
-        base_cfg['cash_ratio'] = 0.0
+        for _ in range(n_sim):
+            # 1. 데이터에 미세한 노이즈(±0.1%) 추가
+            noisy_data = {}
+            for asset, df in self.data_dict.items():
+                noisy_df = df.copy()
+                # Close 가격에 노이즈 추가
+                noise = np.random.normal(0, 0.001, len(noisy_df)) # 0.1% 표준편차
+                noisy_df['Close'] *= (1 + noise)
+                # Open 가격도 동기화 (간소화)
+                if 'Open' in noisy_df.columns:
+                    noisy_df['Open'] *= (1 + noise)
+                noisy_data[asset] = noisy_df
+            
+            # 2. 노이즈 데이터로 시뮬레이션 수행
+            try:
+                hist, _, _ = StrategyEngine.run_golden_strategy(
+                    noisy_data, self.fg_df, self.vix_df, 
+                    cfg['leverage_asset'], cfg['base_asset'], 
+                    0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
+                )
+                if not hist.empty:
+                    m = calculate_metrics(hist)
+                    results.append(m['CAGR'] * 100)
+            except:
+                continue
         
-        # 1. 베이스라인 성과 측정
-        base_score, b_cagr, b_mdd = self.run_simulation(base_cfg, s_date, e_date, trade_at)
+        if not results:
+            return {'survival_rate': 0, 'avg_cagr': 0, 'low_cagr': 0}
+            
+        results.sort()
+        survival_rate = len([r for r in results if r > 0]) / n_sim * 100
+        return {
+            'survival_rate': survival_rate,
+            'avg_cagr': np.mean(results),
+            'low_cagr': results[int(len(results) * 0.1)] # 하위 10% 성과
+        }
+
+    def optimize(self, base_cfg, n_iter, s_date, e_date, targets, trade_at, target_period="전체", progress_callback=None, wfa_ratio=0.0):
+        """
+        Optuna 기반 베이지안 최적화 수행
+        :param wfa_ratio: 전진 분석 비율 (0.0~0.5). 0보다 크면 s_date~e_date를 IS/OOS로 분할함.
+        """
+        
+        # [중요] 기존 설정을 직접 수정하지 않도록 딥카피 수행 (사이드 이펙트 방지)
+        base_cfg = copy.deepcopy(base_cfg)
+        
+        # [데이터 분할] WFA 모드인 경우 날짜 구간 계산
+        is_s_date, is_e_date = s_date, e_date
+        oos_s_date, oos_e_date = None, None
+        
+        if wfa_ratio > 0:
+            full_s = pd.to_datetime(s_date)
+            full_e = pd.to_datetime(e_date)
+            delta = full_e - full_s
+            split_point = full_s + delta * (1 - wfa_ratio)
+            
+            is_e_date = split_point.strftime('%Y-%m-%d')
+            oos_s_date = (split_point + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            oos_e_date = e_date
+            print(f"WFA Split: IS({is_s_date}~{is_e_date}), OOS({oos_s_date}~{oos_e_date})")
+
+        # [수정] 통합된 태그 생성 메소드 사용
+        ctx_tag = self._get_ctx_tag(base_cfg['leverage_asset'], base_cfg['base_asset'], targets, wfa_ratio)
+        
+        # 1. 베이스라인 성과 측정 (IS 기준)
+        base_res = self.run_simulation(base_cfg, is_s_date, is_e_date, trade_at)
+        base_score = base_res['score']
+        b_cagr, b_mdd = base_res['cagr'], base_res['mdd']
         
         # 2. Optuna 스터디 생성 또는 불러오기 (SQLite 연동)
         study = optuna.create_study(
@@ -55,6 +143,17 @@ class StrategyOptimizer:
             load_if_exists=True,
             sampler=optuna.samplers.TPESampler(seed=42) # 학습형 샘플러 (TPE)
         )
+        
+        # [신규] 진행률 계산을 위한 시작 카운트 기록
+        start_count = len(study.trials)
+
+        # 4. 베이스라인을 첫 번째 시도(Seed)로 주입 시도 (공공 기록 및 비교용)
+        try:
+            base_params = self._extract_params(base_cfg, targets)
+            if base_params:
+                study.enqueue_trial(base_params)
+        except Exception as e:
+            print(f"Error enqueuing base trial: {e}")
 
         # 3. 목표 함수 정의
         def objective(trial):
@@ -80,12 +179,12 @@ class StrategyOptimizer:
                     cand['buy_signals'][i]['di_plus_cross'] = trial.suggest_categorical(f"{prefix}di_plus_cross", [True, False])
                     cand['buy_signals'][i]['use_sar'] = trial.suggest_categorical(f"{prefix}use_sar", [True, False])
                     
-                    # 수치 탐색
-                    cand['buy_signals'][i]['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", 25, 45)
+                    # 수치 탐색 (베이스라인 포용을 위해 범위 확장)
+                    cand['buy_signals'][i]['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", 15, 50)
                     if cand['buy_signals'][i]['use_willr']:
-                        cand['buy_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -90, -70)
+                        cand['buy_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -95, -60)
                     if cand['buy_signals'][i]['use_adx']:
-                        cand['buy_signals'][i]['adx_val'] = trial.suggest_int(f"{prefix}adx_val", 20, 50)
+                        cand['buy_signals'][i]['adx_val'] = trial.suggest_int(f"{prefix}adx_val", 10, 60)
 
             if "매도 시그널 (Full)" in targets:
                 # 매도 신호 (1~4)
@@ -104,14 +203,14 @@ class StrategyOptimizer:
                     cand['sell_signals'][i]['use_sar'] = trial.suggest_categorical(f"{prefix}use_sar", [True, False])
                     cand['sell_signals'][i]['use_willr'] = trial.suggest_categorical(f"{prefix}use_willr", [True, False])
 
-                    # 수치 탐색
-                    cand['sell_signals'][i]['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", 60, 85)
+                    # 수치 탐색 (베이스라인 포용을 위해 범위 확장)
+                    cand['sell_signals'][i]['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", 50, 95)
                     if cand['sell_signals'][i]['use_chandelier']:
-                        cand['sell_signals'][i]['chandelier_mult'] = trial.suggest_float(f"{prefix}chan_mult", 2.0, 5.0)
+                        cand['sell_signals'][i]['chandelier_mult'] = trial.suggest_float(f"{prefix}chan_mult", 1.5, 6.0)
                     if cand['sell_signals'][i]['use_willr']:
-                        cand['sell_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -30, -10)
+                        cand['sell_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -40, -5)
 
-            if "리벨런싱 및 ATR 변동성 (Full)" in targets: # UI 레이블 변경 예정
+            if "리밸런싱 및 ATR 변동성 (Full)" in targets: # 오타 수정: 벨 -> 밸
                 # 고정 비율
                 cand['use_fixed_reb'] = trial.suggest_categorical("use_fixed", [True, False])
                 if cand['use_fixed_reb']:
@@ -162,70 +261,201 @@ class StrategyOptimizer:
                 cand['use_set_sl'] = trial.suggest_categorical("use_set_sl", [True, False])
                 cand['set_sl_limit'] = trial.suggest_int("set_sl_lim", -20, -5)
 
-            score, _, _ = self.run_simulation(cand, s_date, e_date, trade_at)
+            # [Phase 2] 데이터 정형화: Trial 결과 상세 지표 산출 및 DB 저장
+            # 훈련(IS) 구간 성과 측정
+            res = self.run_simulation(cand, is_s_date, is_e_date, trade_at)
+            
+            # [WFA] 검증(OOS) 구간 성과는 최적화 완료 후 Top 결과에 대해서만 수행하거나, 
+            # 혹은 실시간으로 기록할지 결정. (여기서는 실시간 기록으로 설계)
+            oos_res = None
+            if wfa_ratio > 0:
+                oos_res = self.run_simulation(cand, oos_s_date, oos_e_date, trade_at)
+                # WFE (Walk Forward Efficiency) 계산: OOS CAGR / IS CAGR
+                wfe = (oos_res['cagr'] / res['cagr']) if res['cagr'] > 0 else 0
+                trial.set_user_attr("oos_cagr", oos_res['cagr'])
+            # SQLite DB(Optuna)에 영구 기록 (Datafication)
+            # [수정] 대시보드 필터링을 위한 기간 및 컨텍스트 정보 추가 저장
+            # "전체 (2010~현재)" -> "전체", "최근 5년" -> "최근5년" 등으로 변별력 확보
+            period_label = target_period.replace(" ", "").split("(")[0] 
+            
+            trial.set_user_attr("period", period_label)
+            trial.set_user_attr("ctx_tag", ctx_tag)
+            # 컨텍스트 저장
+            trial.set_user_attr("cagr", res['cagr'])
+            trial.set_user_attr("mdd", res['mdd'])
+            trial.set_user_attr("sharpe", res.get('sharpe', 0))
+            trial.set_user_attr("profit_factor", res.get('pf', 0))
+            trial.set_user_attr("win_rate", res.get('win_rate', 0))
+            trial.set_user_attr("max_recovery", res.get('max_rec', 0))
+            if wfa_ratio > 0:
+                trial.set_user_attr("wfa_mode", True)
+            
+            score = res['score']
             
             if progress_callback:
                 try:
                     # 완료된 trial이 없을 때 best_value 접근 시 ValueError 발생 대응
                     best_v = study.best_value
                 except (ValueError, RuntimeError):
-                    best_v = score
-                progress_callback(trial.number + 1, n_iter, best_v)
-                
+                    best_v = res['score']
+                # [수정] 외부 요인(DB 누적 데이터)에 영향받지 않는 내부 세션 카운터 사용
+                self._current_iter += 1
+                progress_callback(self._current_iter, n_iter, best_v)
+            
             return score
 
-        # 4. 베이스라인을 첫 번째 시도(Seed)로 주입 시도 (최초 1회만)
-        # 생략 (Optuna sampler가 자동으로 보정하도록 설계)
+        # [신규] 세션 내 진행률 표시를 위한 전용 카운터
+        self._current_iter = 0
 
         # 5. 최적화 실행
         study.optimize(objective, n_trials=n_iter)
 
-        # 6. 결과 정리 및 반환
+        # 6. 결과 정리 및 반환 (현재 기간 필터링 적용)
+        valid_trials = [t for t in study.trials if t.value is not None and t.value > -900]
+        
+        # [수정] 결과 도출 시 기간 + 컨텍스트 필터링 엄격하게 적용 (엉뚱한 과거 데이터 차단)
+        p_filter = target_period.split(' ')[0]
+        filtered_trials = []
+        for t in valid_trials:
+            t_period = t.user_attrs.get("period")
+            t_ctx = t.user_attrs.get("ctx_tag")
+            
+            # 기간 매칭 (전체이거나 일치하는 경우)
+            period_match = (p_filter == "전체" and t_period in ["전체", None]) or (t_period == p_filter)
+            # 컨텍스트 매칭 (신규 데이터만 보여주거나 컨텍스트가 없는 과거 데이터는 제외)
+            ctx_match = (t_ctx == ctx_tag)
+            
+            if period_match and ctx_match:
+                filtered_trials.append(t)
+            
+        filtered_trials.sort(key=lambda x: x.value, reverse=True)
+        
         results = []
-        for t in study.trials:
-            if t.value is not None and t.value > -900:
-                cfg = copy.deepcopy(base_cfg)
-                p = t.params
-                
-                # [복원 로직] 탐색된 파라미터를 cfg에 다시 매핑
-                # 이 부분은 objective 함수와 동일한 로직으로 p 값을 cfg에 주입
-                for key, val in p.items():
-                    # 매수 신호 처리
-                    if key.startswith('b') and '_rsi_val' in key:
-                        idx = int(key.split('_')[0][1:]) - 1
-                        cfg['buy_signals'][idx]['rsi_val'] = val
-                    elif key.startswith('b') and '_' in key:
-                        idx = int(key.split('_')[0][1:]) - 1
-                        field = "_".join(key.split('_')[1:])
-                        cfg['buy_signals'][idx][field] = val
-                    # 매도 신호 처리
-                    elif key.startswith('s') and not key.startswith('s3') and '_' in key:
-                        idx = int(key.split('_')[0][1:]) - 1
-                        field = "_".join(key.split('_')[1:])
-                        if field == "chan_mult": field = "chandelier_mult"
-                        cfg['sell_signals'][idx][field] = val
-                    # S3 보호 처리
-                    elif key.startswith('s3_'):
-                        parts = key.split('_')
-                        idx, field = int(parts[1]) - 1, parts[2]
-                        field_map = {'drop':'use_daily_drop','ma60':'use_ma60','ma200':'use_ma200','vxn':'use_vxn_jump','gap':'use_gap_down','acc':'use_drop_acc'}
-                        cfg['s3_protection'][idx][field_map[field]] = val
-                    # 기타 공통 변수
-                    else:
-                        map_dict = {'p_rsi_s1':'panic_rsi_s1','p_rsi_s2':'panic_rsi_s2','p_rsi_s3':'panic_rsi_s3','sl_ctrl_lim':'sl_control_limit','sl_ctrl':'use_sl_control','set_sl_lim':'set_sl_limit'}
-                        cfg[map_dict.get(key, key)] = val
-                
-                # 패닉 RSI 하위 시그널 동기화
-                if 'panic_rsi_s1' in cfg and 'panic_buy_signals' in cfg:
-                    cfg['panic_buy_signals'][0]['rsi_val'] = cfg['panic_rsi_s1']
-                    cfg['panic_buy_signals'][1]['rsi_val'] = cfg['panic_rsi_s2']
-                    cfg['panic_buy_signals'][2]['rsi_val'] = cfg['panic_rsi_s3']
+        for t in filtered_trials[:10]: # 상위 10개만 복원
+            results.append(self._reconstruct_config(base_cfg, t, s_date, e_date, trade_at, is_s_date, is_e_date, oos_s_date, oos_e_date))
 
-                s, c, m = self.run_simulation(cfg, s_date, e_date, trade_at)
-                results.append({'cfg': cfg, 'score': s, 'cagr': c, 'mdd': m})
-
-        results.sort(key=lambda x: x['score'], reverse=True)
         return results, base_score, b_cagr, b_mdd
+
+    def get_top_results(self, base_cfg, n_top=5, s_date=None, e_date=None, trade_at='종가', target_period=None, targets=None, wfa_ratio=0.0):
+        """DB에서 현재까지의 상위 성과를 추출 (탐색 중단/시작 전 용도)"""
+        try:
+            study = optuna.load_study(study_name="tqqq_strategy_optimization", storage=self.db_path)
+            
+            # [수정] 기간 + 컨텍스트 필터링 로직 추가
+            valid_trials = [t for t in study.trials if t.value is not None and t.value > -900]
+            
+            # 컨텍스트 태그 생성 (targets가 제공된 경우에만 강화된 필터링 수행)
+            ctx_tag = None
+            if targets:
+                ctx_tag = self._get_ctx_tag(base_cfg['leverage_asset'], base_cfg['base_asset'], targets, wfa_ratio)
+            
+            filtered_trials = []
+            if target_period:
+                # [수정] 동일한 레이블 생성 로직 적용
+                p_filter = target_period.replace(" ", "").split("(")[0]
+                for t in valid_trials:
+                    t_period = t.user_attrs.get("period")
+                    t_ctx = t.user_attrs.get("ctx_tag")
+                    
+                    # 레거시 호환: 이전 "최근" 태그도 허용 (단, "최근"일 때는 기간 매칭 완화)
+                    period_match = (p_filter == "전체" and t_period in ["전체", None]) or \
+                                   (t_period == p_filter) or \
+                                   (p_filter.startswith("최근") and t_period == "최근")
+                    # 컨텍스트 정규화 비교 (과거 오타 데이터 포함)
+                    t_ctx_norm = t_ctx.replace("벨", "밸") if t_ctx else None
+                    ctx_tag_norm = ctx_tag.replace("벨", "밸") if ctx_tag else None
+                    
+                    ctx_match = True if not ctx_tag else (t_ctx_norm == ctx_tag_norm)
+                    
+                    if period_match and ctx_match:
+                        filtered_trials.append(t)
+            else:
+                filtered_trials = valid_trials
+                
+            filtered_trials.sort(key=lambda x: x.value, reverse=True)
+            
+            results = []
+            for t in filtered_trials[:n_top]:
+                results.append(self._reconstruct_config(base_cfg, t, s_date, e_date, trade_at))
+            return results
+        except Exception as e:
+            print(f"Error getting top results: {e}")
+            return []
+
+    def _reconstruct_config(self, base_cfg, trial, s_date=None, e_date=None, trade_at='종가', is_s=None, is_e=None, oos_s=None, oos_e=None):
+        """Trial 정보를 바탕으로 전체 전략 설정 복원 및 정밀 재시뮬레이션"""
+        import copy
+        cfg = copy.deepcopy(base_cfg)
+        p = trial.params
+        
+        for key, val in p.items():
+            # 1. 매수 신호 (b1_, b2_, ...)
+            if key.startswith('b') and '_' in key and key[1].isdigit():
+                parts = key.split('_')
+                idx = int(parts[0][1:]) - 1
+                field = "_".join(parts[1:])
+                cfg['buy_signals'][idx][field] = val
+                
+            # 2. S3 보호 조건 (s3_1_, s3_2_, ...) 
+            # 이 키는 s3_로 시작하고 두 번째 파트가 숫자여야 함 (예: s3_1_drop)
+            elif key.startswith('s3_') and len(key.split('_')) >= 3 and key.split('_')[1].isdigit():
+                parts = key.split('_')
+                idx, field = int(parts[1]) - 1, parts[2]
+                field_map = {'drop':'use_daily_drop','ma60':'use_ma60','ma200':'use_ma200','vxn':'use_vxn_jump','gap':'use_gap_down','acc':'use_drop_acc'}
+                cfg['s3_protection'][idx][field_map[field]] = val
+                
+            # 3. 매도 신호 (s1_, s2_, s3_, ...)
+            # s3_ 보호 조건에 걸리지 않은 s로 시작하는 시그널 키들
+            elif key.startswith('s') and '_' in key and key[1].isdigit():
+                parts = key.split('_')
+                idx = int(parts[0][1:]) - 1
+                field = "_".join(parts[1:])
+                # [매핑 오류 수정] UI에서 사용하는 단축키와 실제 설정 키 매칭
+                if field == "chan_mult": field = "chandelier_mult"
+                if field == "use_chan": field = "use_chandelier"
+                cfg['sell_signals'][idx][field] = val
+            
+            # 4. 기타 공통 변수 (p_rsi_s1, sl_ctrl_lim, 등)
+            else:
+                map_dict = {
+                    'p_rsi_s1':'panic_rsi_s1',
+                    'p_rsi_s2':'panic_rsi_s2',
+                    'p_rsi_s3':'panic_rsi_s3',
+                    'sl_ctrl_lim':'sl_control_limit',
+                    'use_sl_ctrl':'use_sl_control',
+                    'use_vxn':'use_vxn_safety',
+                    'set_sl_limit':'set_sl_limit',
+                    'use_set_sl':'use_set_sl'
+                }
+                cfg[map_dict.get(key, key)] = val
+        
+        if 'panic_rsi_s1' in cfg and 'panic_buy_signals' in cfg:
+            for i, rsi_val in enumerate([cfg.get('panic_rsi_s1'), cfg.get('panic_rsi_s2'), cfg.get('panic_rsi_s3')]):
+                if i < len(cfg['panic_buy_signals']):
+                    cfg['panic_buy_signals'][i]['rsi_val'] = rsi_val
+
+        # 정밀 재시뮬레이션 수행
+        res = self.run_simulation(cfg, s_date, e_date, trade_at)
+        
+        # [WFA] 추가 정보가 있다면 기록
+        final_res = {
+            'cfg': cfg,
+            'score': res['score'],
+            'cagr': trial.user_attrs.get('cagr', res['cagr']),
+            'mdd': trial.user_attrs.get('mdd', res['mdd']),
+            'sharpe': trial.user_attrs.get('sharpe', res.get('sharpe', 0)),
+            'pf': trial.user_attrs.get('profit_factor', res.get('pf', 0)),
+            'win_rate': trial.user_attrs.get('win_rate', res.get('win_rate', 0)),
+            'max_rec': trial.user_attrs.get('max_recovery', res.get('max_rec', 0)),
+            # WFA 관련 지표
+            'oos_cagr': trial.user_attrs.get('oos_cagr', 0),
+            'oos_mdd': trial.user_attrs.get('oos_mdd', 0),
+            'wfe': trial.user_attrs.get('wfe', 0),
+            'wfa_mode': trial.user_attrs.get('wfa_mode', False),
+            # MC 관련 (필요 시 복원)
+            'mc': trial.user_attrs.get('mc_survival', 0)
+        }
+        return final_res
 
     def get_total_trials(self):
         """축적된 총 분석 횟수 반환"""
@@ -234,3 +464,83 @@ class StrategyOptimizer:
             return len(study.trials)
         except:
             return 0
+    def _extract_params(self, cfg, targets):
+        """설정 딕셔너리에서 Optuna 파라미터 형식으로 추출"""
+        params = {}
+        
+        if "매수 시그널 (Full)" in targets:
+            for i, sig in enumerate(cfg['buy_signals'][:3]):
+                p = f"b{i+1}_"
+                params[f"{p}rsi_cross"] = sig['rsi_cross']
+                params[f"{p}rsi_inc"] = sig['rsi_inc']
+                params[f"{p}macd_inc"] = sig['macd_inc']
+                params[f"{p}macd_signal_below"] = sig['macd_signal_below']
+                params[f"{p}macd_golden"] = sig['macd_golden']
+                params[f"{p}use_adx"] = sig['use_adx']
+                params[f"{p}use_willr"] = sig['use_willr']
+                params[f"{p}di_plus_above"] = sig['di_plus_above']
+                params[f"{p}di_plus_cross"] = sig['di_plus_cross']
+                params[f"{p}use_sar"] = sig['use_sar']
+                params[f"{p}rsi_val"] = sig['rsi_val']
+                if sig['use_willr']: params[f"{p}willr_val"] = sig['willr_val']
+                if sig['use_adx']: params[f"{p}adx_val"] = sig['adx_val']
+
+        if "매도 시그널 (Full)" in targets:
+            for i, sig in enumerate(cfg['sell_signals'][:4]):
+                p = f"s{i+1}_"
+                params[f"{p}rsi_dead"] = sig['rsi_dead']
+                params[f"{p}rsi_dec"] = sig['rsi_dec']
+                params[f"{p}macd_dec"] = sig['macd_dec']
+                params[f"{p}macd_signal_above"] = sig['macd_signal_above']
+                params[f"{p}macd_dead"] = sig['macd_dead']
+                params[f"{p}di_minus_above"] = sig['di_minus_above']
+                params[f"{p}di_minus_cross"] = sig['di_minus_cross']
+                params[f"{p}use_chan"] = sig['use_chandelier']
+                params[f"{p}use_sar"] = sig['use_sar']
+                params[f"{p}use_willr"] = sig['use_willr']
+                params[f"{p}rsi_val"] = sig['rsi_val']
+                if sig['use_chandelier']: params[f"{p}chan_mult"] = sig['chandelier_mult']
+                if sig['use_willr']: params[f"{p}willr_val"] = sig['willr_val']
+
+        if "리밸런싱 및 ATR 변동성 (Full)" in targets: # 오타 수정: 벨 -> 밸
+            params["use_fixed"] = cfg['use_fixed_reb']
+            if cfg['use_fixed_reb']:
+                params["buy_reb_up"] = cfg['buy_reb_up']
+                params["buy_reb_down"] = cfg['buy_reb_down']
+                params["sell_reb_up"] = cfg['sell_reb_up']
+                params["sell_reb_down"] = cfg['sell_reb_down']
+            params["use_atr"] = cfg['use_atr_reb']
+            if cfg['use_atr_reb']:
+                params["atr_p_buy"] = cfg['atr_period_buy']
+                params["atr_p_sell"] = cfg['atr_period_sell']
+                params["atr_m_buy_up"] = cfg['atr_mult_buy_up']
+                params["atr_m_buy_down"] = cfg['atr_mult_buy_down']
+                params["atr_m_sell"] = cfg['atr_mult_sell']
+
+        if "패닉 가속 (MA/RSI)" in targets:
+            params["use_panic"] = cfg['use_panic']
+            if cfg['use_panic']:
+                params["panic_ma"] = cfg['panic_ma']
+                params["p_rsi_s1"] = cfg['panic_rsi_s1']
+                params["p_rsi_s2"] = cfg['panic_rsi_s2']
+                params["p_rsi_s3"] = cfg['panic_rsi_s3']
+
+        if "S3 보호 조건 (Gap/Acc)" in targets:
+            for i, prot in enumerate(cfg['s3_protection']):
+                p = f"s3_{i+1}_"
+                params[f"{p}drop"] = prot['use_daily_drop']
+                params[f"{p}ma60"] = prot['use_ma60']
+                params[f"{p}ma200"] = prot['use_ma200']
+                params[f"{p}vxn"] = prot['use_vxn_jump']
+                params[f"{p}gap"] = prot['use_gap_down']
+                params[f"{p}acc"] = prot['use_drop_acc']
+
+        if "방어 및 대피 시스템 (VXN/손절)" in targets:
+            params["use_vxn"] = cfg['use_vxn_safety']
+            params["vxn_exit"] = cfg['vxn_exit']
+            params["use_sl_ctrl"] = cfg['use_sl_control']
+            params["sl_ctrl_lim"] = cfg['sl_control_limit']
+            params["use_set_sl"] = cfg['use_set_sl']
+            params["set_sl_lim"] = cfg['set_sl_limit']
+
+        return params
