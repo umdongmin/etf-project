@@ -17,7 +17,7 @@ def deep_tuple(obj):
     return obj
 
 @st.cache_data
-def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
+def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, _news_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
     # 튜플을 다시 딕셔너리로 복구하여 엔진 실행 (재귀적으로 처리)
     def to_dict(tup):
         if not isinstance(tup, tuple): return tup
@@ -30,7 +30,7 @@ def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d
     _p = to_dict(params_tuple)
     _s = to_dict(smart_tuple)
     # [수정] 엔진이 3개(history, closed_trades, sell4_events)의 값을 반환하므로 전체 반환
-    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vix_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
+    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vix_df, _news_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
 
 class HistoryLabView:
     """역사적 마켓 랩 화면 UI 구성 클래스"""
@@ -54,7 +54,7 @@ class HistoryLabView:
     }
 
     @staticmethod
-    def render(data_dict, fg_df, vix_df, leverage_asset, base_asset, trade_at, params, smart_params=None, salt="v2.3 (CrashLogs)"):
+    def render(data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, trade_at, params, smart_params=None, salt="v2.3 (CrashLogs)"):
         st.header("📜 매매 전략 설정 및 역사적 분석")
         st.caption("전략을 저장하거나 불러오고, 2010년부터 현재까지의 성과를 분석합니다. [v2.3]")
 
@@ -271,7 +271,7 @@ class HistoryLabView:
             smart_tuple = deep_tuple(smart_params)
             
             golden_history, closed_trades, all_signal_events = get_cached_strategy_result(
-                data_dict, fg_df, vix_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
+                data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
                 start_date, end_date, params_tuple, trade_at, smart_tuple, salt
             )
             
@@ -405,7 +405,7 @@ class HistoryLabView:
                     st.rerun()
 
         elif active_tab == tab_list[2]:
-            OptimizerView.render(data_dict, fg_df, vix_df, st.session_state.current_params)
+            OptimizerView.render(data_dict, fg_df, vix_df, news_df, st.session_state.current_params)
 
     @staticmethod
     def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None, selected_comparisons=[]):

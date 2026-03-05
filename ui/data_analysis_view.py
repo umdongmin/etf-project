@@ -6,8 +6,9 @@ from plotly.subplots import make_subplots
 class DataAnalysisView:
     @staticmethod
     def render(signal_logs, start_date=None, end_date=None, base_df=None, base_name="QQQ", 
-               golden_history=None, closed_trades=None, bh_histories=None):
-        st.header("📊 데이터 분석 센터")
+               golden_history=None, closed_trades=None, bh_histories=None, hide_header=False):
+        if not hide_header:
+            st.header("📊 데이터 분석 센터")
         
         # 1. 시그널 선택 라디오 / 콤보박스
         signal_types = [

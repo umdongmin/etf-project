@@ -110,7 +110,7 @@ try:
             print(f"📡 분석 대상: {fetch_start_date} ~ 오늘")
             
             # 2-1. 데이터 수집
-            data_raw, fg_raw, vix_raw, _, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
+            data_raw, fg_raw, vix_raw, _, news_raw, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
             all_tickers = list(data_raw.keys())
             # VIX/VXN 실시간 조회를 위해 티커 추가
             preview_tickers = all_tickers + ['^VIX', '^VXN']
@@ -120,7 +120,7 @@ try:
             data, vix, fg = DataService.inject_virtual_close(data_raw, current_prices, vix_df=vix_raw, fg_df=fg_raw)
 
             gh, _, events = StrategyEngine.run_golden_strategy(
-                data, fg, vix, 
+                data, fg, vix, news_raw,
                 strat.get('leverage_asset', 'TQQQ'), 
                 strat.get('base_asset', 'QQQ'),
                 0.0, 

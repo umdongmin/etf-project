@@ -3,7 +3,9 @@ import pandas_ta as ta
 import yfinance as yf
 import requests
 import datetime
+import os
 import streamlit as st
+from core.news_service import NewsService
 
 class DataService:
     """데이터 수집 및 전처리를 담당하는 클래스"""
@@ -200,8 +202,18 @@ class DataService:
         
         macro_df = pd.DataFrame([macro_data_map])
         fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        # [신규] 뉴스 심리 데이터 로드
+        news_df = pd.DataFrame()
+        try:
+            news_svc = NewsService()
+            if os.path.exists(news_svc.db_path):
+                news_df = news_svc.get_sentiment_data()
+        except Exception as e:
+            print(f"News Data Load Error: {e}")
+
         print(f"데이터 수집 완료 ({len(data_dict)} 개 티커)")
-        return data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time
+        return data_dict, fg_df, vix_df, macro_df, news_df, fetch_status, fetch_time
 
     @classmethod
     def fetch_current_prices(cls, tickers):

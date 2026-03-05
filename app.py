@@ -12,12 +12,10 @@ import os
 from core.data import DataService
 from core.storage import StrategyStorage
 from core.engine import StrategyEngine
-from ui.market_view import MarketView
 from ui.backtest_view import BacktestView
 from ui.history_view import HistoryLabView
-from ui.chart_view import ChartView
-from ui.tester_view import TesterView
-from ui.data_analysis_view import DataAnalysisView
+from ui.quant_lab_view import QuantLabView
+from ui.intelligence_view import IntelligenceView
 from utils.metrics import calculate_metrics
 
 class GoldenStrategyApp:
@@ -36,7 +34,12 @@ class GoldenStrategyApp:
     def run(self):
         # 사이드바 공통 메뉴
         st.sidebar.title("🚀 Golden Strategy v3.0")
-        menu = st.sidebar.radio("메인 메뉴", ["📊 실시간 백테스트", "📈 인사이트 센터", "📜 매매 전략 설정", "📰 주요 마켓 이슈", "📉 데이터 분석"])
+        menu = st.sidebar.radio("메인 메뉴", [
+            "📊 실시간 백테스트", 
+            "🔬 퀀트 분석 연구실", 
+            "📜 매매 전략 설정", 
+            "🧠 AI 마켓 인텔리전스"
+        ])
         
         # 세션 상태 초기화
         if 'current_params' not in st.session_state:
@@ -103,7 +106,7 @@ class GoldenStrategyApp:
             with st.spinner('실시간 데이터를 가져오는 중...'):
                 st.session_state.global_data = DataService.load_all_data()
         
-        data_dict, fg_df, vix_df, macro_df, fetch_status, fetch_time = st.session_state.global_data
+        data_dict, fg_df, vix_df, macro_df, news_df, fetch_status, fetch_time = st.session_state.global_data
         
         if not data_dict:
             st.error("데이터 로드 실패")
@@ -178,7 +181,7 @@ class GoldenStrategyApp:
                         try:
                             # 3. 오늘자 신호 예측
                             pred = StrategyEngine.predict_today_signal(
-                                v_dict, v_fg_df, v_vix_df, cp['leverage_asset'], cp['base_asset'], 
+                                v_dict, v_fg_df, v_vix_df, news_df, cp['leverage_asset'], cp['base_asset'], 
                                 cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params
                             )
                         except Exception as e:
@@ -205,42 +208,21 @@ class GoldenStrategyApp:
                     is_semi = cp['base_asset'] in ['SOXX', 'USD', 'SOXL'] or cp['leverage_asset'] in ['SOXX', 'USD', 'SOXL']
                     bench_tickers = ['SOXX', 'USD', 'SOXL'] if is_semi else ['QQQ', 'QLD', 'TQQQ']
                     bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in bench_tickers}
-                    golden_history, closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params=smart_params)
+                    golden_history, closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, news_df, cp['leverage_asset'], cp['base_asset'], cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params=smart_params)
                     
                 BacktestView.render_results(golden_history, bh_histories, closed_trades, cp['base_asset'], cp['leverage_asset'], smart_params=smart_params)
             else:
                 st.error("데이터 로드 실패")
-        elif menu == "📈 인사이트 센터":
-            ChartView.render(data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, comparison_list=st.session_state.comparison_list)
+        elif menu == "🔬 퀀트 분석 연구실":
+            QuantLabView.render(
+                data_dict, fg_df, vix_df, news_df, 
+                cp['leverage_asset'], cp['base_asset'], cp['trade_at'], 
+                cp, smart_params=smart_params, start_d=start_d, end_d=end_d
+            )
         elif menu == "📜 매매 전략 설정":
-            HistoryLabView.render(data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, salt="v2.3 (CrashLogs)")
-        elif menu == "📰 주요 마켓 이슈":
-            MarketView.render(data_dict, macro_df, fetch_status, fetch_time, fg_df)
-        elif menu == "📉 데이터 분석":
-            if 'QQQ' in data_dict:
-                with st.spinner('데이터 분석 준비 중...'):
-                    # 벤치마크 데이터 생성 (기록 조회용)
-                    is_semi = cp['base_asset'] in ['SOXX', 'USD', 'SOXL'] or cp['leverage_asset'] in ['SOXX', 'USD', 'SOXL']
-                    bench_tickers = ['SOXX', 'USD', 'SOXL'] if is_semi else ['QQQ', 'QLD', 'TQQQ']
-                    bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, None, None) for t in bench_tickers}
-                    
-                    golden_history, closed_trades, signal_logs = StrategyEngine.run_golden_strategy(
-                        data_dict, fg_df, vix_df, cp['leverage_asset'], cp['base_asset'], 
-                        cash_ratio, None, None, cp, cp['trade_at'], smart_params=smart_params
-                    )
-                    
-                DataAnalysisView.render(
-                    signal_logs, 
-                    start_d, 
-                    end_d, 
-                    base_df=data_dict.get(cp['base_asset']), 
-                    base_name=cp['base_asset'],
-                    golden_history=golden_history,
-                    closed_trades=closed_trades,
-                    bh_histories=bh_histories
-                )
-            else:
-                st.error("데이터 로드 실패")
+            HistoryLabView.render(data_dict, fg_df, vix_df, news_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, salt="v2.3 (CrashLogs)")
+        elif menu == "🧠 AI 마켓 인텔리전스":
+            IntelligenceView.render()
 
 if __name__ == "__main__":
     try:

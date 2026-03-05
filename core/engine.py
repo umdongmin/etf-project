@@ -8,7 +8,7 @@ class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @st.cache_data(ttl=3600, show_spinner=False)
     @staticmethod
-    def run_golden_strategy(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params=None, trade_at="종가", smart_params=None, salt=None):
+    def run_golden_strategy(data_dict, fg_df, vix_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None):
         if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame(), []
         
         # [신규] 파라미터 정규화 (JSON 로드 시 중첩된 params/smart_params 제거 및 최상위 병합)
@@ -47,6 +47,13 @@ class StrategyEngine:
                 if col in vix_clean.columns:
                     # 데이터가 있는 날짜만 가져오고 빈 자리는 전방 채우기(ffill)
                     combined[col] = vix_clean[col].reindex(combined.index, method='ffill')
+
+        # [신규] AI 뉴스 심리 데이터 병합
+        if news_df is not None and not news_df.empty:
+            news_clean = news_df[~news_df.index.duplicated(keep='first')].sort_index()
+            for col in ['sentiment', 'impact']:
+                if col in news_clean.columns:
+                    combined[f'News_{col.capitalize()}'] = news_clean[col].reindex(combined.index, method='ffill')
         
         # [추가] 필수 컬럼 부재 시 기본값으로 생성 (KeyError 방지)
         if 'FG' not in combined.columns: combined['FG'] = 50.0
@@ -56,6 +63,9 @@ class StrategyEngine:
         if 'DMP' not in combined.columns: combined['DMP'] = 0.0
         if 'DMN' not in combined.columns: combined['DMN'] = 0.0
         if 'SAR' not in combined.columns: combined['SAR'] = 0.0
+        # [신규] 뉴스 지표 기본값 (중립)
+        if 'News_Sentiment' not in combined.columns: combined['News_Sentiment'] = 0.0
+        if 'News_Impact' not in combined.columns: combined['News_Impact'] = 0.1
         
         macd_col = [c for c in combined.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
         signal_col = [c for c in combined.columns if 'MACDs_' in c]
@@ -454,6 +464,18 @@ class StrategyEngine:
                         c &= ((row.get('Prev_Close', 0) < row.get('Prev_SAR', 0)) and (price > row.get('SAR', 0)))
                         a = True
                         rs.append("파라볼릭SAR 상향돌파")
+
+                    # [신규] AI 뉴스 심리 조건 추가
+                    if bp.get('use_news_sentiment'):
+                        op = bp.get('news_op', '>')
+                        val = bp.get('news_val', 0.1)
+                        n_sent = row.get('News_Sentiment', 0)
+                        if op == '>': c &= (n_sent > val)
+                        elif op == '<': c &= (n_sent < val)
+                        elif op == '>=': c &= (n_sent >= val)
+                        elif op == '<=': c &= (n_sent <= val)
+                        a = True
+                        rs.append(f"AI뉴스심리{op}{val}")
 
                     return a, c, rs
 
@@ -1176,6 +1198,8 @@ class StrategyEngine:
                 'DMN': row.get('DMN', 0),
                 'WILLR': row.get('WILLR', 0),
                 'SAR': row.get('SAR', 0),
+                'News_Sentiment': row.get('News_Sentiment', 0), # [신규]
+                'News_Impact': row.get('News_Impact', 0), # [신규]
                 'Smart_Mode': smart_reason,
                 'SMA200': row.get('SMA200', 0),
                 'SMA60': row.get('SMA60', 0),
@@ -1200,7 +1224,7 @@ class StrategyEngine:
         return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades), signal_events
 
     @staticmethod
-    def predict_today_signal(data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params, trade_at, smart_params):
+    def predict_today_signal(data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params, trade_at, smart_params):
         """가상 종가가 주입된 데이터를 바탕으로 '오늘' 발생할 예상 신호만 추출"""
         try:
             # [수정] 프리뷰 시에는 모든 가상 데이터를 시뮬레이션에 포함시키기 위해 종료일 필터를 제거(None)
@@ -1208,7 +1232,7 @@ class StrategyEngine:
             dyn_salt = f"preview_{datetime.datetime.now().strftime('%Y%m%d%H%M')}"
             
             golden_history, _, signal_events = StrategyEngine.run_golden_strategy(
-                data_dict, fg_df, vix_df, leverage_asset, base_asset, cash_ratio, 
+                data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, cash_ratio, 
                 start_date, None, params, trade_at, smart_params, salt=dyn_salt
             )
             

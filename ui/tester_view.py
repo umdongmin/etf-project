@@ -45,8 +45,11 @@ class TesterView:
                             'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
                             'di_plus_above': st.checkbox(f"매수 우세 상태유지 (DI+ > DI-) {i}", value=p.get('di_plus_above', False), key=f"b_di_plus_above_{i}"),
                             'di_plus_cross': st.checkbox(f"DI+ 골든크로스 순간 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
-                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
-                        })
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}"),
+                            'use_news_sentiment': st.checkbox(f"AI 뉴스 심리 필터 {i}", value=p.get('use_news_sentiment', False), key=f"b_news_use_{i}"),
+                            'news_op': st.selectbox(f"AI 뉴스 조건식 {i}", [">", ">=", "<", "<="], index=[">", ">=", "<", "<="].index(p.get('news_op', '>')), key=f"b_news_op_{i}"),
+                            'news_val': st.number_input(f"AI 뉴스 임계값 {i} (-1.0~1.0)", -1.0, 1.0, float(p.get('news_val', 0.1)), 0.1, key=f"b_news_val_{i}")
+                    })
                     else: # B1: RSI 골든크로스 + MACD 상승
                         buy_signals.append({
                             # [신규] RSI 1차 대기(알람) 기능 추가
@@ -67,8 +70,11 @@ class TesterView:
                             'willr_val': st.number_input(f"W%R 상향 기준값 {i}", -100, 0, p.get('willr_val', -80), key=f"b_willr_val_{i}"),
                             'di_plus_above': st.checkbox(f"매수 우세 상태유지 (DI+ > DI-) {i}", value=p.get('di_plus_above', False), key=f"b_di_plus_above_{i}"),
                             'di_plus_cross': st.checkbox(f"DI+ 골든크로스 순간 (DI+ > DI-) {i}", value=p.get('di_plus_cross', False), key=f"b_di_plus_cross_{i}"),
-                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}")
-                        })
+                            'use_sar': st.checkbox(f"파라볼릭 SAR 상향 돌파 {i}", value=p.get('use_sar', False), key=f"b_sar_use_{i}"),
+                            'use_news_sentiment': st.checkbox(f"AI 뉴스 심리 필터 {i}", value=p.get('use_news_sentiment', False), key=f"b_news_use_alt_{i}"),
+                            'news_op': st.selectbox(f"AI 뉴스 조건식 {i}", [">", ">=", "<", "<="], index=[">", ">=", "<", "<="].index(p.get('news_op', '>')), key=f"b_news_op_alt_{i}"),
+                            'news_val': st.number_input(f"AI 뉴스 임계값 {i} (-1.0~1.0)", -1.0, 1.0, float(p.get('news_val', 0.1)), 0.1, key=f"b_news_val_alt_{i}")
+                    })
         
         sell_signals = []
         with col_sell:
@@ -98,7 +104,11 @@ class TesterView:
                         'use_sar': st.checkbox(f"파라볼릭 SAR 하향 이탈 {i}", value=p.get('use_sar', False), key=f"s_sar_use_{i}"),
                         # [신규] Williams %R 하향 이탈 추가
                         'use_willr': st.checkbox(f"Williams %R 하향 이탈 {i}", value=p.get('use_willr', False), key=f"s_willr_use_{i}"),
-                        'willr_val': st.number_input(f"W%R 하향 기준값 {i}", -100, 0, p.get('willr_val', -20), key=f"s_willr_val_{i}")
+                        'willr_val': st.number_input(f"W%R 하향 기준값 {i}", -100, 0, p.get('willr_val', -20), key=f"s_willr_val_{i}"),
+                        
+                        'use_news_sentiment': st.checkbox(f"AI 뉴스 심리 필터 {i}", value=p.get('use_news_sentiment', False), key=f"s_news_use_{i}"),
+                        'news_op': st.selectbox(f"AI 뉴스 조건식 {i}", [">", ">=", "<", "<="], index=[">", ">=", "<", "<="].index(p.get('news_op', '<')), key=f"s_news_op_{i}"),
+                        'news_val': st.number_input(f"AI 뉴스 임계값 {i} (-1.0~1.0)", -1.0, 1.0, float(p.get('news_val', -0.1)), 0.1, key=f"s_news_val_{i}")
                     })
             
             st.write("---")

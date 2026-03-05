@@ -9,7 +9,7 @@ class OptimizerView:
     """AI를 활용한 전략 파라미터 최적화 UI 구성 클래스"""
     
     @staticmethod
-    def render(data_dict, fg_df, vix_df, current_params):
+    def render(data_dict, fg_df, vix_df, news_df, current_params):
         st.markdown("### 🧠 지능형 전략 최적화 도구 (AI Optimizer)")
         
         # [Phase 3] Gemini API 설정 상시 노출 (접근성 개선)
@@ -29,7 +29,7 @@ class OptimizerView:
             else:
                 st.success("✅ AI 브리핑 준비 완료")
 
-        optimizer = StrategyOptimizer(data_dict, fg_df, vix_df)
+        optimizer = StrategyOptimizer(data_dict, fg_df, vix_df, news_df)
         
         # [성능 최적화 1] 총 분석 횟수 캐싱 (10초 주기)
         if 'opt_refresh_key' not in st.session_state:

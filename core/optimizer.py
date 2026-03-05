@@ -11,21 +11,28 @@ from utils.metrics import calculate_metrics
 class StrategyOptimizer:
     """전략 파라미터 최적화를 수행하는 핵심 엔진 클래스 (Optuna + SQLite 학습형)"""
     
-    def __init__(self, data_dict, fg_df, vix_df):
+    def __init__(self, data_dict, fg_df, vix_df, news_df=None):
         self.data_dict = data_dict
         self.fg_df = fg_df
         self.vix_df = vix_df
-        # 로컬 SQLite DB 경로 설정 (data 폴더 사용)
-        db_dir = "data"
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-        self.db_path = f"sqlite:///{db_dir}/optimization_history.db"
+        self.news_df = news_df
+        # 데이터베이스 저장소 설정 (Supabase 클라우드 우선, 없으면 로컬 SQLite)
+        supabase_url = os.getenv("SUPABASE_DB_URL")
+
+        if supabase_url:
+            # Supabase는 PostgreSQL 기반이므로 바로 사용 가능
+            self.db_path = supabase_url
+        else:
+            db_dir = "data"
+            if not os.path.exists(db_dir):
+                os.makedirs(db_dir)
+            self.db_path = f"sqlite:///{db_dir}/optimization_history.db"
 
     def run_simulation(self, cfg, s_date, e_date, trade_at):
         """단일 시뮬레이션 수행 및 상세 성과 지표 계산"""
         try:
             hist, _, _ = StrategyEngine.run_golden_strategy(
-                self.data_dict, self.fg_df, self.vix_df, 
+                self.data_dict, self.fg_df, self.vix_df, self.news_df, 
                 cfg['leverage_asset'], cfg['base_asset'], 
                 0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
             )
@@ -82,7 +89,7 @@ class StrategyOptimizer:
             # 2. 노이즈 데이터로 시뮬레이션 수행
             try:
                 hist, _, _ = StrategyEngine.run_golden_strategy(
-                    noisy_data, self.fg_df, self.vix_df, 
+                    noisy_data, self.fg_df, self.vix_df, self.news_df, 
                     cfg['leverage_asset'], cfg['base_asset'], 
                     0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
                 )
