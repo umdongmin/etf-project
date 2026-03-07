@@ -203,12 +203,17 @@ class DataService:
         macro_df = pd.DataFrame([macro_data_map])
         fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # [신규] 뉴스 심리 데이터 로드
+        # [신규] 뉴스 심리 데이터 로드 (Supabase 우선 지원)
         news_df = pd.DataFrame()
         try:
             news_svc = NewsService()
-            if os.path.exists(news_svc.db_path):
+            # 로컬 파일이 있거나, Supabase 설정이 되어 있는 경우 로드 시도
+            if news_svc.supabase_url or os.path.exists(news_svc.db_path):
                 news_df = news_svc.get_sentiment_data()
+                if news_df.empty:
+                    print(" [INFO] 뉴스 데이터셋이 비어 있습니다. (수파베이스 또는 로컬)")
+            else:
+                print(" [WARNING] 뉴스 DB 연결 경로(로컬/원격)를 찾을 수 없습니다.")
         except Exception as e:
             print(f"News Data Load Error: {e}")
 

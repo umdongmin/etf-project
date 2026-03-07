@@ -204,9 +204,24 @@ class ChartView:
             hist_sub = golden_history[golden_history.index.year == sel_year]
             if hist_sub.empty: st.warning(f"{sel_year}년 데이터 없음.")
             else:
-                fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.5, 0.25, 0.25])
+                # [수정] AI 심리 지표를 포함하여 4단 차드로 확장
+                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
+                                   row_heights=[0.4, 0.2, 0.2, 0.2],
+                                   subplot_titles=("Price", "VIX", "RSI", "AI News Sentiment Quantile"))
+                
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['Close'], name='Price', line=dict(color='#66b3ff')), row=1, col=1)
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['VIX'], name='VIX', line=dict(color='#ff9999')), row=2, col=1)
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['RSI'], name='RSI', line=dict(color='#9b59b6')), row=3, col=1)
-                fig.update_layout(height=700, template='plotly_white', hovermode='x unified'); st.plotly_chart(fig, use_container_width=True)
-                st.info("💡 **분석 가이드**: 주가 변동과 VIX(공포지수), RSI(과매수/과매도)의 상관관계를 시계열로 분석합니다. 특정 지표가 매매 신호로서 얼마나 선행성을 가지는지 확인해 보세요.")
+                
+                # AI 뉴스 분위수 추가 (0.1 ~ 0.9)
+                n_q = hist_sub.get('News_Q', pd.Series([0.5]*len(hist_sub), index=hist_sub.index))
+                fig.add_trace(go.Scatter(x=hist_sub.index, y=n_q, name='AI News Q', 
+                                         line=dict(color='#00e676', width=2), fill='tozeroy'), row=4, col=1)
+                
+                # 임계값 가이드라인 (예: 상위 10% 호재 라인)
+                fig.add_hline(y=0.9, line_dash="dot", line_color="red", annotation_text="Top 10% (Strong Buy)", row=4, col=1)
+                fig.add_hline(y=0.1, line_dash="dot", line_color="blue", annotation_text="Bottom 10% (Panic)", row=4, col=1)
+
+                fig.update_layout(height=850, template='plotly_white', hovermode='x unified', showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+                st.info("💡 **분석 가이드**: 주가 변동과 VIX, RSI, 그리고 **AI 뉴스 심리 분위수(Quantile)**의 상관관계를 분석합니다. AI 지수가 0.9(상위 10%)를 넘어서는 구간에서 주가가 어떻게 반응하는지, 그리고 매수 신호가 얼마나 유효한지 육안으로 확인해 보세요.")

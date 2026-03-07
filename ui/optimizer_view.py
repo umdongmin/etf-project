@@ -54,29 +54,45 @@ class OptimizerView:
         </div>
         """, unsafe_allow_html=True)
 
-        # [Phase 1] 기간 및 WFA 설정 UI를 상단으로 이동하여 대시보드와 연동
-        with st.container():
+        # [속도 개선] 입력 폼을 사용하여 이벤트 핸들링 최적화
+        with st.form("optimizer_settings_form"):
+            st.markdown("#### ⚙️ 최적화 대상 및 탐색 설정")
             col_p1, col_p2, col_p3 = st.columns([2, 3, 2])
             with col_p1:
                 target_period = st.selectbox("📅 분석 대상 기간 선택", ["전체 (2010~현재)", "최근 5년", "최근 3년"], index=0)
             with col_p2:
-                # [신규] 최적화 대상도 미리 정의하여 필터링에 활용
                 opt_targets = st.multiselect(
                     "🎯 현재 필터링할 탐색 대상 (Targets)",
                     ["매수 시그널 (Full)", "매도 시그널 (Full)", "리밸런싱 및 ATR 변동성 (Full)", "패닉 가속 (MA/RSI)", "S3 보호 조건 (Gap/Acc)", "방어 및 대피 시스템 (VXN/손절)"],
                     default=["매수 시그널 (Full)", "매도 시그널 (Full)", "리밸런싱 및 ATR 변동성 (Full)"],
                     key="top_dashboard_targets"
                 )
-                
-                # [디버그] 현재 필터링 태그 정보 (필요 시 주석 해제하여 개발자가 확인)
-                # st.caption(f"Debug Tag: {optimizer._get_ctx_tag(current_params['leverage_asset'], current_params['base_asset'], opt_targets, wfa_ratio if 'wfa_ratio' in locals() else 0.0)}")
             with col_p3:
-                # [Phase 2] WFA(전진 분석) 설정 - 대시보드 연동을 위해 상단 이동
                 st.write("") # 간격 조절
                 use_wfa = st.checkbox("🧪 WFA(전진 분석) 모드", value=False, key="dash_use_wfa", help="데이터를 훈련(IS)과 검증(OOS)으로 분할하여 '과최적화' 여부를 테스트합니다.")
-                wfa_ratio = 0.0
-                if use_wfa:
-                    wfa_ratio = st.slider("OOS 비중", 10, 50, 30, step=5, format="%d%%", key="dash_wfa_ratio") / 100.0
+                wfa_ratio_input = st.slider("OOS 비중", 10, 50, 30, step=5, format="%d%%", key="dash_wfa_ratio")
+                
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+            with col1:
+                n_iter = st.slider("탐색 횟수 (N)", 50, 1000, 200, step=50, help="탐색 횟수가 많을수록 더 정교한 결과를 얻지만 시간이 오래 걸립니다.")
+            
+            with col2:
+                trade_at = st.selectbox("최적화용 매매 시점", ["종가", "익일 시가"], index=0 if current_params.get('trade_at') == '종가' else 1)
+            
+            submit_col1, submit_col2 = st.columns([1, 2])
+            with submit_col1:
+                update_dash = st.form_submit_button("🔄 설정 적용 및 대시보드 갱신", use_container_width=True)
+            with submit_col2:
+                start_opt = st.form_submit_button("🔥 AI 최적화 탐색 시작", type="primary", use_container_width=True)
+            
+        wfa_ratio = wfa_ratio_input / 100.0 if use_wfa else 0.0
+
+        # 기간 설정
+        s_date = datetime.date(2010, 1, 1)
+        if target_period == "최근 5년": s_date = datetime.date.today() - datetime.timedelta(days=5*365)
+        elif target_period == "최근 3년": s_date = datetime.date.today() - datetime.timedelta(days=3*365)
+        e_date = datetime.date.today()
 
         # [Phase 4] 실시간/상시 성과 현황판 섹션
         if total_trials > 0:
@@ -88,12 +104,9 @@ class OptimizerView:
                     # [수정] targets과 wfa_ratio를 넘겨서 컨텍스트 필터링 수행
                     return _opt.get_top_results(_params, n_top=3, target_period=_period, targets=_targets, wfa_ratio=_wfa_ratio)
                 
-                # 강제 업데이트 버튼
-                c_top1, c_top2 = st.columns([4, 1])
-                with c_top2:
-                    if st.button("🔄 갱신", help="최근 탐색 데이터를 다시 불러옵니다."):
-                        # [개선] 탭 초기화를 방지하기 위해 rerun/clear 대신 세션 키만 증가
-                        st.session_state.opt_refresh_key += 1
+                # [속도 개선] 폼 제출 시 자동으로 세션 키를 증가시켜 데이터 갱신 유도
+                if update_dash:
+                    st.session_state.opt_refresh_key += 1
                 
                 top_results = get_top_results_cached(optimizer, current_params, st.session_state.opt_refresh_key, target_period, opt_targets, wfa_ratio)
                 if top_results:
@@ -128,28 +141,7 @@ class OptimizerView:
                 else:
                     st.write("아직 충분한 분석 데이터가 축적되지 않았습니다.")
         
-        with st.expander("🛠️ 최적화 설정 및 탐색 범위", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                n_iter = st.slider("탐색 횟수 (N)", 50, 1000, 200, step=50, help="탐색 횟수가 많을수록 더 정교한 결과를 얻지만 시간이 오래 걸립니다.")
-                st.write(f"현재 선택된 기간: **{target_period}**")
-            
-            with col2:
-                # 위 대시보드와 동기화
-                st.write(f"탐색 대상: {', '.join(opt_targets)}")
-                trade_at = st.selectbox("최적화용 매매 시점", ["종가", "익일 시가"], index=0 if current_params.get('trade_at') == '종가' else 1)
-                
-                # 상단에서 설정된 WFA 정보 표시
-                if use_wfa:
-                    st.info(f"🧪 WFA 활성화: OOS {int(wfa_ratio*100)}%")
-
-        # 기간 설정
-        s_date = datetime.date(2010, 1, 1)
-        if target_period == "최근 5년": s_date = datetime.date.today() - datetime.timedelta(days=5*365)
-        elif target_period == "최근 3년": s_date = datetime.date.today() - datetime.timedelta(days=3*365)
-        e_date = datetime.date.today()
-
-        if st.button("🔥 AI 최적화 탐색 시작", type="primary", use_container_width=True):
+        if start_opt:
             optimizer = StrategyOptimizer(data_dict, fg_df, vix_df)
             
             # [수정] 베이스라인 데이터를 미리 계산하여 base_res 정의 (NameError 방지)

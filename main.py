@@ -137,7 +137,9 @@ try:
                 signal = str(latest.get('Trade_Label', ''))
                 
                 # 🌟 [수정] 매수 또는 매도 신호가 있을 때만 알람 발송
-                if "매수" in signal or "매도" in signal:
+                # '진행중' 상태는 이미 포지션이 진입된 상태이므로 알람에서 제외 (중복 알람 방지)
+                if ("매수" in signal or "매도" in signal) and "진행중" not in signal:
+
                     # 🔹 매수/매도 종류 강조
                     signal_type = "🔴 매도" if "매도" in signal else "🟢 매수"
                     

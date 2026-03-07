@@ -16,17 +16,14 @@ class StrategyOptimizer:
         self.fg_df = fg_df
         self.vix_df = vix_df
         self.news_df = news_df
-        # 데이터베이스 저장소 설정 (Supabase 클라우드 우선, 없으면 로컬 SQLite)
+        # 데이터베이스 저장소 설정 (Supabase 클라우드 전용)
         supabase_url = os.getenv("SUPABASE_DB_URL")
 
         if supabase_url:
             # Supabase는 PostgreSQL 기반이므로 바로 사용 가능
             self.db_path = supabase_url
         else:
-            db_dir = "data"
-            if not os.path.exists(db_dir):
-                os.makedirs(db_dir)
-            self.db_path = f"sqlite:///{db_dir}/optimization_history.db"
+            raise ValueError("Optimizing을 위해 SUPABASE_DB_URL 환경 변수가 필요합니다. (SQLite 레거시는 더 이상 지원되지 않습니다)")
 
     def run_simulation(self, cfg, s_date, e_date, trade_at):
         """단일 시뮬레이션 수행 및 상세 성과 지표 계산"""
@@ -192,6 +189,15 @@ class StrategyOptimizer:
                         cand['buy_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -95, -60)
                     if cand['buy_signals'][i]['use_adx']:
                         cand['buy_signals'][i]['adx_val'] = trial.suggest_int(f"{prefix}adx_val", 10, 60)
+                    
+                    # [신규] AI 심리 필터 탐색 주입
+                    cand['buy_signals'][i]['use_news_q'] = trial.suggest_categorical(f"{prefix}use_news_q", [True, False])
+                    if cand['buy_signals'][i]['use_news_q']:
+                        cand['buy_signals'][i]['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", 0.75, 0.98)
+                    
+                    cand['buy_signals'][i]['use_news_z'] = trial.suggest_categorical(f"{prefix}use_news_z", [True, False])
+                    if cand['buy_signals'][i]['use_news_z']:
+                        cand['buy_signals'][i]['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", 0.5, 3.0)
 
             if "매도 시그널 (Full)" in targets:
                 # 매도 신호 (1~4)
@@ -489,8 +495,14 @@ class StrategyOptimizer:
                 params[f"{p}di_plus_cross"] = sig['di_plus_cross']
                 params[f"{p}use_sar"] = sig['use_sar']
                 params[f"{p}rsi_val"] = sig['rsi_val']
-                if sig['use_willr']: params[f"{p}willr_val"] = sig['willr_val']
-                if sig['use_adx']: params[f"{p}adx_val"] = sig['adx_val']
+                if sig.get('use_willr'): params[f"{p}willr_val"] = sig['willr_val']
+                if sig.get('use_adx'): params[f"{p}adx_val"] = sig['adx_val']
+                
+                # AI 필터 파라미터 추출 추가
+                params[f"{p}use_news_q"] = sig.get('use_news_q', False)
+                if sig.get('use_news_q'): params[f"{p}news_q_val"] = sig.get('news_q_val', 0.9)
+                params[f"{p}use_news_z"] = sig.get('use_news_z', False)
+                if sig.get('use_news_z'): params[f"{p}news_z_val"] = sig.get('news_z_val', 1.0)
 
         if "매도 시그널 (Full)" in targets:
             for i, sig in enumerate(cfg['sell_signals'][:4]):

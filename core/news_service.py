@@ -1,11 +1,16 @@
 import os
 import json
-import sqlite3
 import datetime
 import pandas as pd
-import pandas as pd
+import yfinance as yf
+import feedparser
+from bs4 import BeautifulSoup
+import requests
+from core.llm_service import LLMService
+
 try:
     import psycopg2
+    from psycopg2.extras import execute_values
     HAS_PSYCOPG2 = True
 except ImportError:
     HAS_PSYCOPG2 = False
@@ -15,296 +20,228 @@ try:
     HAS_SQLALCHEMY = True
 except ImportError:
     HAS_SQLALCHEMY = False
-import yfinance as yf
-import feedparser
-from core.llm_service import LLMService
 
 class NewsService:
-    """경제 뉴스 수집 및 Gemini 기반 정형화 서비스"""
+    """경제 뉴스 수집 및 Gemini 기반 정형화 서비스 (Supabase/PostgreSQL 전용)"""
     
-    def __init__(self, db_path=None):
+    def __init__(self):
         self.llm = LLMService()
-        # [수정] data/ 폴더 의존성 제거. 기본값으로 루트 경로 숨김 파일 지정
-        if db_path is None:
-            self.db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".news_sentiment.db")
-        else:
-            self.db_path = db_path
-        
-        # Supabase (PostgreSQL) 설정 확인
         self.supabase_url = os.getenv("SUPABASE_DB_URL")
+        if not self.supabase_url:
+            raise ValueError("SUPABASE_DB_URL 환경 변수가 설정되지 않았습니다.")
+            
         self.engine = self._get_engine()
-        
         self._init_db()
 
     def _get_engine(self):
-        """SQLAlchemy 엔진 객체 반환"""
-        if not HAS_SQLALCHEMY:
-            return None
-            
-        if self.supabase_url:
-            url = self.supabase_url
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-            try:
-                return create_engine(url)
-            except Exception as e:
-                print(f"SQLAlchemy Engine Error (Supabase): {e}")
-        
-        # SQLite
-        return create_engine(f"sqlite:///{self.db_path}")
+        if not HAS_SQLALCHEMY or not self.supabase_url: return None
+        url = self.supabase_url
+        if url.startswith("postgres://"): url = url.replace("postgres://", "postgresql://", 1)
+        try: return create_engine(url)
+        except: return None
 
     def _get_connection(self):
-        """직접 연결 객체 반환 (DDL 실행용)"""
-        if self.supabase_url and HAS_PSYCOPG2:
-            try:
-                return psycopg2.connect(self.supabase_url)
-            except Exception as e:
-                print(f"Supabase Direct Connection Error, falling back to local: {e}")
-        
-        return sqlite3.connect(self.db_path)
+        if not HAS_PSYCOPG2: raise ImportError("psycopg2-binary 라이브러리가 필요합니다.")
+        return psycopg2.connect(self.supabase_url)
 
-    def _get_placeholder(self, conn):
-        """DB 타입에 따른 플레이스홀더 반환 (? for SQLite, %s for Postgres)"""
-        # SQLAlchemy 엔진을 사용할 때는 보통 %s나 ?가 자동으로 처리되지만, 직접 쿼리용
-        if hasattr(conn, 'dsn'): 
-            return "%s"
-        return "?"
+    def _get_placeholder(self, conn): return "%s"
 
     def _init_db(self):
-        """뉴스 심리 데이터 테이블 초기화 및 마이그레이션"""
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
-            # 기본 테이블 생성
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS news_sentiment (
-                    date TEXT PRIMARY KEY,
-                    sentiment REAL,
-                    impact REAL,
-                    reliability REAL,
-                    topic TEXT,
-                    summary TEXT,
-                    raw_headlines TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    date TEXT, source TEXT DEFAULT 'yfinance',
+                    sentiment REAL, impact REAL, reliability REAL DEFAULT 0.5,
+                    topic TEXT, summary TEXT, raw_headlines TEXT,
+                    q_score REAL, z_score REAL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (date, source)
                 )
             ''')
-            
-            # 컬럼 존재 여부 확인 및 마이그레이션
-            if hasattr(conn, 'dsn'): # PostgreSQL
-                cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='news_sentiment'")
-                columns = [row[0] for row in cursor.fetchall()]
-            else: # SQLite
-                cursor.execute("PRAGMA table_info(news_sentiment)")
-                columns = [row[1] for row in cursor.fetchall()]
-                
-            if 'reliability' not in columns:
-                try:
-                    cursor.execute("ALTER TABLE news_sentiment ADD COLUMN reliability REAL DEFAULT 0.5")
-                    print("Migration: Added 'reliability' column to news_sentiment table.")
-                except Exception as e:
-                    print(f"Migration Error (reliability): {e}")
-
-            conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"DB Init Error: {e}")
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='news_sentiment'")
+            columns = [row[0] for row in cursor.fetchall()]
+            if 'q_score' not in columns: cursor.execute("ALTER TABLE news_sentiment ADD COLUMN q_score REAL")
+            if 'z_score' not in columns: cursor.execute("ALTER TABLE news_sentiment ADD COLUMN z_score REAL")
+            if 'updated_at' not in columns: cursor.execute("ALTER TABLE news_sentiment ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+            conn.commit(); conn.close()
+        except Exception as e: print(f"News DB Init Error: {e}")
 
     def score_news_with_gemini(self, date_str, headlines):
-        """Gemini 2.5 Flash를 사용하여 뉴스 헤드라인 수치화"""
-        if not self.llm.client:
-            print("LLM Client not available")
-            return None
-            
+        if not self.llm.client: return None
         headlines_text = "\n".join(headlines) if isinstance(headlines, list) else headlines
-        
         prompt = f"""
-        당신은 20년 경력의 금융 뉴스 분석 전문가입니다. 
-        다음은 {date_str}의 주요 경제 뉴스 헤드라인들입니다.
-        이 뉴스들이 시장 참여자들의 심리에 미치는 영향과 중요도를 분석하여 정해진 JSON 형식으로 응답해주세요.
-
-        [뉴스 헤드라인]:
-        {headlines_text}
-
-        [출력 형식 (JSON 형식만 출력)]:
-        {{
-            "sentiment": -1.0 (매우 비관/공포) ~ 1.0 (매우 낙관/탐욕) 사이의 실수값,
-            "impact": 0.0 (낮음) ~ 1.0 (매우 높음) 사이의 영향력 강도,
-            "reliability": 0.0 (신뢰할 수 없는 노이즈) ~ 1.0 (매우 신뢰할 수 있는 팩트) 사이의 값,
-            "topic": "핵심 키워드 (예: 금리 동결, 고용 지표 쇼크 등)",
-            "summary": "전체적인 뉴스 분위기 한줄 요약"
-        }}
-        
-        주의: 분석 시 기술적 분석보다는 거시 경제적 관점과 투자자 심리 변화에 집중하세요. 
-        특히 여러 매체에서 공통적으로 다루는 내용은 'reliability' 점수를 높게 부여하세요.
+        당신은 20년 경력의 미국 기술주(NASDAQ, QQQ) 전문 퀀트 트레이더이자 수석 전략가입니다.
+        미국 주식 시장의 유동성 및 주가 상승/하락에 미칠 영향을 평가하세요.
+        [뉴스 헤드라인]: {headlines_text}
+        (반드시 JSON 형식) {{"sentiment": -1~1, "impact": 0~1, "reliability": 0~1, "topic": "...", "summary": "..."}}
         """
-        
         try:
-            # JSON 응답 강제 (Gemini 1.5/2.5 이상 지원)
             response = self.llm.client.models.generate_content(
-                model=self.llm.model_name,
-                contents=prompt,
-                config={'response_mime_type': 'application/json'}
+                model=self.llm.model_name, contents=prompt,
+                config={'response_mime_type': 'application/json', 'temperature': 0.0}
             )
-            
-            # 응답 파싱
-            res_json = json.loads(response.text)
-            return res_json
-        except Exception as e:
-            print(f"Gemini News Scoring Error: {e}")
-            return None
+            return json.loads(response.text)
+        except: return None
 
-    def save_sentiment(self, date_str, news_data, raw_headlines=""):
-        """분석된 결과를 DB에 저장"""
+    def save_sentiment(self, date_str, news_data, raw_headlines="", source="yfinance", q_score=None, z_score=None):
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            placeholder = self._get_placeholder(conn)
-            
-            if hasattr(conn, 'dsn'): # PostgreSQL
-                sql = '''
-                    INSERT INTO news_sentiment 
-                    (date, sentiment, impact, reliability, topic, summary, raw_headlines)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (date) DO UPDATE SET
-                    sentiment = EXCLUDED.sentiment,
-                    impact = EXCLUDED.impact,
-                    reliability = EXCLUDED.reliability,
-                    topic = EXCLUDED.topic,
-                    summary = EXCLUDED.summary,
-                    raw_headlines = EXCLUDED.raw_headlines,
-                    updated_at = CURRENT_TIMESTAMP
-                '''
-            else: # SQLite
-                sql = '''
-                    INSERT OR REPLACE INTO news_sentiment 
-                    (date, sentiment, impact, reliability, topic, summary, raw_headlines)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                '''
-                
+            sql = '''
+                INSERT INTO news_sentiment 
+                (date, source, sentiment, impact, reliability, topic, summary, raw_headlines, q_score, z_score)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (date, source) DO UPDATE SET
+                sentiment = EXCLUDED.sentiment, impact = EXCLUDED.impact, reliability = EXCLUDED.reliability,
+                topic = EXCLUDED.topic, summary = EXCLUDED.summary, raw_headlines = EXCLUDED.raw_headlines,
+                q_score = EXCLUDED.q_score, z_score = EXCLUDED.z_score, updated_at = CURRENT_TIMESTAMP
+            '''
             cursor.execute(sql, (
-                date_str, 
-                news_data['sentiment'], 
-                news_data['impact'], 
-                news_data.get('reliability', 0.5),
-                news_data['topic'], 
-                news_data['summary'],
-                raw_headlines
+                date_str, source, news_data['sentiment'], news_data['impact'], news_data.get('reliability', 0.5),
+                news_data['topic'], news_data['summary'], raw_headlines, q_score, z_score
             ))
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
+            # 자동 업데이트 유도
+            if q_score is None: self.update_all_indicators()
             return True
-        except Exception as e:
-            print(f"Save Sentiment Error: {e}")
-            return False
+        except: return False
 
-    def get_sentiment_data(self, start_date=None, end_date=None):
-        """저장된 심리 지표를 DataFrame으로 조회"""
+    def update_all_indicators(self, rolling_window=60):
+        log_msg = f"🔄 [{datetime.datetime.now()}] AI 지표 재계산 시작 (Window={rolling_window})"
+        try:
+            df = self.get_sentiment_data()
+            if df.empty:
+                print("⚠️ [update_all_indicators] 데이터가 없어 업데이트를 중단합니다.")
+                return
+            
+            # 1. 일별 가중 평균 계산 (중복 날짜 제거 및 가중치 반영)
+            df['weighted_score'] = df['sentiment'] * df['impact'] * df.get('reliability', 0.5)
+            # 날짜(index)별 그룹화
+            daily_sum = df.groupby(df.index).apply(lambda x: (x['weighted_score'].sum() / (x['impact'] * x.get('reliability', 0.5)).sum()) if (x['impact'] * x.get('reliability', 0.5)).sum() != 0 else x['sentiment'].mean())
+            daily_sum = daily_sum.sort_index() # 시간 순 정렬 보장
+            
+            # 2. 롤링 지수 계산 (min_periods=1로 설정하여 데이터가 1개라도 있으면 계산)
+            q_scores = daily_sum.rolling(window=rolling_window, min_periods=1).rank(pct=True)
+            rolling_mean = daily_sum.rolling(window=rolling_window, min_periods=1).mean()
+            rolling_std = daily_sum.rolling(window=rolling_window, min_periods=1).std()
+            z_scores = (daily_sum - rolling_mean) / (rolling_std + 1e-9)
+            
+            # 3. 업데이트 데이터 구성
+            update_data = []
+            for date_ts, q_val in q_scores.items():
+                dt_str = date_ts.strftime('%Y-%m-%d')
+                z_val = z_scores[date_ts]
+                
+                # 수치 안정화 (NaN -> None)
+                q_val_clean = float(q_val) if not pd.isna(q_val) else None
+                z_val_clean = float(z_val) if not pd.isna(z_val) else None
+                
+                update_data.append((q_val_clean, z_val_clean, dt_str))
+                
+            # 4. 수파베이스(Postgres) 배치 업데이트
+            if HAS_PSYCOPG2 and update_data:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                
+                # 명시적 캐스팅을 포함한 배치 업데이트
+                sql = """
+                    UPDATE news_sentiment AS n
+                    SET q_score = CAST(v.q AS REAL), 
+                        z_score = CAST(v.z AS REAL)
+                    FROM (VALUES %s) AS v(q, z, d)
+                    WHERE n.date = CAST(v.d AS TEXT)
+                """
+                execute_values(cursor, sql, update_data)
+                conn.commit()
+                conn.close()
+                log_msg += f" | ✅ {len(update_data)}일치 데이터 일괄 업데이트 완료"
+            else:
+                log_msg += " | ⚠️ 업데이트 가능한 데이터가 없거나 psycopg2 라이브러리가 없습니다."
+        except Exception as e:
+            log_msg += f" | ❌ 에러 발생: {str(e)}"
+            if 'conn' in locals() and conn: conn.close()
+        
+        print(log_msg)
+        with open("update.log", "a", encoding="utf-8") as f:
+            f.write(log_msg + "\n")
+
+    def get_sentiment_data(self, start_date=None, end_date=None, source=None):
         try:
             query = "SELECT * FROM news_sentiment"
             conditions = []
             if start_date: conditions.append(f"date >= '{start_date}'")
             if end_date: conditions.append(f"date <= '{end_date}'")
-            
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            
-            query += " ORDER BY date ASC"
-            
-            # SQLAlchemy 엔진이 있으면 엔진 사용, 없으면 직접 연결 사용
+            if source: conditions.append(f"source = '{source}'")
+            if conditions: query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY date ASC, reliability DESC"
             db_conn = self.engine if self.engine else self._get_connection()
             df = pd.read_sql_query(query, db_conn)
-            
-            if self.engine is None and hasattr(db_conn, 'close'):
-                db_conn.close()
-            
             if not df.empty:
                 df['date'] = pd.to_datetime(df['date'])
                 df.set_index('date', inplace=True)
             return df
-        except Exception as e:
-            print(f"Get Sentiment Data Error: {e}")
-            return pd.DataFrame()
-        finally:
-            pass
+        except: return pd.DataFrame()
 
     def check_date_exists(self, date_str):
-        """해당 날짜의 데이터가 이미 있는지 확인"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            placeholder = self._get_placeholder(conn)
-            cursor.execute(f"SELECT 1 FROM news_sentiment WHERE date = {placeholder}", (date_str,))
+            conn = self._get_connection(); cursor = conn.cursor()
+            cursor.execute(f"SELECT 1 FROM news_sentiment WHERE date = %s", (date_str,))
             exists = cursor.fetchone() is not None
-            conn.close()
-            return exists
-        except:
-            return False
+            conn.close(); return exists
+        except: return False
 
-    def fetch_headlines_from_yf(self, tickers=['QQQ', 'SPY', 'DIA', '^IXIC', '^TNX', 'AAPL', 'NVDA', 'MSFT', 'TSLA', 'GOOGL', 'AMZN']):
-        """yfinance를 통해 주요 티커의 최신 뉴스 헤드라인 수집 (디버깅 강화)"""
+    def fetch_headlines_from_yf(self, target_date=None, tickers=['QQQ', 'SPY', 'DIA', '^IXIC', '^TNX', 'AAPL', 'NVDA', 'MSFT', 'TSLA', 'GOOGL', 'AMZN']):
         headlines = []
-        print(f"--- 뉴스 수집 시작 ({len(tickers)}개 티커 시도) ---")
-        
+        target_dt_str = target_date if target_date else datetime.date.today().strftime("%Y-%m-%d")
         for ticker in tickers:
             try:
                 t = yf.Ticker(ticker)
-                # hasattr 대신 getattr로 안전하게 접근
                 news_items = getattr(t, 'news', [])
-                if news_items:
-                    print(f" [OK] {ticker}: {len(news_items)}건 발견")
-                    for item in news_items:
-                        # 다양한 키 시도 (yfinance 버전에 따라 다를 수 있음)
-                        title = item.get('title') or item.get('headline') or item.get('summary')
-                        if not title and isinstance(item, dict):
-                            # 첫 번째 문자열 값을 타이틀로 시도 (비상시)
-                            for k, v in item.items():
-                                if k != 'link' and isinstance(v, str) and len(v) > 10:
-                                    title = v
-                                    break
-                        
-                        if title and title not in headlines:
-                            headlines.append(title)
-                else:
-                    print(f" [EMPTY] {ticker}: 뉴스가 없습니다.")
-            except Exception as e:
-                print(f" [ERROR] {ticker}: {e}")
-        
-        # 중복 제거 및 공백 정리
-        final_headlines = list(set([h.strip() for h in headlines if len(h.strip()) > 5]))
-        print(f"--- 수집 완료: 총 {len(final_headlines)}개의 고유 헤드라인 확보 ---")
-        return final_headlines
+                for item in news_items:
+                    pub_time = item.get('providerPublishTime')
+                    if pub_time:
+                        item_dt = datetime.datetime.fromtimestamp(pub_time).strftime("%Y-%m-%d")
+                        if item_dt != target_dt_str: continue
+                    title = item.get('title') or item.get('headline'); headlines.append(title)
+            except: continue
+        return list(set([h.strip() for h in headlines if h]))
 
-    def fetch_headlines_from_rss(self):
-        """전문 금융 RSS 피드에서 고품질 뉴스 수집"""
-        rss_urls = [
-            "https://www.investing.com/rss/news_25.rss",     # Stock Market News
-            "https://www.investing.com/rss/news_301.rss",    # Economy News
-            "https://www.investing.com/rss/market_overview_opinion.rss", # Opinions/Analysis
-            "https://feeds.a.dj.com/rss/RSSMarketsMain.xml", # WSJ Markets
-        ]
-        
-        headlines = []
-        print(f"--- RSS 고품질 뉴스 수집 시작 ({len(rss_urls)}개 소스) ---")
-        
+    def fetch_headlines_from_rss(self, target_date=None):
+        rss_urls = ["https://www.investing.com/rss/news_25.rss", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"]
+        headlines = []; target_dt_str = target_date if target_date else datetime.date.today().strftime("%Y-%m-%d")
         for url in rss_urls:
             try:
                 feed = feedparser.parse(url)
-                if feed.entries:
-                    print(f" [OK] {url.split('/')[-1]}: {len(feed.entries)}건 발견")
-                    for entry in feed.entries:
-                        title = entry.get('title', '')
-                        summary = entry.get('summary', '') or entry.get('description', '')
-                        
-                        # 제목과 요약을 합쳐서 더 풍부한 맥락 확보
-                        full_content = f"[{title}] {summary}" if summary else title
-                        if full_content and full_content not in headlines:
-                            headlines.append(full_content)
-                else:
-                    print(f" [EMPTY] {url.split('/')[-1]}: 뉴스가 없습니다.")
-            except Exception as e:
-                print(f" [ERROR] {url}: {e}")
-                
-        final_headlines = list(set([h.strip() for h in headlines if len(h.strip()) > 10]))
-        print(f"--- RSS 수집 완료: 총 {len(final_headlines)}개의 전문 데이터 확보 ---")
-        return final_headlines
+                for entry in feed.entries:
+                    pub_struct = entry.get('published_parsed')
+                    if pub_struct:
+                        item_dt = datetime.datetime(*pub_struct[:3]).strftime("%Y-%m-%d")
+                        if item_dt != target_dt_str: continue
+                    headlines.append(entry.get('title', ''))
+            except: continue
+        return list(set(headlines))
+
+    def fetch_headlines_from_macro_report(self, target_date=None):
+        url = "https://finance.naver.com/research/market_info_list.naver"
+        headlines = []; target_dt_str = target_date if target_date else datetime.date.today().strftime("%Y-%m-%d")
+        naver_dt = target_dt_str[2:].replace('-', '.')
+        try:
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}); resp.encoding = 'euc-kr'
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for row in soup.find_all('tr'):
+                tds = row.find_all('td')
+                if len(tds) >= 4 and tds[3].text.strip() == naver_dt: headlines.append(tds[0].text.strip())
+        except: pass
+        return list(set(headlines))
+
+    def fetch_headlines_from_finviz(self, target_date=None):
+        url = "https://finviz.com/news.ashx"
+        headlines = []; target_dt_str = target_date if target_date else datetime.date.today().strftime("%Y-%m-%d")
+        try:
+            resp = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            for a in soup.select('a.nn-tab-link'): headlines.append(a.text.strip())
+        except: pass
+        return list(set(headlines))

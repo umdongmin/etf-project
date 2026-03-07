@@ -48,12 +48,13 @@ class StrategyEngine:
                     # 데이터가 있는 날짜만 가져오고 빈 자리는 전방 채우기(ffill)
                     combined[col] = vix_clean[col].reindex(combined.index, method='ffill')
 
-        # [신규] AI 뉴스 심리 데이터 병합
+        # [신규] AI 뉴스 심리 데이터 병합 (분위수 및 Z-Score 포함)
         if news_df is not None and not news_df.empty:
             news_clean = news_df[~news_df.index.duplicated(keep='first')].sort_index()
-            for col in ['sentiment', 'impact']:
+            # 원본 점수와 가공된 점수(q_score, z_score) 모두 reindex
+            for col in ['sentiment', 'impact', 'q_score', 'z_score']:
                 if col in news_clean.columns:
-                    combined[f'News_{col.capitalize()}'] = news_clean[col].reindex(combined.index, method='ffill')
+                    combined[f'News_{col.capitalize().replace("_score", "")}'] = news_clean[col].reindex(combined.index, method='ffill')
         
         # [추가] 필수 컬럼 부재 시 기본값으로 생성 (KeyError 방지)
         if 'FG' not in combined.columns: combined['FG'] = 50.0
@@ -63,9 +64,11 @@ class StrategyEngine:
         if 'DMP' not in combined.columns: combined['DMP'] = 0.0
         if 'DMN' not in combined.columns: combined['DMN'] = 0.0
         if 'SAR' not in combined.columns: combined['SAR'] = 0.0
-        # [신규] 뉴스 지표 기본값 (중립)
+        # [신규] 뉴스 지표 기본값 (중립/평균)
         if 'News_Sentiment' not in combined.columns: combined['News_Sentiment'] = 0.0
         if 'News_Impact' not in combined.columns: combined['News_Impact'] = 0.1
+        if 'News_Q' not in combined.columns: combined['News_Q'] = 0.5  # 분위수 중간
+        if 'News_Z' not in combined.columns: combined['News_Z'] = 0.0  # 평균
         
         macd_col = [c for c in combined.columns if 'MACD_' in c and 'MACDs_' not in c and 'MACDh_' not in c]
         signal_col = [c for c in combined.columns if 'MACDs_' in c]
@@ -465,7 +468,7 @@ class StrategyEngine:
                         a = True
                         rs.append("파라볼릭SAR 상향돌파")
 
-                    # [신규] AI 뉴스 심리 조건 추가
+                    # [신규] AI 뉴스 심리 조건 추가 (분위수 Q, 표준점수 Z 연동)
                     if bp.get('use_news_sentiment'):
                         op = bp.get('news_op', '>')
                         val = bp.get('news_val', 0.1)
@@ -476,6 +479,24 @@ class StrategyEngine:
                         elif op == '<=': c &= (n_sent <= val)
                         a = True
                         rs.append(f"AI뉴스심리{op}{val}")
+
+                    if bp.get('use_news_q'):
+                        op = bp.get('news_q_op', '>')
+                        val = bp.get('news_q_val', 0.9)
+                        n_q = row.get('News_Q', 0.5)
+                        if op == '>': c &= (n_q > val)
+                        elif op == '>=': c &= (n_q >= val)
+                        a = True
+                        rs.append(f"AI뉴스분위수{op}{val}")
+
+                    if bp.get('use_news_z'):
+                        op = bp.get('news_z_op', '>')
+                        val = bp.get('news_z_val', 1.0)
+                        n_z = row.get('News_Z', 0.0)
+                        if op == '>': c &= (n_z > val)
+                        elif op == '>=': c &= (n_z >= val)
+                        a = True
+                        rs.append(f"AI뉴스Z점수{op}{val}")
 
                     return a, c, rs
 
