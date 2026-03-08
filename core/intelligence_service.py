@@ -74,7 +74,7 @@ class IntelligenceService:
             news_service.save_sentiment(date_str, quant_data, raw_headlines="\n".join(all_headlines), source="integrated_quant")
 
         # 3. 정성 리포트 생성
-        prompt = f"당신은 월스트리트 전략가입니다. 다음 정형화 데이터와 뉴스 헤드라인을 바탕으로 마크다운 리포트를 작성하세요.\n\n[데이터]: {quant_data}\n[뉴스]: {'/'.join(all_headlines)}"
+        prompt = f"당신은 월스트리트 전략가입니다. 다음 정형화 데이터와 뉴스 헤드라인을 바탕으로 '한국어'로 전문적인 마크다운 리포트를 작성하세요. 모든 섹션 제목과 본문은 반드시 한국어로 작성해야 합니다.\n\n[데이터]: {quant_data}\n[뉴스]: {'/'.join(all_headlines)}"
         try:
             response = self.llm.client.models.generate_content(model=self.llm.model_name, contents=prompt, config={'temperature': 0.3})
             resp_text = response.text.strip()

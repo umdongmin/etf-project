@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import os
+import time
 
 # 커스텀 모듈 임포트
 from core.data import DataService
@@ -16,6 +17,7 @@ from ui.backtest_view import BacktestView
 from ui.history_view import HistoryLabView
 from ui.quant_lab_view import QuantLabView
 from ui.intelligence_view import IntelligenceView
+from ui.rolling_view import RollingLabView
 from utils.metrics import calculate_metrics
 
 class GoldenStrategyApp:
@@ -23,12 +25,7 @@ class GoldenStrategyApp:
         self.ticker_map = {
             "QQQ": "나스닥 100 (QQQ)",
             "QLD": "나스닥 2배 (QLD)",
-            "TQQQ": "나스닥 3배 (TQQQ)",
-            "SOXX": "반도체 1배 (SOXX)",
-            "USD": "반도체 2배 (USD)",
-            "SOXL": "반도체 3배 (SOXL)",
-            "TMF": "채권 3배 (TMF)",
-            "TLT": "채권 1배 (TLT)"
+            "TQQQ": "나스닥 3배 (TQQQ)"
         }
         
     def run(self):
@@ -37,23 +34,82 @@ class GoldenStrategyApp:
         menu = st.sidebar.radio("메인 메뉴", [
             "📊 실시간 백테스트", 
             "🔬 퀀트 분석 연구실", 
+            "🧬 롤링 윈도우 분석",
             "📜 매매 전략 설정", 
             "🧠 AI 마켓 인텔리전스"
         ])
+        
+        # [신규] 전역 백그라운드 최적화 모니터링
+        if 'background_opt' in st.session_state and st.session_state.background_opt:
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("🔥 AI 최적화 탐색 중")
+            state = st.session_state.background_opt
+            
+            if not state['done']:
+                progress = min(state['current'] / st.session_state.opt_n_iter, 1.0) if 'opt_n_iter' in st.session_state else 0
+                st.sidebar.progress(progress)
+                
+                # 하트비트 체크 (5초 이상 갱신 없으면 경고)
+                last_hb = state.get('heartbeat', time.time())
+                gap = int(time.time() - last_hb)
+                hb_color = "green" if gap < 10 else "orange" if gap < 30 else "red"
+                st.sidebar.markdown(f"⏱️ 마지막 활동: :{hb_color}[{gap}초 전]")
+                st.sidebar.caption(f"진행: {state['current']}회 완료 | 최고: {state['best_v']:.2f}")
+                
+                col1, col2 = st.sidebar.columns(2)
+                if col1.button("🔄 화면 갱신", key="refresh_bg_opt"):
+                    st.rerun()
+                if col2.button("🛑 탐색 중단", key="stop_background_opt"):
+                    state['stop_requested'] = True
+                    st.sidebar.warning("중단 요청 중... (현재 Trial 완료 후 중단)")
+                    st.rerun()
+                
+                if st.session_state.get('opt_n_jobs', 1) > 2:
+                    st.sidebar.warning("⚠️ 많은 코어 사용 중: UI가 느려질 수 있습니다.")
+            else:
+                if state['error']:
+                    st.sidebar.error(f"❌ 오류 발생: {state['error']}")
+                    if st.sidebar.button("확인", key="clear_bg_error"):
+                        st.session_state.background_opt = None
+                        st.rerun()
+                else:
+                    if 'opt_notified' not in st.session_state or not st.session_state.opt_notified:
+                        st.sidebar.success("✅ 탐색 완료!")
+                        st.toast("🎉 최적화 탐색이 완료되었습니다!", icon="📊")
+                        st.session_state.opt_notified = True
+                    
+                    # 결과 병합
+                    st.session_state.opt_results = state['results']
+                    st.session_state.opt_baseline = {
+                        'score': state['base_info'][0], 
+                        'cagr': state['base_info'][1], 
+                        'mdd': state['base_info'][2]
+                    }
+                    
+                    st.sidebar.info("✨ 탐색이 완료되었습니다. 결과를 확인하세요.")
+                    col1, col2 = st.sidebar.columns(2)
+                    if col1.button("결과 보기", key="show_opt_result"):
+                        st.session_state.background_opt = None
+                        st.session_state.opt_notified = False
+                        st.rerun()
+                    if col2.button("닫기", key="close_bg_opt"):
+                        st.session_state.background_opt = None
+                        st.session_state.opt_notified = False
+                        st.rerun()
         
         # 세션 상태 초기화
         if 'current_params' not in st.session_state:
             st.session_state.current_params = {
                 'buy_signals': [
-                    {'rsi_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40},
-                    {'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40},
-                    {'rsi_val': 0, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False}
+                    {'rsi_val': 35, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 'opt_rsi_val': False, 'rng_rsi_val': [10, 60], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
+                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
+                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]}
                 ],
                 'sell_signals': [
-                    {'rsi_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
-                    {'rsi_val': 0, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
-                    {'rsi_val': 0, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'di_minus_cross': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False},
-                    {'rsi_val': 50, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': True}
+                    {'rsi_val': 70, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                    {'rsi_val': 50, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': True, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]}
                 ],
                 's3_protection': [
                     {
@@ -81,19 +137,22 @@ class GoldenStrategyApp:
                         'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
                     }
                 ],
-                'buy_reb_up': 0.018, 'buy_reb_down': -1.0, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
+                'buy_reb_up': 0.018, 'rng_buy_reb_up': [0.1, 5.0], 'buy_reb_down': -1.0, 'rng_buy_reb_down': [-15.0, -1.0], 
+                'sell_reb_up': 0.03, 'rng_sell_reb_up': [0.5, 10.0], 'sell_reb_down': -0.035, 'rng_sell_reb_down': [-10.0, -0.5],
+                'opt_buy_reb_up': False, 'opt_buy_reb_down': False, 'opt_sell_reb_up': False, 'opt_sell_reb_down': False,
                 'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
                 'use_fixed_reb': True, 'use_atr_reb': True,
-                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 3.0, 'atr_mult_sell': 10.0,
+                'atr_mult_buy_up': 10.0, 'rng_atr_m_buy_up': [1.0, 20.0], 'atr_mult_buy_down': 3.0, 'rng_atr_m_buy_down': [0.5, 5.0], 'atr_mult_sell': 10.0, 'rng_atr_m_sell': [1.0, 6.0],
+                'opt_atr_m_buy_up': False, 'opt_atr_m_buy_down': False, 'opt_atr_m_sell': False,
                 'atr_period_buy': 20, 'atr_period_sell': 20,
                 'use_panic': True, 'panic_ma': 200, 
                 'panic_buy_signals': [
-                    {'rsi_val': 27, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False},
-                    {'rsi_val': 28, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False},
-                    {'rsi_val': 30, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False}
+                    {'rsi_val': 27, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
+                    {'rsi_val': 28, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
+                    {'rsi_val': 30, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]}
                 ],
-                'use_vxn_safety': False, 'vxn_exit': 31,
-                'use_rsi_turbo': False, 'rsi_turbo': 31
+                'use_vxn_safety': False, 'vxn_exit': 31.0,
+                'use_rsi_turbo': False, 'rsi_turbo': 31.0
             }
         
         if 'comparison_list' not in st.session_state:
@@ -106,7 +165,7 @@ class GoldenStrategyApp:
             with st.spinner('실시간 데이터를 가져오는 중...'):
                 st.session_state.global_data = DataService.load_all_data()
         
-        data_dict, fg_df, vix_df, macro_df, news_df, fetch_status, fetch_time = st.session_state.global_data
+        data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time = st.session_state.global_data
         
         if not data_dict:
             st.error("데이터 로드 실패")
@@ -172,7 +231,7 @@ class GoldenStrategyApp:
                 if cur_prices:
                     # 2. 가상 종가 주입 및 지표 재계산 (VIX/VXN 포함)
                     try:
-                        v_dict, v_vix_df, v_fg_df = DataService.inject_virtual_close(data_dict, cur_prices, vix_df, fg_df)
+                        v_dict, v_vxn_df, v_fg_df = DataService.inject_virtual_close(data_dict, cur_prices, vxn_df, fg_df)
                     except Exception as ve:
                         st.error(f"데이터 주입 오류: {ve}")
                         v_dict = None
@@ -181,7 +240,7 @@ class GoldenStrategyApp:
                         try:
                             # 3. 오늘자 신호 예측
                             pred = StrategyEngine.predict_today_signal(
-                                v_dict, v_fg_df, v_vix_df, news_df, cp['leverage_asset'], cp['base_asset'], 
+                                v_dict, v_fg_df, v_vxn_df, news_df, cp['leverage_asset'], cp['base_asset'], 
                                 cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params
                             )
                         except Exception as e:
@@ -205,22 +264,27 @@ class GoldenStrategyApp:
         if menu == "📊 실시간 백테스트":
             if 'QQQ' in data_dict:
                 with st.spinner('백테스팅 계산 중...'):
-                    is_semi = cp['base_asset'] in ['SOXX', 'USD', 'SOXL'] or cp['leverage_asset'] in ['SOXX', 'USD', 'SOXL']
-                    bench_tickers = ['SOXX', 'USD', 'SOXL'] if is_semi else ['QQQ', 'QLD', 'TQQQ']
+                    bench_tickers = ['QQQ', 'QLD', 'TQQQ']
                     bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in bench_tickers}
-                    golden_history, closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, news_df, cp['leverage_asset'], cp['base_asset'], cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params=smart_params)
+                    golden_history, closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vxn_df, news_df, cp['leverage_asset'], cp['base_asset'], cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params=smart_params)
                     
                 BacktestView.render_results(golden_history, bh_histories, closed_trades, cp['base_asset'], cp['leverage_asset'], smart_params=smart_params)
             else:
                 st.error("데이터 로드 실패")
         elif menu == "🔬 퀀트 분석 연구실":
             QuantLabView.render(
-                data_dict, fg_df, vix_df, news_df, 
+                data_dict, fg_df, vxn_df, news_df, 
                 cp['leverage_asset'], cp['base_asset'], cp['trade_at'], 
                 cp, smart_params=smart_params, start_d=start_d, end_d=end_d
             )
+        elif menu == "🧬 롤링 윈도우 분석":
+            RollingLabView.render(
+                data_dict, fg_df, vxn_df, news_df,
+                cp['leverage_asset'], cp['base_asset'], cp['trade_at'],
+                cp, smart_params=smart_params
+            )
         elif menu == "📜 매매 전략 설정":
-            HistoryLabView.render(data_dict, fg_df, vix_df, news_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, salt="v2.3 (CrashLogs)")
+            HistoryLabView.render(data_dict, fg_df, vxn_df, news_df, cp['leverage_asset'], cp['base_asset'], cp['trade_at'], cp, smart_params=smart_params, salt="v2.3 (CrashLogs)")
         elif menu == "🧠 AI 마켓 인텔리전스":
             IntelligenceView.render()
 

@@ -5,16 +5,24 @@ import datetime
 import os
 import pandas as pd
 import optuna
+import time
+import threading
 from core.engine import StrategyEngine
 from utils.metrics import calculate_metrics
+try:
+    from streamlit.runtime.scriptrunner import get_script_run_context, add_script_run_context
+except ImportError:
+    # Older streamlit versions or non-streamlit environment
+    get_script_run_context = lambda: None
+    add_script_run_context = lambda thread, ctx: None
 
 class StrategyOptimizer:
     """전략 파라미터 최적화를 수행하는 핵심 엔진 클래스 (Optuna + SQLite 학습형)"""
     
-    def __init__(self, data_dict, fg_df, vix_df, news_df=None):
+    def __init__(self, data_dict, fg_df, vxn_df, news_df=None):
         self.data_dict = data_dict
         self.fg_df = fg_df
-        self.vix_df = vix_df
+        self.vxn_df = vxn_df
         self.news_df = news_df
         # 데이터베이스 저장소 설정 (Supabase 클라우드 전용)
         supabase_url = os.getenv("SUPABASE_DB_URL")
@@ -25,13 +33,13 @@ class StrategyOptimizer:
         else:
             raise ValueError("Optimizing을 위해 SUPABASE_DB_URL 환경 변수가 필요합니다. (SQLite 레거시는 더 이상 지원되지 않습니다)")
 
-    def run_simulation(self, cfg, s_date, e_date, trade_at):
+    def run_simulation(self, cfg, s_date, e_date, trade_at, fast_mode=False):
         """단일 시뮬레이션 수행 및 상세 성과 지표 계산"""
         try:
             hist, _, _ = StrategyEngine.run_golden_strategy(
-                self.data_dict, self.fg_df, self.vix_df, self.news_df, 
+                self.data_dict, self.fg_df, self.vxn_df, self.news_df, 
                 cfg['leverage_asset'], cfg['base_asset'], 
-                0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
+                0.0, s_date, e_date, cfg, trade_at, smart_params=cfg, fast_mode=fast_mode
             )
             if hist.empty: 
                 return {'score': -999, 'cagr': 0, 'mdd': 0}
@@ -86,7 +94,7 @@ class StrategyOptimizer:
             # 2. 노이즈 데이터로 시뮬레이션 수행
             try:
                 hist, _, _ = StrategyEngine.run_golden_strategy(
-                    noisy_data, self.fg_df, self.vix_df, self.news_df, 
+                    noisy_data, self.fg_df, self.vxn_df, self.news_df, 
                     cfg['leverage_asset'], cfg['base_asset'], 
                     0.0, s_date, e_date, cfg, trade_at, smart_params=cfg
                 )
@@ -107,14 +115,32 @@ class StrategyOptimizer:
             'low_cagr': results[int(len(results) * 0.1)] # 하위 10% 성과
         }
 
-    def optimize(self, base_cfg, n_iter, s_date, e_date, targets, trade_at, target_period="전체", progress_callback=None, wfa_ratio=0.0):
+    def optimize(self, base_cfg, n_iter, s_date, e_date, targets, trade_at, target_period="전체", progress_callback=None, wfa_ratio=0.0, n_jobs=2, is_async=False):
         """
         Optuna 기반 베이지안 최적화 수행
         :param wfa_ratio: 전진 분석 비율 (0.0~0.5). 0보다 크면 s_date~e_date를 IS/OOS로 분할함.
         """
+        # [신규] Streamlit 세션 컨텍스트 캡처
+        ctx = get_script_run_context()
+        self._iter_lock = threading.Lock()
         
         # [중요] 기존 설정을 직접 수정하지 않도록 딥카피 수행 (사이드 이펙트 방지)
         base_cfg = copy.deepcopy(base_cfg)
+        
+        print(f"\n[DIAG] optimize() called with targets: {targets}")
+        opt_keys = [k for k in base_cfg.keys() if k.startswith('opt_')]
+        print(f"[DIAG] Top-level opt_ keys: {opt_keys}")
+        for k in opt_keys:
+            if base_cfg[k]: print(f"  - {k}: {base_cfg[k]}")
+            
+        for i, b in enumerate(base_cfg.get('buy_signals', [])):
+            b_opts = [k for k in b.keys() if k.startswith('opt_')]
+            if any(b.get(k) for k in b_opts):
+                print(f"[DIAG] buy_signals[{i}] active opts: {[k for k in b_opts if b.get(k)]}")
+        for i, s in enumerate(base_cfg.get('sell_signals', [])):
+            s_opts = [k for k in s.keys() if k.startswith('opt_')]
+            if any(s.get(k) for k in s_opts):
+                print(f"[DIAG] sell_signals[{i}] active opts: {[k for k in s_opts if s.get(k)]}")
         
         # [데이터 분할] WFA 모드인 경우 날짜 구간 계산
         is_s_date, is_e_date = s_date, e_date
@@ -134,8 +160,8 @@ class StrategyOptimizer:
         # [수정] 통합된 태그 생성 메소드 사용
         ctx_tag = self._get_ctx_tag(base_cfg['leverage_asset'], base_cfg['base_asset'], targets, wfa_ratio)
         
-        # 1. 베이스라인 성과 측정 (IS 기준)
-        base_res = self.run_simulation(base_cfg, is_s_date, is_e_date, trade_at)
+        # 1. 베이스라인 성과 측정 (IS 기준, 베이스라인은 정확한 비교를 위해 fast_mode 사용)
+        base_res = self.run_simulation(base_cfg, is_s_date, is_e_date, trade_at, fast_mode=True)
         base_score = base_res['score']
         b_cagr, b_mdd = base_res['cagr'], base_res['mdd']
         
@@ -148,6 +174,20 @@ class StrategyOptimizer:
             sampler=optuna.samplers.TPESampler(seed=42) # 학습형 샘플러 (TPE)
         )
         
+        # [신규] 스레드 간 공유 상태 관리 (진동 및 생존 확인 강화)
+        shared_state = {
+            'study': study, 
+            'current': 0,
+            'best_v': -999.0,
+            'done': False,
+            'error': None,
+            'results': None,
+            'base_info': None,
+            'heartbeat': time.time(), # [신규] 생존 확인용
+            'stop_requested': False,   # [신규] 중단 요청 플래그
+            'thread': None             # [신규] 스레드 객체 저장
+        }
+
         # [신규] 진행률 계산을 위한 시작 카운트 기록
         start_count = len(study.trials)
 
@@ -161,6 +201,18 @@ class StrategyOptimizer:
 
         # 3. 목표 함수 정의
         def objective(trial):
+            # [필수] 중단 요청 확인
+            if shared_state.get('stop_requested'):
+                trial.study.stop()
+                return -999
+                
+            # [필수] 개별 작업 스레드에 Streamlit 컨텍스트 주입
+            if ctx:
+                add_script_run_context(threading.current_thread(), ctx)
+            
+            # 하트비트 업데이트
+            shared_state['heartbeat'] = time.time()
+                
             cand = copy.deepcopy(base_cfg)
             
             # 탐색 범위 정의 (지능형 가이드)
@@ -223,6 +275,17 @@ class StrategyOptimizer:
                     if cand['sell_signals'][i]['use_willr']:
                         cand['sell_signals'][i]['willr_val'] = trial.suggest_int(f"{prefix}willr_val", -40, -5)
 
+                    # [신규] 매도 시그널 AI 뉴스 필터 (Q, Z) 추가
+                    cand['sell_signals'][i]['use_news_q'] = trial.suggest_categorical(f"{prefix}use_news_q", [True, False])
+                    if cand['sell_signals'][i]['use_news_q']:
+                        # 매도는 분위수가 '낮을 때' (공포/과매도) 파는 것이 일반적이므로 범위를 낮게 설정
+                        cand['sell_signals'][i]['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", 0.05, 0.40)
+                    
+                    cand['sell_signals'][i]['use_news_z'] = trial.suggest_categorical(f"{prefix}use_news_z", [True, False])
+                    if cand['sell_signals'][i]['use_news_z']:
+                        # Z점수가 매우 낮을 때 (비정상적 투매) 대응
+                        cand['sell_signals'][i]['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", -2.5, -0.5)
+
             if "리밸런싱 및 ATR 변동성 (Full)" in targets: # 오타 수정: 벨 -> 밸
                 # 고정 비율
                 cand['use_fixed_reb'] = trial.suggest_categorical("use_fixed", [True, False])
@@ -251,10 +314,159 @@ class StrategyOptimizer:
                     cand['panic_rsi_s1'] = p_s1
                     cand['panic_rsi_s2'] = p_s2
                     cand['panic_rsi_s3'] = p_s3
-                    if 'panic_buy_signals' in cand:
-                        for i, rsi in enumerate([p_s1, p_s2, p_s3]):
-                            if i < len(cand['panic_buy_signals']): 
-                                cand['panic_buy_signals'][i]['rsi_val'] = rsi
+
+            if "사용자 지정 (🎯 타겟 최적화)" in targets or "Custom Targeted Optimization" in targets or "AI 지표 지능형 탐색 (구조+수치)" in targets:
+                print(f"[DEBUG] Trial {trial.number} - Targets: {targets}")
+                # 상위 레벨 opt_ 확인
+                top_opts = {k: v for k, v in cand.items() if k.startswith('opt_') and v}
+                if top_opts: print(f"  [DEBUG] Active top-level opts: {top_opts}")
+                
+                # 1. 매수 시그널 타겟팅
+                for i in range(len(cand['buy_signals'])):
+                    if i >= 3: break
+                    p = cand['buy_signals'][i]
+                    prefix = f"custom_b{i+1}_"
+                    
+                    if p.get('opt_rsi_val'):
+                        r = p.get('rng_rsi_val', [10, 60])
+                        p['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}rsi_val: {p['rsi_val']}")
+                    if p.get('opt_adx_val') and p.get('use_adx'):
+                        r = p.get('rng_adx_val', [5, 80])
+                        p['adx_val'] = trial.suggest_int(f"{prefix}adx_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}adx_val: {p['adx_val']}")
+                    if p.get('opt_willr_val') and p.get('use_willr'):
+                        r = p.get('rng_willr_val', [-95, -50])
+                        p['willr_val'] = trial.suggest_int(f"{prefix}willr_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}willr_val: {p['willr_val']}")
+                    # [2단계: Discovery] 구조적 최적화 (AI 필터 사용 여부 자체를 탐색)
+                    if "AI 지표 지능형 탐색 (구조+수치)" in targets:
+                        # Q 지표 구조 탐색
+                        is_use_q = trial.suggest_categorical(f"{prefix}use_news_q", [True, False])
+                        p['use_news_q'] = is_use_q
+                        if is_use_q:
+                            r = p.get('rng_news_q_val', [0.5, 0.99])
+                            p['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", float(r[0]), float(r[1]))
+                            print(f"  [SUGGEST][T{trial.number}] {prefix}news_q_val: {p['news_q_val']}")
+                        
+                        # Z 지표 구조 탐색
+                        is_use_z = trial.suggest_categorical(f"{prefix}use_news_z", [True, False])
+                        p['use_news_z'] = is_use_z
+                        if is_use_z:
+                            r = p.get('rng_news_z_val', [-1.0, 4.0])
+                            p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
+                            print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+                    
+                    # [일반: Tuning/Manual] 기존 타겟 최격화 (UI 또는 지정된 슬롯만 강제 활성화)
+                    elif p.get('opt_news_q'):
+                        p['use_news_q'] = True # Force enable if optimizing
+                        r = p.get('rng_news_q_val', [0.5, 0.99])
+                        p['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}news_q_val: {p['news_q_val']}")
+                    
+                    if not ("AI 지표 지능형 탐색 (구조+수치)" in targets) and p.get('opt_news_z'):
+                        p['use_news_z'] = True # Force enable if optimizing
+                        r = p.get('rng_news_z_val', [-1.0, 4.0])
+                        p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+
+                # 2. 매도 시그널 타겟팅
+                for i in range(len(cand['sell_signals'])):
+                    if i >= 4: break
+                    p = cand['sell_signals'][i]
+                    prefix = f"custom_s{i+1}_"
+                    
+                    if p.get('opt_rsi_val'):
+                        r = p.get('rng_rsi_val', [40, 95])
+                        p['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}rsi_val: {p['rsi_val']}")
+                    if p.get('opt_chandelier_mult') and p.get('use_chandelier'):
+                        r = p.get('rng_chandelier_mult', [1.0, 5.0])
+                        p['chandelier_mult'] = trial.suggest_float(f"{prefix}chan_mult", float(r[0]), float(r[1]))
+                    if p.get('opt_willr_val') and p.get('use_willr'):
+                        r = p.get('rng_willr_val', [-50, -5])
+                        p['willr_val'] = trial.suggest_int(f"{prefix}willr_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}willr_val: {p['willr_val']}")
+                    # [2단계: Discovery] 구조적 최적화
+                    if "AI 지표 지능형 탐색 (구조+수치)" in targets:
+                        # Q 지표 구조 탐색
+                        is_use_q = trial.suggest_categorical(f"{prefix}use_news_q", [True, False])
+                        p['use_news_q'] = is_use_q
+                        if is_use_q:
+                            r = p.get('rng_news_q_val', [0.01, 0.5])
+                            p['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", float(r[0]), float(r[1]))
+                            print(f"  [SUGGEST][T{trial.number}] {prefix}news_q_val: {p['news_q_val']}")
+                        
+                        # Z 지표 구조 탐색
+                        is_use_z = trial.suggest_categorical(f"{prefix}use_news_z", [True, False])
+                        p['use_news_z'] = is_use_z
+                        if is_use_z:
+                            r = p.get('rng_news_z_val', [-4.0, 1.0])
+                            p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
+                            print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+
+                    elif p.get('opt_news_q'):
+                        p['use_news_q'] = True # Force enable if optimizing
+                        r = p.get('rng_news_q_val', [0.01, 0.5])
+                        p['news_q_val'] = trial.suggest_float(f"{prefix}news_q_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}news_q_val: {p['news_q_val']}")
+                    
+                    if not ("AI 지표 지능형 탐색 (구조+수치)" in targets) and p.get('opt_news_z'):
+                        p['use_news_z'] = True # Force enable if optimizing
+                        r = p.get('rng_news_z_val', [-4.0, 1.0])
+                        p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+
+                # 3. 리밸런싱 타겟팅
+                if cand.get('use_fixed_reb'):
+                    if cand.get('opt_buy_reb_up'):
+                        r = cand.get('rng_buy_reb_up', [0.1, 5.0])
+                        cand['buy_reb_up'] = trial.suggest_float("custom_buy_reb_up", r[0], r[1], step=0.1) / 100.0
+                        print(f"  [SUGGEST][T{trial.number}] buy_reb_up: {cand['buy_reb_up'] * 100.0}%")
+                    if cand.get('opt_buy_reb_down'):
+                        r = cand.get('rng_buy_reb_down', [-15.0, -1.0])
+                        cand['buy_reb_down'] = trial.suggest_float("custom_buy_reb_down", r[0], r[1], step=0.1) / 100.0
+                        print(f"  [SUGGEST][T{trial.number}] buy_reb_down: {cand['buy_reb_down'] * 100.0}%")
+                    if cand.get('opt_sell_reb_up'):
+                        r = cand.get('rng_sell_reb_up', [0.5, 10.0])
+                        cand['sell_reb_up'] = trial.suggest_float("custom_sell_reb_up", r[0], r[1], step=0.1) / 100.0
+                        print(f"  [SUGGEST][T{trial.number}] sell_reb_up: {cand['sell_reb_up'] * 100.0}%")
+                    if cand.get('opt_sell_reb_down'):
+                        r = cand.get('rng_sell_reb_down', [-10.0, -0.5])
+                        cand['sell_reb_down'] = trial.suggest_float("custom_sell_reb_down", r[0], r[1], step=0.1) / 100.0
+                        print(f"  [SUGGEST][T{trial.number}] sell_reb_down: {cand['sell_reb_down'] * 100.0}%")
+                
+                if cand.get('use_atr_reb'):
+                    if cand.get('opt_atr_m_buy_up'):
+                        r = cand.get('rng_atr_m_buy_up', [1.0, 20.0])
+                        cand['atr_mult_buy_up'] = trial.suggest_float("custom_atr_m_buy_up", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] atr_mult_buy_up: {cand['atr_mult_buy_up']}")
+                    if cand.get('opt_atr_m_buy_down'):
+                        r = cand.get('rng_atr_m_buy_down', [0.5, 5.0])
+                        cand['atr_mult_buy_down'] = trial.suggest_float("custom_atr_m_buy_down", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] atr_mult_buy_down: {cand['atr_mult_buy_down']}")
+                    if cand.get('opt_atr_m_sell'):
+                        r = cand.get('rng_atr_m_sell', [1.0, 6.0])
+                        cand['atr_mult_sell'] = trial.suggest_float("custom_atr_m_sell", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] atr_mult_sell: {cand['atr_mult_sell']}")
+
+                # 4. 하락장 매수 지연 (Panic Buy Signals) 타겟팅
+                for i in range(len(cand.get('panic_buy_signals', []))):
+                    if i >= 3: break
+                    p = cand['panic_buy_signals'][i]
+                    prefix = f"custom_pb{i+1}_"
+                    if p.get('opt_rsi_val'):
+                        r = p.get('rng_rsi_val', [15, 50])
+                        p['rsi_val'] = trial.suggest_int(f"{prefix}rsi_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}rsi_val: {p['rsi_val']}")
+                    if p.get('opt_adx_val') and p.get('use_adx'):
+                        r = p.get('rng_adx_val', [5, 80])
+                        p['adx_val'] = trial.suggest_int(f"{prefix}adx_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}adx_val: {p['adx_val']}")
+                    if p.get('opt_willr_val') and p.get('use_willr'):
+                        r = p.get('rng_willr_val', [-95, -50])
+                        p['willr_val'] = trial.suggest_int(f"{prefix}willr_val", int(r[0]), int(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}willr_val: {p['willr_val']}")
             
             if "S3 보호 조건 (Gap/Acc)" in targets:
                 for i in range(len(cand['s3_protection'])):
@@ -275,14 +487,14 @@ class StrategyOptimizer:
                 cand['set_sl_limit'] = trial.suggest_int("set_sl_lim", -20, -5)
 
             # [Phase 2] 데이터 정형화: Trial 결과 상세 지표 산출 및 DB 저장
-            # 훈련(IS) 구간 성과 측정
-            res = self.run_simulation(cand, is_s_date, is_e_date, trade_at)
+            # 훈련(IS) 구간 성과 측정 (빠른 탐색을 위해 fast_mode=True 적용)
+            res = self.run_simulation(cand, is_s_date, is_e_date, trade_at, fast_mode=True)
             
             # [WFA] 검증(OOS) 구간 성과는 최적화 완료 후 Top 결과에 대해서만 수행하거나, 
             # 혹은 실시간으로 기록할지 결정. (여기서는 실시간 기록으로 설계)
             oos_res = None
             if wfa_ratio > 0:
-                oos_res = self.run_simulation(cand, oos_s_date, oos_e_date, trade_at)
+                oos_res = self.run_simulation(cand, oos_s_date, oos_e_date, trade_at, fast_mode=True)
                 # WFE (Walk Forward Efficiency) 계산: OOS CAGR / IS CAGR
                 wfe = (oos_res['cagr'] / res['cagr']) if res['cagr'] > 0 else 0
                 trial.set_user_attr("oos_cagr", oos_res['cagr'])
@@ -305,49 +517,80 @@ class StrategyOptimizer:
             
             score = res['score']
             
-            if progress_callback:
-                try:
-                    # 완료된 trial이 없을 때 best_value 접근 시 ValueError 발생 대응
-                    best_v = study.best_value
-                except (ValueError, RuntimeError):
-                    best_v = res['score']
-                # [수정] 외부 요인(DB 누적 데이터)에 영향받지 않는 내부 세션 카운터 사용
-                self._current_iter += 1
-                progress_callback(self._current_iter, n_iter, best_v)
+            # [신규] 시행 결과 로그 출력 (사용자 요청: 최적 값을 찾지 못해도 점수 표시)
+            print(f"  [RESULT][T{trial.number}] Score: {score:.2f} | CAGR: {res['cagr']:.1f}% | MDD: {res['mdd']:.1f}%")
             
             return score
 
-        # [신규] 세션 내 진행률 표시를 위한 전용 카운터
-        self._current_iter = 0
+        # [수정] 메인 스레드 폴링 방식으로 진행률 표시 (NoSessionContext 완전 방지)
+        def opt_callback(study, trial):
+            with self._iter_lock:
+                shared_state['current'] += 1
+                shared_state['heartbeat'] = time.time()
+                try:
+                    shared_state['best_v'] = study.best_value
+                except:
+                    shared_state['best_v'] = trial.value if trial.value is not None else -999.0
 
-        # 5. 최적화 실행
-        study.optimize(objective, n_trials=n_iter)
+        def run_optimization_task():
+            try:
+                if ctx:
+                    add_script_run_context(threading.current_thread(), ctx)
+                
+                # [중요] 최적화 실행
+                study.optimize(objective, n_trials=n_iter, n_jobs=n_jobs, callbacks=[opt_callback])
+                
+                if shared_state['stop_requested']:
+                    return
 
-        # 6. 결과 정리 및 반환 (현재 기간 필터링 적용)
-        valid_trials = [t for t in study.trials if t.value is not None and t.value > -900]
-        
-        # [수정] 결과 도출 시 기간 + 컨텍스트 필터링 엄격하게 적용 (엉뚱한 과거 데이터 차단)
-        p_filter = target_period.split(' ')[0]
-        filtered_trials = []
-        for t in valid_trials:
-            t_period = t.user_attrs.get("period")
-            t_ctx = t.user_attrs.get("ctx_tag")
-            
-            # 기간 매칭 (전체이거나 일치하는 경우)
-            period_match = (p_filter == "전체" and t_period in ["전체", None]) or (t_period == p_filter)
-            # 컨텍스트 매칭 (신규 데이터만 보여주거나 컨텍스트가 없는 과거 데이터는 제외)
-            ctx_match = (t_ctx == ctx_tag)
-            
-            if period_match and ctx_match:
-                filtered_trials.append(t)
-            
-        filtered_trials.sort(key=lambda x: x.value, reverse=True)
-        
-        results = []
-        for t in filtered_trials[:10]: # 상위 10개만 복원
-            results.append(self._reconstruct_config(base_cfg, t, s_date, e_date, trade_at, is_s_date, is_e_date, oos_s_date, oos_e_date))
+                # 완료 후 결과 정리
+                valid_t = [trial for trial in study.trials if trial.value is not None and trial.value > -900]
+                # ... (이하 결과 정리 로직은 동일)
+                p_f = target_period.split(' ')[0]
+                f_trials = []
+                for trial in valid_t:
+                    t_p = trial.user_attrs.get("period")
+                    t_c = trial.user_attrs.get("ctx_tag")
+                    p_match = (p_f == "전체" and t_p in ["전체", None]) or (t_p == p_f)
+                    c_match = (t_c == ctx_tag)
+                    if p_match and c_match:
+                        f_trials.append(trial)
+                f_trials.sort(key=lambda x: x.value, reverse=True)
+                
+                res_list = []
+                for trial in f_trials[:10]:
+                    res_list.append(self._reconstruct_config(base_cfg, trial, s_date, e_date, trade_at, is_s_date, is_e_date, oos_s_date, oos_e_date))
+                
+                shared_state['results'] = res_list
+                shared_state['base_info'] = (base_score, b_cagr, b_mdd)
 
-        return results, base_score, b_cagr, b_mdd
+            except Exception as e:
+                shared_state['error'] = e
+            finally:
+                shared_state['done'] = True
+
+        # 백그라운드에서 최적화 시작
+        opt_thread = threading.Thread(target=run_optimization_task, daemon=True)
+        shared_state['thread'] = opt_thread # 레퍼런스 유지
+        opt_thread.start()
+
+        # [수정] 비동기 모드일 경우 즉시 상태 객체 반환
+        if is_async:
+            return shared_state
+
+        # 메인 스레드에서 UI 업데이트 폴링 (동기 모드 호환성 유지)
+        while not shared_state['done']:
+            if progress_callback:
+                progress_callback(shared_state['current'], n_iter, shared_state['best_v'])
+            time.sleep(0.1) # 0.1초 간격으로 UI 업데이트
+
+        # 최적화 중 에러 발생 시 전파
+        if shared_state['error']:
+            raise shared_state['error']
+
+        return shared_state['results'], base_score, b_cagr, b_mdd
+
+        return shared_state['results'], base_score, b_cagr, b_mdd
 
     def get_top_results(self, base_cfg, n_top=5, s_date=None, e_date=None, trade_at='종가', target_period=None, targets=None, wfa_ratio=0.0):
         """DB에서 현재까지의 상위 성과를 추출 (탐색 중단/시작 전 용도)"""

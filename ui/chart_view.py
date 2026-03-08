@@ -13,7 +13,7 @@ from utils.metrics import calculate_metrics
 class ChartView:
     """차트 통합 분석 화면 UI 구성 클래스"""
     @staticmethod
-    def render(data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, trade_at, params, smart_params=None, comparison_list=None, hide_header=False):
+    def render(data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, trade_at, params, smart_params=None, comparison_list=None, hide_header=False):
         if not hide_header:
             st.header("📈 인사이트 센터 (Insight Center)")
             st.caption("내 전략의 상세 분석과 더불어, 바구니에 담긴 다른 전략들과의 다이내믹한 대조 분석을 수행합니다.")
@@ -23,11 +23,9 @@ class ChartView:
         long_end = datetime.date.today()
         
         with st.spinner('전 기간 데이터 시뮬레이션 중...'):
-            golden_history, all_closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, long_start, long_end, params, trade_at, smart_params=smart_params)
+            golden_history, all_closed_trades, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, long_start, long_end, params, trade_at, smart_params=smart_params)
             
-            semi_group = ['SOXX', 'USD', 'SOXL']
-            is_semi = base_asset in semi_group or leverage_asset in semi_group
-            b1, b2, b3 = ("SOXX", "USD", "SOXL") if is_semi else ("QQQ", "QLD", "TQQQ")
+            b1, b2, b3 = ("QQQ", "QLD", "TQQQ")
             bh_1 = StrategyEngine.run_benchmark(data_dict, b1, long_start, long_end)
             bh_2 = StrategyEngine.run_benchmark(data_dict, b2, long_start, long_end)
             bh_3 = StrategyEngine.run_benchmark(data_dict, b3, long_start, long_end)
@@ -58,14 +56,14 @@ class ChartView:
             new_comp_name = st.selectbox("📝 비교군 이름", options=name_opts, key="integrated_comp_name_ui", label_visibility="collapsed")
         
         with c2:
-            if st.button("➕ 현재 결과를 비교 목록에 담기", use_container_width=True):
+            if st.button("➕ 현재 결과를 비교 목록에 담기", width='stretch'):
                 if any(item['name'] == new_comp_name for item in st.session_state.comparison_list):
                     st.warning(f"이미 '{new_comp_name}'이(가) 비교 목록에 있습니다.")
                 else:
                     target_params = StrategyStorage.load_strategy(new_comp_name) if (new_comp_name in stored_strats and new_comp_name != loaded_name) else None
                     if target_params:
                         with st.spinner(f"'{new_comp_name}' 전략 데이터 시뮬레이션 중..."):
-                            t_hist, _, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vix_df, news_df, target_params.get('leverage_asset', leverage_asset), target_params.get('base_asset', base_asset), (target_params.get('cash_ratio_pct', 0)/100.0), long_start, long_end, target_params, target_params.get('trade_at', trade_at), smart_params=target_params)
+                            t_hist, _, _ = StrategyEngine.run_golden_strategy(data_dict, fg_df, vxn_df, news_df, target_params.get('leverage_asset', leverage_asset), target_params.get('base_asset', base_asset), (target_params.get('cash_ratio_pct', 0)/100.0), long_start, long_end, target_params, target_params.get('trade_at', trade_at), smart_params=target_params)
                             t_metrics = calculate_metrics(t_hist)
                             st.session_state.comparison_list.append({'name': new_comp_name, 'base': target_params.get('base_asset', base_asset), 'lev': target_params.get('leverage_asset', leverage_asset), 'history': t_hist, 'metrics': t_metrics})
                     else:
@@ -74,7 +72,7 @@ class ChartView:
                     st.success(f"'{new_comp_name}' 추가 완료!"); st.rerun()
 
         with c3:
-            if st.button("🗑️ 비교 목록 관리", use_container_width=True):
+            if st.button("🗑️ 비교 목록 관리", width='stretch'):
                 st.session_state.show_comp_manager = not st.session_state.get('show_comp_manager', False)
 
         if comparison_list:
@@ -92,9 +90,24 @@ class ChartView:
         else:
             st.info("💡 비교할 대상이 없습니다. 위에서 이름을 입력하고 [비교 목록에 담기] 버튼을 눌러보세요.")
 
-        tab_core, tab_cycle, tab_signal = st.tabs(["🏆 전략 핵심 인사이트", "🌀 마켓 사이클", "🔬 기술적 신호 탐색"])
+        # [개선] st.tabs 대신 상태 유지가 가능한 커스텀 탭 구현 (Sticky Tabs)
+        tab_options = ["🏆 전략 핵심 인사이트", "🌀 마켓 사이클", "🔬 기술적 신호 탐색"]
+        
+        # 세션 상태에 마지막 선택된 탭 저장
+        if 'active_insight_tab' not in st.session_state:
+            st.session_state.active_insight_tab = tab_options[0]
+            
+        st.write("")
+        selected_tab = st.radio(
+            "인사이트 메뉴", 
+            tab_options, 
+            horizontal=True, 
+            label_visibility="collapsed",
+            key="insight_tab_selector"
+        )
+        st.write("---")
 
-        with tab_core:
+        if selected_tab == "🏆 전략 핵심 인사이트":
             # 1. 연도별 성과 비교
             actual_start = golden_history.index.min().date()
             if actual_start > long_start: st.info(f"ℹ️ 자산 상장일 관계로 분석이 **{actual_start}**부터 시작되었습니다.")
@@ -123,7 +136,7 @@ class ChartView:
                 fig_y.add_trace(go.Bar(x=list(t_ret.index.year), y=list(t_ret*100), name=str(target['name']), marker_color=colors[i % len(colors)]))
             
             fig_y.update_layout(barmode='group', template='plotly_white', height=400)
-            st.plotly_chart(fig_y, use_container_width=True)
+            st.plotly_chart(fig_y, width='stretch')
 
             HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params, selected_comparisons=selected_comparisons)
             HistoryLabView.render_overall_summary(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), selected_comparisons=selected_comparisons)
@@ -165,7 +178,7 @@ class ChartView:
                 summary_data = []
                 for r in results:
                     summary_data.append({"전략": r['name'], "상승장 CAGR": f"{r['bull']['CAGR']*100:+.1f}%", "상승장 MDD": f"{r['bull']['MDD']*100:.1f}%", "하락장 CAGR": f"{r['bear']['CAGR']*100:+.1f}%", "하락장 MDD": f"{r['bear']['MDD']*100:.1f}%"})
-                st.dataframe(pd.DataFrame(summary_data).set_index("전략"), use_container_width=True)
+                st.dataframe(pd.DataFrame(summary_data).set_index("전략"), width='stretch')
                 
                 # 차트 시각화
                 fig_regime = go.Figure()
@@ -173,7 +186,7 @@ class ChartView:
                     color = "#00c853" if r['name'] == "내 전략" else ("#66b3ff" if r['name'] == b1 else colors[(i-2) % len(colors)])
                     fig_regime.add_trace(go.Bar(x=["상승장 CAGR", "하락장 CAGR"], y=[r['bull']['CAGR']*100, r['bear']['CAGR']*100], name=r['name'], marker_color=color, text=[f"{r['bull']['CAGR']*100:+.1f}%", f"{r['bear']['CAGR']*100:+.1f}%"], textposition="auto"))
                 fig_regime.update_layout(title="시장 국면별 연평균 수익률(CAGR) 비교", yaxis_title="CAGR (%)", barmode='group', template='plotly_white', height=500)
-                st.plotly_chart(fig_regime, use_container_width=True)
+                st.plotly_chart(fig_regime, width='stretch')
                 st.info(f"💡 **분석 가이드**: 주가가 200일 이동평균선(SMA200) 위에 있을 때를 '상승장', 아래에 있을 때를 '하락장'으로 정의합니다. 각 전략이 하락장에서도 벤치마크({b1}) 대비 자산을 잘 방어하는지(MDD) 및 수익을 내는지(CAGR) 확인해 보세요.")
 
             st.divider()
@@ -187,9 +200,9 @@ class ChartView:
             fig_radar.add_trace(go.Scatterpolar(r=get_radar_data(metrics_s), theta=cat, fill='toself', name='내 전략', line_color='#ff1744'))
             for i, target in enumerate(selected_comparisons):
                 fig_radar.add_trace(go.Scatterpolar(r=get_radar_data(target['metrics']), theta=cat, fill='toself', name=target['name'], line_color=colors[i % len(colors)]))
-            fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=500); st.plotly_chart(fig_radar, use_container_width=True)
+            fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=500); st.plotly_chart(fig_radar, width='stretch')
 
-        with tab_cycle:
+        elif selected_tab == "🌀 마켓 사이클":
             # 1. 월별 계절성
             HistoryLabView.render_seasonality(golden_history, bh_long, b_name=b_long_name)
             st.divider()
@@ -198,30 +211,39 @@ class ChartView:
             with col1: HistoryLabView.render_election_cycle(golden_history, bh_long, b_name=b_long_name)
             with col2: HistoryLabView.render_midterm_analysis(golden_history, bh_long, b_name=b_long_name)
 
-        with tab_signal:
+        elif selected_tab == "🔬 기술적 신호 탐색":
             st.subheader("📈 지표 상관관계 분석 (Signal Lab)")
-            c1, c2 = st.columns([1, 2]); sel_year = c1.selectbox("📅 분석 연도", range(datetime.date.today().year, 2009, -1), index=0)
+            # [복구] 분석 연도 선택을 탭 내부로 다시 이동
+            c1, c2 = st.columns([1, 2])
+            sel_year = c1.selectbox("📅 분석 연도", range(datetime.date.today().year, 2009, -1), index=0, key="signal_analysis_year")
+            
             hist_sub = golden_history[golden_history.index.year == sel_year]
             if hist_sub.empty: st.warning(f"{sel_year}년 데이터 없음.")
             else:
-                # [수정] AI 심리 지표를 포함하여 4단 차드로 확장
-                fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05, 
-                                   row_heights=[0.4, 0.2, 0.2, 0.2],
-                                   subplot_titles=("Price", "VIX", "RSI", "AI News Sentiment Quantile"))
+                # [수정] AI 심리 지표(Q, Z)를 포함하여 5단 차트로 확장
+                fig = make_subplots(rows=5, cols=1, shared_xaxes=True, vertical_spacing=0.04, 
+                                   row_heights=[0.35, 0.15, 0.15, 0.15, 0.15],
+                                   subplot_titles=("Price", "VXN", "RSI", "AI News Sentiment Quantile", "AI News Z-Score"))
                 
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['Close'], name='Price', line=dict(color='#66b3ff')), row=1, col=1)
-                fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['VIX'], name='VIX', line=dict(color='#ff9999')), row=2, col=1)
+                fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['VXN'], name='VXN', line=dict(color='#ff9999')), row=2, col=1)
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=hist_sub['RSI'], name='RSI', line=dict(color='#9b59b6')), row=3, col=1)
                 
-                # AI 뉴스 분위수 추가 (0.1 ~ 0.9)
+                # 4행: AI 뉴스 분위수 (0.1 ~ 0.9)
                 n_q = hist_sub.get('News_Q', pd.Series([0.5]*len(hist_sub), index=hist_sub.index))
                 fig.add_trace(go.Scatter(x=hist_sub.index, y=n_q, name='AI News Q', 
                                          line=dict(color='#00e676', width=2), fill='tozeroy'), row=4, col=1)
-                
-                # 임계값 가이드라인 (예: 상위 10% 호재 라인)
-                fig.add_hline(y=0.9, line_dash="dot", line_color="red", annotation_text="Top 10% (Strong Buy)", row=4, col=1)
-                fig.add_hline(y=0.1, line_dash="dot", line_color="blue", annotation_text="Bottom 10% (Panic)", row=4, col=1)
+                fig.add_hline(y=0.9, line_dash="dot", line_color="red", annotation_text="Top 10%", row=4, col=1)
+                fig.add_hline(y=0.1, line_dash="dot", line_color="blue", annotation_text="Bottom 10%", row=4, col=1)
 
-                fig.update_layout(height=850, template='plotly_white', hovermode='x unified', showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
-                st.info("💡 **분석 가이드**: 주가 변동과 VIX, RSI, 그리고 **AI 뉴스 심리 분위수(Quantile)**의 상관관계를 분석합니다. AI 지수가 0.9(상위 10%)를 넘어서는 구간에서 주가가 어떻게 반응하는지, 그리고 매수 신호가 얼마나 유효한지 육안으로 확인해 보세요.")
+                # 5행: AI 뉴스 Z-점수 (-3.0 ~ 3.0)
+                n_z = hist_sub.get('News_Z', pd.Series([0.0]*len(hist_sub), index=hist_sub.index))
+                fig.add_trace(go.Scatter(x=hist_sub.index, y=n_z, name='AI News Z', 
+                                         line=dict(color='#ff9100', width=2)), row=5, col=1)
+                fig.add_hline(y=2.0, line_dash="dot", line_color="red", annotation_text="Overheated (+2.0)", row=5, col=1)
+                fig.add_hline(y=-2.0, line_dash="dot", line_color="blue", annotation_text="Panic (-2.0)", row=5, col=1)
+
+                fig.update_layout(height=1000, template='plotly_white', hovermode='x unified', showlegend=False)
+                st.plotly_chart(fig, width='stretch')
+                st.info("💡 **분석 가이드**: 주가 변동과 VXN, RSI, 그리고 **AI 뉴스 감성 지표(Q, Z)**의 상관관계를 분석합니다. 분위수(Q)는 심리의 절대적 위치를, Z-점수는 심리의 급격한 변화를 나타냅니다. 두 지표가 동시에 임계값을 돌파할 때의 신뢰도를 확인해 보세요.")
+

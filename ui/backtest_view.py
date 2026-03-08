@@ -48,7 +48,7 @@ class BacktestView:
             with col2:
                 # 버튼 클릭 시 app.py에서 처리하도록 신호 전달
                 # 버튼을 누르면 예측 프로세스가 시작됨
-                if st.button("현재가 기준 신호 계산", use_container_width=True, type="primary"):
+                if st.button("현재가 기준 신호 계산", width='stretch', type="primary"):
                     st.session_state.trigger_preview = True
             
             # 프리뷰 결과가 세션에 있으면 표시
@@ -159,7 +159,7 @@ class BacktestView:
         buy_pts = golden_history[golden_history['Trade_Label'].str.contains('매수', na=False)]
         sell_pts = golden_history[golden_history['Trade_Label'].str.contains('매도', na=False)]
         
-        safety_sells = sell_pts[sell_pts['VIX'] >= v_exit] if 'VIX' in sell_pts.columns else pd.DataFrame()
+        safety_sells = sell_pts[sell_pts['VXN'] >= v_exit] if 'VXN' in sell_pts.columns else (sell_pts[sell_pts['VIX'] >= v_exit] if 'VIX' in sell_pts.columns else pd.DataFrame())
         normal_sells = sell_pts.drop(safety_sells.index)
         
         turbo_buys = buy_pts[buy_pts['RSI'] <= r_turbo] if 'RSI' in buy_pts.columns else pd.DataFrame()
@@ -188,7 +188,7 @@ class BacktestView:
 
 
         if smart_params:
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='red', opacity=0.2), name='Safety Mode (VIX↑)', showlegend=True, legendgroup='safety'))
+            fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='red', opacity=0.2), name='Safety Mode (VXN↑)', showlegend=True, legendgroup='safety'))
             fig.add_trace(go.Scatter(x=[None], y=[None], mode='markers', marker=dict(size=10, color='blue', opacity=0.2), name='Turbo Mode (RSI↓)', showlegend=True, legendgroup='turbo'))
 
             def add_backtest_vrects(df, mask, color, lg):
@@ -201,10 +201,11 @@ class BacktestView:
                 for s, e in intervals:
                     fig.add_trace(go.Scatter(x=[s, e, e, s], y=[0, 0, y_max, y_max], fill='toself', fillcolor=color, opacity=0.08, line_width=0, showlegend=False, legendgroup=lg, hoverinfo='skip'))
 
-            if 'VIX' in golden_history.columns: add_backtest_vrects(golden_history, golden_history['VIX'] >= v_exit, "red", "safety")
+            if 'VXN' in golden_history.columns: add_backtest_vrects(golden_history, golden_history['VXN'] >= v_exit, "red", "safety")
+            elif 'VIX' in golden_history.columns: add_backtest_vrects(golden_history, golden_history['VIX'] >= v_exit, "red", "safety")
             if 'RSI' in golden_history.columns: add_backtest_vrects(golden_history, golden_history['RSI'] <= r_turbo, "blue", "turbo")
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         BacktestView.render_returns_heatmap(golden_history, bh_histories, leverage_asset)
         BacktestView.render_monte_carlo(golden_history)
 
@@ -277,7 +278,7 @@ class BacktestView:
                 display_df.style.apply(style_signal, axis=1)
                 .applymap(highlight_signals, subset=[c for c in ['RSI Signal', 'MACD Signal', 'Williams Signal'] if c in display_df.columns])
                 .format(formats, na_rep='-'), 
-                use_container_width=True, height=600
+                width='stretch', height=600
             )
 
         if closed_trades is not None and not closed_trades.empty:
@@ -287,7 +288,7 @@ class BacktestView:
                 journal_df['Entry_Date'] = pd.to_datetime(journal_df['Entry_Date']).dt.date
                 journal_df['Exit_Date'] = pd.to_datetime(journal_df['Exit_Date']).dt.date
                 j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%', 'MDD': '{:.2f}%'}
-                st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), use_container_width=True, height=400)
+                st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), width='stretch', height=400)
 
         # [신규] 실시간 거래 체결 내역 (이미양식 대응 및 접기 기능 추가)
         st.divider()
@@ -343,7 +344,7 @@ class BacktestView:
                         return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
                     return [''] * len(row)
                 
-                st.dataframe(display_exec_df.style.apply(style_exec, axis=1).format(e_formats, na_rep='-'), use_container_width=True)
+                st.dataframe(display_exec_df.style.apply(style_exec, axis=1).format(e_formats, na_rep='-'), width='stretch')
             else:
                 st.write("해당 기간 동안 실행된 매매 내역이 없습니다.")
 
@@ -374,7 +375,7 @@ class BacktestView:
                 ann = pivot.iloc[i, -1]
                 fig.add_annotation(x=12.2, y=year, text=f"<b>{ann:.1f}%</b>", showarrow=False, font=dict(color="blue" if ann > 0 else "red"))
             fig.update_layout(title=title, xaxis_title="Month", yaxis_title="Year", height=300 + (len(pivot)*20), template='plotly_white')
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
         try:
             b_name = list(bh_histories.keys())[0] if bh_histories else "Benchmark"
@@ -404,7 +405,7 @@ class BacktestView:
         fig.add_trace(go.Scatter(x=list(range(sim_data.shape[0])), y=median_path, name='Median (50th)', line=dict(color='blue', width=2.5)))
         fig.add_hline(y=sum(sim_data[0,:])/sim_data.shape[1], line_dash="dash", line_color="red", opacity=0.5, annotation_text="Current")
         fig.update_layout(title="Future Asset Value Projection (1 Year)", template='plotly_white', height=500)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         
         p5, p50, p95 = np.percentile(sim_data[-1, :], 5), np.percentile(sim_data[-1, :], 50), np.percentile(sim_data[-1, :], 95)
         c1, c2, c3 = st.columns(3)

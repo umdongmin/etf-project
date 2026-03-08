@@ -11,13 +11,14 @@ from ui.optimizer_view import OptimizerView
 # [신규] 시뮬레이션 캐싱 래퍼 (성능 최적화 및 안정성 확보)
 def deep_tuple(obj):
     if isinstance(obj, dict):
-        return tuple(sorted((k, deep_tuple(v)) for k, v in obj.items()))
+        # [최적화] 시뮬레이션 결과에 영향이 없는 최적화 관련 키(opt_, rng_)는 캐시 키에서 제외
+        return tuple(sorted((k, deep_tuple(v)) for k, v in obj.items() if not (k.startswith('opt_') or k.startswith('rng_'))))
     if isinstance(obj, list):
         return tuple(deep_tuple(i) for i in obj)
     return obj
 
 @st.cache_data
-def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, _news_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
+def get_cached_strategy_result(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
     # 튜플을 다시 딕셔너리로 복구하여 엔진 실행 (재귀적으로 처리)
     def to_dict(tup):
         if not isinstance(tup, tuple): return tup
@@ -30,7 +31,7 @@ def get_cached_strategy_result(_data_dict, _fg_df, _vix_df, _news_df, lev, base,
     _p = to_dict(params_tuple)
     _s = to_dict(smart_tuple)
     # [수정] 엔진이 3개(history, closed_trades, sell4_events)의 값을 반환하므로 전체 반환
-    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vix_df, _news_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
+    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
 
 class HistoryLabView:
     """역사적 마켓 랩 화면 UI 구성 클래스"""
@@ -54,7 +55,7 @@ class HistoryLabView:
     }
 
     @staticmethod
-    def render(data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, trade_at, params, smart_params=None, salt="v2.3 (CrashLogs)"):
+    def render(data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, trade_at, current_params, smart_params=None, salt=None):
         st.header("📜 매매 전략 설정 및 역사적 분석")
         st.caption("전략을 저장하거나 불러오고, 2010년부터 현재까지의 성과를 분석합니다. [v2.3]")
 
@@ -67,7 +68,7 @@ class HistoryLabView:
             with st.form("save_strat_form_main"):
                 st.write("📝 현재 전략 저장")
                 new_strat_name = st.text_input("새 전략 이름 입력", key="new_strat_save_name_main")
-                save_submitted = st.form_submit_button("💾 내 컴퓨터에 신규 저장", use_container_width=True)
+                save_submitted = st.form_submit_button("💾 내 컴퓨터에 신규 저장", width='stretch')
                 if save_submitted:
                     if new_strat_name:
                         StrategyStorage.save_strategy(new_strat_name, cp)
@@ -79,7 +80,7 @@ class HistoryLabView:
             
             if st.session_state.get('loaded_strat_name'):
                 st.write(f"🔄 기존 전략: **{st.session_state.loaded_strat_name}**")
-                if st.button(f"🚀 '{st.session_state.loaded_strat_name}' 업데이트 (덮어쓰기)", key="update_btn_main", use_container_width=True):
+                if st.button(f"🚀 '{st.session_state.loaded_strat_name}' 업데이트 (덮어쓰기)", key="update_btn_main", width='stretch'):
                     StrategyStorage.save_strategy(st.session_state.loaded_strat_name, cp)
                     st.success(f"'{st.session_state.loaded_strat_name}' 업데이트 완료!")
 
@@ -89,7 +90,7 @@ class HistoryLabView:
                 with st.form("load_strat_form_main"):
                     st.write("📂 저장된 전략 불러오기")
                     target_strat = st.selectbox("전략 선택 (목록)", ["선택 안 함"] + stored_strats, key="load_sel_main")
-                    load_submitted = st.form_submit_button("✨ 선택한 전략 적용하기", use_container_width=True)
+                    load_submitted = st.form_submit_button("✨ 선택한 전략 적용하기", width='stretch')
                     if load_submitted and target_strat != "선택 안 함":
                         config = StrategyStorage.load_strategy(target_strat)
                         if config:
@@ -97,7 +98,27 @@ class HistoryLabView:
                             # app.py의 초기값을 복사하거나, 최소한 주요 리스트들은 비워야 함
                             # 여기서는 app.py의 기본 구조를 세션에 다시 설정함
                             st.session_state.current_params = {
-                                'buy_signals': [], 'sell_signals': [], 's3_protection': [], 'panic_buy_signals': [],
+                                'buy_signals': [
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [10, 60], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]}
+                                ],
+                                'sell_signals': [
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]}
+                                ],
+                                's3_protection': [{}, {}, {}],
+                                'panic_buy_signals': [
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
+                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]}
+                                ],
+                                'opt_buy_reb_up': False, 'rng_buy_reb_up': [0.1, 5.0], 'opt_buy_reb_down': False, 'rng_buy_reb_down': [-15.0, -1.0], 
+                                'opt_sell_reb_up': False, 'rng_sell_reb_up': [0.5, 10.0], 'opt_sell_reb_down': False, 'rng_sell_reb_down': [-10.0, -0.5],
+                                'opt_atr_m_buy_up': False, 'rng_atr_m_buy_up': [1.0, 20.0], 'opt_atr_m_buy_down': False, 'rng_atr_m_buy_down': [0.5, 5.0], 
+                                'opt_atr_m_sell': False, 'rng_atr_m_sell': [1.0, 6.0],
                                 'buy_reb_up': 0.018, 'buy_reb_down': -1.0, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
                                 'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
                                 'use_fixed_reb': True, 'use_atr_reb': True,
@@ -178,6 +199,18 @@ class HistoryLabView:
                                 st.session_state[f"b_di_plus_cross_{i}"] = bp.get('di_plus_cross', False)
                                 st.session_state[f"b_di_minus_cross_{i}"] = bp.get('di_minus_cross', False)
                                 st.session_state[f"b_sar_use_{i}"] = bp.get('use_sar', False)
+                                
+                                # [신규] 최적화 🎯 및 범위(rng) 동기화
+                                st.session_state[f"opt_chk_b_rsi_{i}"] = bp.get('opt_rsi_val', False)
+                                st.session_state[f"rng_sld_b_rsi_{i}"] = bp.get('rng_rsi_val', [10, 60] if i==1 else [0, 45])
+                                st.session_state[f"opt_chk_b_adx_{i}"] = bp.get('opt_adx_val', False)
+                                st.session_state[f"rng_sld_b_adx_{i}"] = bp.get('rng_adx_val', [5, 80])
+                                st.session_state[f"opt_chk_b_willr_{i}"] = bp.get('opt_willr_val', False)
+                                st.session_state[f"rng_sld_b_willr_{i}"] = bp.get('rng_willr_val', [-95, -50])
+                                st.session_state[f"opt_chk_b_news_q_{i}"] = bp.get('opt_news_q', False)
+                                st.session_state[f"rng_sld_b_news_q_{i}"] = bp.get('rng_news_q_val', [0.5, 0.99])
+                                st.session_state[f"opt_chk_b_news_z_{i}"] = bp.get('opt_news_z', False)
+                                st.session_state[f"rng_sld_b_news_z_{i}"] = bp.get('rng_news_z_val', [-1.0, 4.0])
 
                             # 매도 시그널 조건 동기화 (최대 4개)
                             sell_sig_list = config.get('sell_signals', [])
@@ -199,6 +232,18 @@ class HistoryLabView:
                                 st.session_state[f"s_sar_use_{i}"] = sp.get('use_sar', False)
                                 st.session_state[f"s_willr_use_{i}"] = sp.get('use_willr', False)
                                 st.session_state[f"s_willr_val_{i}"] = sp.get('willr_val', -20)
+                                
+                                # [신규] 최적화 🎯 및 범위(rng) 동기화
+                                st.session_state[f"opt_chk_s_rsi_{i}"] = sp.get('opt_rsi_val', False)
+                                st.session_state[f"rng_sld_s_rsi_{i}"] = sp.get('rng_rsi_val', [40, 95])
+                                st.session_state[f"opt_chk_s_chan_{i}"] = sp.get('opt_chandelier_mult', False)
+                                st.session_state[f"rng_sld_s_chan_{i}"] = sp.get('rng_chandelier_mult', [1.0, 5.0])
+                                st.session_state[f"opt_chk_s_willr_{i}"] = sp.get('opt_willr_val', False)
+                                st.session_state[f"rng_sld_s_willr_{i}"] = sp.get('rng_willr_val', [-50, -5])
+                                st.session_state[f"opt_chk_s_news_q_{i}"] = sp.get('opt_news_q', False)
+                                st.session_state[f"rng_sld_s_news_q_{i}"] = sp.get('rng_news_q_val', [0.01, 0.5])
+                                st.session_state[f"opt_chk_s_news_z_{i}"] = sp.get('opt_news_z', False)
+                                st.session_state[f"rng_sld_s_news_z_{i}"] = sp.get('rng_news_z_val', [-4.0, 1.0])
 
                             # S3 보호 설정 동기화 (최대 3개 신호 블록 처리)
                             s3_prots = config.get('s3_protection', [])
@@ -212,8 +257,8 @@ class HistoryLabView:
                                 st.session_state[f"s_ma60_lim_{i}"] = float(s3p.get('ma60_limit', 0.0))
                                 st.session_state[f"s_ma200_use_{i}"] = s3p.get('use_ma200', False)
                                 st.session_state[f"s_ma200_lim_{i}"] = float(s3p.get('ma200_limit', 0.0))
-                                st.session_state[f"s_vj_use_{i}"] = s3p.get('use_vix_jump', False)
-                                st.session_state[f"s_vj_{i}"] = float(s3p.get('vix_jump', 15.0))
+                                st.session_state[f"s_vj_use_{i}"] = s3p.get('use_vxn_jump', False)
+                                st.session_state[f"s_vj_{i}"] = float(s3p.get('vxn_jump', 15.0))
                                 st.session_state[f"s_gap_use_{i}"] = s3p.get('use_gap_down', False)
                                 st.session_state[f"s_gap_lim_{i}"] = float(s3p.get('gap_limit', -3.0))
                                 st.session_state[f"s_acc_use_{i}"] = s3p.get('use_drop_acc', False) # 파라미터명 수정: use_acc_down -> use_drop_acc
@@ -244,6 +289,14 @@ class HistoryLabView:
                                 st.session_state[f"pb_di_plus_cross_{i}"] = pb.get('di_plus_cross', False)
                                 st.session_state[f"pb_di_minus_cross_{i}"] = pb.get('di_minus_cross', False)
                                 st.session_state[f"pb_sar_use_{i}"] = pb.get('use_sar', False)
+                                 
+                                # [신규] 최적화 🎯 및 범위(rng) 동기화
+                                st.session_state[f"opt_chk_pb_rsi_{i}"] = pb.get('opt_rsi_val', False)
+                                st.session_state[f"rng_sld_pb_rsi_{i}"] = pb.get('rng_rsi_val', [15, 50])
+                                st.session_state[f"opt_chk_pb_adx_{i}"] = pb.get('opt_adx_val', False)
+                                st.session_state[f"rng_sld_pb_adx_{i}"] = pb.get('rng_adx_val', [5, 80])
+                                st.session_state[f"opt_chk_pb_willr_{i}"] = pb.get('opt_willr_val', False)
+                                st.session_state[f"rng_sld_pb_willr_{i}"] = pb.get('rng_willr_val', [-95, -50])
 
                             # 리밸런싱 모드 및 ATR 설정 동기화
                             st.session_state.use_fixed_chk = config.get('use_fixed_reb', True)
@@ -255,6 +308,23 @@ class HistoryLabView:
                             # [신규] 매수/매도 ATR 기준일 동기화 (과거 데이터 호환을 위해 get 기본값 사용)
                             st.session_state.atr_p_buy = int(config.get('atr_period_buy', 20))
                             st.session_state.atr_p_sell = int(config.get('atr_period_sell', 20))
+                            
+                            # [신규] 리밸런싱 최적화 🎯 및 범위(rng) 동기화
+                            st.session_state.opt_chk_buy_reb_up = config.get('opt_buy_reb_up', False)
+                            st.session_state.rng_sld_buy_reb_up = config.get('rng_buy_reb_up', [0.1, 5.0])
+                            st.session_state.opt_chk_buy_reb_down = config.get('opt_buy_reb_down', False)
+                            st.session_state.rng_sld_buy_reb_down = config.get('rng_buy_reb_down', [-15.0, -1.0])
+                            st.session_state.opt_chk_sell_reb_up = config.get('opt_sell_reb_up', False)
+                            st.session_state.rng_sld_sell_reb_up = config.get('rng_sell_reb_up', [0.5, 10.0])
+                            st.session_state.opt_chk_sell_reb_down = config.get('opt_sell_reb_down', False)
+                            st.session_state.rng_sld_sell_reb_down = config.get('rng_sell_reb_down', [-10.0, -0.5])
+                            
+                            st.session_state.opt_chk_atr_m_buy_up = config.get('opt_atr_m_buy_up', False)
+                            st.session_state.rng_sld_atr_m_buy_up = config.get('rng_atr_m_buy_up', [1.0, 20.0])
+                            st.session_state.opt_chk_atr_m_buy_down = config.get('opt_atr_m_buy_down', False)
+                            st.session_state.rng_sld_atr_m_buy_down = config.get('rng_atr_m_buy_down', [0.5, 5.0])
+                            st.session_state.opt_chk_atr_m_sell = config.get('opt_atr_m_sell', False)
+                            st.session_state.rng_sld_atr_m_sell = config.get('rng_atr_m_sell', [1.0, 6.0])
 
                             st.session_state.loaded_strat_name = target_strat
                             st.success(f"'{target_strat}' 모든 설정 및 UI 로드 완료!")
@@ -262,16 +332,17 @@ class HistoryLabView:
             else:
                 st.info("저장된 전략이 없습니다.")
         
-        start_date = datetime.date(2010, 1, 1)
-        end_date = datetime.date.today()
+        # [수정] 하드코딩된 기간 대신 TesterView의 기간 선택기 활용
+        start_date, end_date = TesterView.render_period_selector()
+        st.divider()
         
         with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
             # 중첩된 설정(시그널 리스트 등)의 변경을 감지하기 위해 Deep Tuplification 적용
-            params_tuple = deep_tuple(params)
+            params_tuple = deep_tuple(current_params)
             smart_tuple = deep_tuple(smart_params)
             
             golden_history, closed_trades, all_signal_events = get_cached_strategy_result(
-                data_dict, fg_df, vix_df, news_df, leverage_asset, base_asset, params['cash_ratio_pct']/100.0, 
+                data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, current_params['cash_ratio_pct']/100.0, 
                 start_date, end_date, params_tuple, trade_at, smart_tuple, salt
             )
             
@@ -281,9 +352,7 @@ class HistoryLabView:
                 'lev': leverage_asset
             }
             
-            semi_group = ['SOXX', 'USD', 'SOXL']
-            is_semi = base_asset in semi_group or leverage_asset in semi_group
-            b1, b2, b3 = ("SOXX", "USD", "SOXL") if is_semi else ("QQQ", "QLD", "TQQQ")
+            b1, b2, b3 = ("QQQ", "QLD", "TQQQ")
             
             bh_1 = StrategyEngine.run_benchmark(data_dict, b1, start_date, end_date)
             bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
@@ -325,7 +394,7 @@ class HistoryLabView:
                         pb_df = pb_df[['date', 'type', 'reason', 'price']].copy()
                         pb_df['date'] = pb_df['date'].dt.strftime('%Y-%m-%d')
                         pb_df.columns = ['발생일', '해제 단계', '충족 조건 (이유)', '기준가(종가)']
-                        st.dataframe(pb_df.set_index('발생일'), use_container_width=True)
+                        st.dataframe(pb_df.set_index('발생일'), width='stretch')
                     else:
                         st.info("시뮬레이션 기간 내 하락장 매수 지연 해제 기록이 없습니다.")
                 
@@ -340,7 +409,7 @@ class HistoryLabView:
                         sl_df['date'] = sl_df['date'].dt.strftime('%Y-%m-%d')
                         sl_df['executed'] = sl_df['executed'].map({True: "✅ 체결(손절)", False: "🛡️ 차단(보호)"})
                         sl_df.columns = ['발생일', '항목', '상세 사유', '당시 가격', '처리 상태']
-                        st.dataframe(sl_df.set_index('발생일'), use_container_width=True)
+                        st.dataframe(sl_df.set_index('발생일'), width='stretch')
                     else:
                         st.info("시뮬레이션 기간 내 손절매 작동 기록이 없습니다.")
 
@@ -356,7 +425,7 @@ class HistoryLabView:
                                 s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VXN']].copy()
                                 s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
                                 s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VXN']
-                                st.dataframe(s3_emerg_display, use_container_width=True)
+                                st.dataframe(s3_emerg_display, width='stretch')
                             else:
                                 st.info("기록된 S3 보호 작동 내역이 없습니다.")
                 with col_diag2:
@@ -367,45 +436,54 @@ class HistoryLabView:
                                 s3_sell3_display = sell3_days[['RSI', 'MACD', 'VXN', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
                                 s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
                                 s3_sell3_display.columns = ['RSI', 'MACD', 'VXN', 'ADX', 'DI+', 'DI-', '보유자산']
-                                st.dataframe(s3_sell3_display, use_container_width=True)
+                                st.dataframe(s3_sell3_display, width='stretch')
                             else:
                                 st.info("S3 + 매도신호3 작동 기록이 없습니다.")
 
         elif active_tab == tab_list[1]:
+            # [신규] 실시간 성과 요약 대시보드 표시
+            TesterView.render_summary_dashboard(golden_history)
+            st.divider()
+
             st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
-            c_sel1, c_sel2, _ = st.columns(3)
+            c_sel1, c_sel2, c_sel3 = st.columns(3)
             use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
             use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
+            
+            # [수정] 최적화 모드 토글
+            opt_mode = c_sel3.toggle("🎯 최적화 대상 설정 모드", value=st.session_state.get('opt_mode_active', False), key="opt_mode_main_toggle")
+            st.session_state.opt_mode_active = opt_mode
             
             st.session_state.current_params['use_fixed_reb'] = use_fixed
             st.session_state.current_params['use_atr_reb'] = use_atr
 
             ticker_map = {
-                "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)",
-                "SOXX": "반도체 1배 (SOXX)", "USD": "반도체 2배 (USD)", "SOXL": "반도체 3배 (SOXL)",
-                "TMF": "채권 3배 (TMF)", "TLT": "채권 1배 (TLT)"
+                "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)"
             }
 
-            with st.form("strategy_config_combined_form"):
-                # 1. 상단 섹션 (기준 자산 및 매매 시그널)
-                new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
-                # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
-                new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
-                
-                st.write("---")
-                col_btn1, col_btn2 = st.columns(2)
-                if col_btn1.form_submit_button("🚀 전체 설정 반영 및 재시뮬레이션", use_container_width=True):
-                    st.session_state.current_params.update(new_params_top)
-                    st.session_state.current_params.update(new_params_bottom)
-                    st.rerun()
-                
-                if col_btn2.form_submit_button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", use_container_width=True):
-                    st.cache_data.clear()
-                    st.success("캐시가 성공적으로 삭제되었습니다.")
-                    st.rerun()
+            # [수정] st.form 제거: 모든 변경사항이 즉각 반영되도록 함 (탭 전환 시 유실 방지)
+            # 1. 상단 섹션 (기준 자산 및 매매 시그널)
+            new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
+            # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
+            new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
+            
+            # [신규] 실시간 동기화: UI 위젯에서 변경된 값을 즉시 session_state에 병합 (Pull 방식)
+            st.session_state.current_params.update(new_params_top)
+            st.session_state.current_params.update(new_params_bottom)
+
+            st.write("---")
+            col_btn1, col_btn2 = st.columns(2)
+            # form_submit_button 대신 일반 button 사용
+            if col_btn1.button("🚀 설정값 확정 및 강제 재시뮬레이션", width='stretch'):
+                st.rerun()
+            
+            if col_btn2.button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", width='stretch'):
+                st.cache_data.clear()
+                st.success("캐시가 성공적으로 삭제되었습니다.")
+                st.rerun()
 
         elif active_tab == tab_list[2]:
-            OptimizerView.render(data_dict, fg_df, vix_df, news_df, st.session_state.current_params)
+            OptimizerView.render(data_dict, fg_df, vxn_df, news_df, st.session_state.current_params)
 
     @staticmethod
     def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None, selected_comparisons=[]):
@@ -480,7 +558,7 @@ class HistoryLabView:
             except: return ''
 
         st.dataframe(df.style.applymap(style_returns, subset=[c for c in df.columns if "수익" in c])\
-                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c]), use_container_width=True, height=520)
+                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c]), width='stretch', height=520)
 
     @staticmethod
     def render_overall_summary(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), selected_comparisons=[]):
@@ -548,7 +626,7 @@ class HistoryLabView:
             s_item = get_summary(t_hist['Value'], target['name'])
             if s_item: summary_data.append(s_item)
         
-        st.dataframe(pd.DataFrame([s for s in summary_data if s]).set_index("구분"), use_container_width=True)
+        st.dataframe(pd.DataFrame([s for s in summary_data if s]).set_index("구분"), width='stretch')
 
     @staticmethod
     def render_election_cycle(strategy_hist, bench_hist, b_name="QQQ"):
@@ -574,7 +652,7 @@ class HistoryLabView:
         fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['내 전략'], name='내 전략', marker_color='#00c853', text=plot_df['내 전략'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
         fig.add_trace(go.Bar(x=plot_df.index, y=plot_df[f'{b_name}'], name=f'{b_name}', marker_color='#66b3ff', text=plot_df[f'{b_name}'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
         fig.update_layout(title="Strategy vs Benchmark by Election Cycle Year", template='plotly_white', barmode='group', height=450)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     @staticmethod
     def render_midterm_analysis(strategy_hist, bench_hist, b_name="QQQ"):
@@ -601,7 +679,7 @@ class HistoryLabView:
             fig.add_trace(go.Bar(x=avg_comp.index, y=avg_comp['내 전략'], name='내 전략', marker_color='#00c853', text=avg_comp['내 전략'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
             fig.add_trace(go.Bar(x=avg_comp.index, y=avg_comp[f'시장({b_name})'], name=f'시장({b_name})', marker_color='#66b3ff', text=avg_comp[f'시장({b_name})'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
             fig.update_layout(template='plotly_white', barmode='group', height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
             
         with col2:
             s_mid, b_mid = s_df[s_df['IsMidterm']].copy(), b_df[b_df['IsMidterm']].copy()
@@ -611,7 +689,7 @@ class HistoryLabView:
             fig.add_trace(go.Bar(x=mid_yearly.index.map(str), y=mid_yearly['Strategy'], name='내 전략', marker_color='#00c853', text=mid_yearly['Strategy'].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
             fig.add_trace(go.Bar(x=mid_yearly.index.map(str), y=mid_yearly[b_name], name=f'시장({b_name})', marker_color='#66b3ff', text=mid_yearly[b_name].apply(lambda x: f"{x:.1f}%"), textposition='auto'))
             fig.update_layout(template='plotly_white', barmode='group', height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
     @staticmethod
     def render_seasonality(strategy_hist, bench_hist, b_name="QQQ"):
@@ -638,4 +716,4 @@ class HistoryLabView:
         fig.update_layout(title="Seasonality Analysis", template='plotly_white', barmode='group', height=500, xaxis=dict(tickmode='array', tickvals=list(range(1,13)), ticktext=[f"{m}월" for m in range(1,13)]))
         fig.update_yaxes(title_text="Avg Monthly Return (%)", secondary_y=False)
         fig.update_yaxes(title_text="Strategy Win Rate (%)", secondary_y=True, range=[40, 80])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')

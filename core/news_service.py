@@ -42,7 +42,7 @@ class NewsService:
 
     def _get_connection(self):
         if not HAS_PSYCOPG2: raise ImportError("psycopg2-binary 라이브러리가 필요합니다.")
-        return psycopg2.connect(self.supabase_url)
+        return psycopg2.connect(self.supabase_url, connect_timeout=10)
 
     def _get_placeholder(self, conn): return "%s"
 

@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import json
 import datetime
 import pandas as pd
@@ -9,7 +10,7 @@ class OptimizerView:
     """AI를 활용한 전략 파라미터 최적화 UI 구성 클래스"""
     
     @staticmethod
-    def render(data_dict, fg_df, vix_df, news_df, current_params):
+    def render(data_dict, fg_df, vxn_df, news_df, current_params):
         st.markdown("### 🧠 지능형 전략 최적화 도구 (AI Optimizer)")
         
         # [Phase 3] Gemini API 설정 상시 노출 (접근성 개선)
@@ -29,7 +30,7 @@ class OptimizerView:
             else:
                 st.success("✅ AI 브리핑 준비 완료")
 
-        optimizer = StrategyOptimizer(data_dict, fg_df, vix_df, news_df)
+        optimizer = StrategyOptimizer(data_dict, fg_df, vxn_df, news_df)
         
         # [성능 최적화 1] 총 분석 횟수 캐싱 (10초 주기)
         if 'opt_refresh_key' not in st.session_state:
@@ -62,29 +63,57 @@ class OptimizerView:
                 target_period = st.selectbox("📅 분석 대상 기간 선택", ["전체 (2010~현재)", "최근 5년", "최근 3년"], index=0)
             with col_p2:
                 opt_targets = st.multiselect(
-                    "🎯 현재 필터링할 탐색 대상 (Targets)",
-                    ["매수 시그널 (Full)", "매도 시그널 (Full)", "리밸런싱 및 ATR 변동성 (Full)", "패닉 가속 (MA/RSI)", "S3 보호 조건 (Gap/Acc)", "방어 및 대피 시스템 (VXN/손절)"],
-                    default=["매수 시그널 (Full)", "매도 시그널 (Full)", "리밸런싱 및 ATR 변동성 (Full)"],
-                    key="top_dashboard_targets"
+                    "🎯 최적화 탐색 범위(Target)", 
+                    ["매수 시그널 (Full)", "매도 시그널 (Full)", "리밸런싱 및 ATR 변동성 (Full)", "하락장 매수 지연 해제 (S1~S3)", "사용자 지정 (🎯 타겟 최적화)"],
+                    default=["사용자 지정 (🎯 타겟 최적화)"],
+                    key="opt_targets_sel"
                 )
+                
+                if "사용자 지정 (🎯 타겟 최적화)" in opt_targets:
+                    # 선택된 최적화 항목 요약 표시
+                    opt_count = 0
+                    # 분석 대상 파악 (예시)
+                    for b in current_params.get('buy_signals', []):
+                        if b.get('opt_rsi_val'): opt_count += 1
+                        if b.get('opt_adx_val'): opt_count += 1
+                        if b.get('opt_willr_val'): opt_count += 1
+                        if b.get('opt_news_q'): opt_count += 1
+                        if b.get('opt_news_z'): opt_count += 1
+                    for s in current_params.get('sell_signals', []):
+                        if s.get('opt_rsi_val'): opt_count += 1
+                        if s.get('opt_chandelier_mult'): opt_count += 1
+                        if s.get('opt_willr_val'): opt_count += 1
+                        if s.get('opt_news_q'): opt_count += 1
+                        if s.get('opt_news_z'): opt_count += 1
+                    
+                    reb_opts = ['opt_buy_reb_up', 'opt_buy_reb_down', 'opt_sell_reb_up', 'opt_sell_reb_down', 'opt_atr_m_buy_up', 'opt_atr_m_buy_down', 'opt_atr_m_sell']
+                    for r in reb_opts:
+                        if current_params.get(r): opt_count += 1
+                    
+                    st.success(f"🎯 **{opt_count}**개의 사용자 지정 파라미터가 선택됨 (매매 전략 설정 탭에서 변경 가능)")
             with col_p3:
                 st.write("") # 간격 조절
                 use_wfa = st.checkbox("🧪 WFA(전진 분석) 모드", value=False, key="dash_use_wfa", help="데이터를 훈련(IS)과 검증(OOS)으로 분할하여 '과최적화' 여부를 테스트합니다.")
                 wfa_ratio_input = st.slider("OOS 비중", 10, 50, 30, step=5, format="%d%%", key="dash_wfa_ratio")
                 
             st.markdown("---")
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 n_iter = st.slider("탐색 횟수 (N)", 50, 1000, 200, step=50, help="탐색 횟수가 많을수록 더 정교한 결과를 얻지만 시간이 오래 걸립니다.")
             
             with col2:
                 trade_at = st.selectbox("최적화용 매매 시점", ["종가", "익일 시가"], index=0 if current_params.get('trade_at') == '종가' else 1)
+
+            with col3:
+                # 병렬 처리를 위한 코어 수 설정 (기본값 4)
+                n_jobs = st.slider("병렬 탐색 코어 수", 1, min(os.cpu_count(), 8), 2, help="높을수록 빠르지만 UI가 느려질 수 있습니다. (2개 권장)")
+            st.caption("💡 **팁**: 쾌적한 화면 전환을 위해 코어 수를 1~2개로 설정하는 것을 추천합니다.")
             
             submit_col1, submit_col2 = st.columns([1, 2])
             with submit_col1:
-                update_dash = st.form_submit_button("🔄 설정 적용 및 대시보드 갱신", use_container_width=True)
+                update_dash = st.form_submit_button("🔄 설정 적용 및 대시보드 갱신", width='stretch')
             with submit_col2:
-                start_opt = st.form_submit_button("🔥 AI 최적화 탐색 시작", type="primary", use_container_width=True)
+                start_opt = st.form_submit_button("🔥 AI 최적화 탐색 시작", type="primary", width='stretch')
             
         wfa_ratio = wfa_ratio_input / 100.0 if use_wfa else 0.0
 
@@ -120,7 +149,7 @@ class OptimizerView:
                     st.markdown("---")
                     llm = LLMService()
                     if llm.is_available():
-                        if st.button("🖋️ 현재까지의 성과 AI 중간 브리핑 받기", key="mid_term_report", use_container_width=True, type="secondary"):
+                        if st.button("🖋️ 현재까지의 성과 AI 중간 브리핑 받기", key="mid_term_report", width='stretch', type="secondary"):
                             with st.spinner("현재까지의 데이터를 기반으로 중간 요약 리포트를 작성 중..."):
                                 b_metrics = {
                                     'cagr': current_params.get('cagr', 0), 
@@ -142,35 +171,26 @@ class OptimizerView:
                     st.write("아직 충분한 분석 데이터가 축적되지 않았습니다.")
         
         if start_opt:
-            optimizer = StrategyOptimizer(data_dict, fg_df, vix_df)
+            # [수정] VXN으로 교체
+            optimizer = StrategyOptimizer(data_dict, fg_df, vxn_df, news_df)
+            st.session_state.opt_n_iter = n_iter
+            st.session_state.opt_n_jobs = n_jobs
             
-            # [수정] 베이스라인 데이터를 미리 계산하여 base_res 정의 (NameError 방지)
-            base_res = optimizer.run_simulation(current_params, s_date, e_date, trade_at)
-            
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            def progress_cb(current, total, best):
-                # [수정] 진행률이 1.0을 초과하지 않도록 제한 (StreamlitAPIException 방지)
-                progress_val = min(current / total, 1.0)
-                progress_bar.progress(progress_val)
-                if current % 10 == 0 or current == total:
-                    status_text.text(f"⏳ 탐색 중... ({current}/{total}) | 현재 최고 점수: {best:.2f}")
-
-            with st.spinner("AI가 최적 조합을 심층 탐색 중입니다..." + (" (WFA 검증 포함)" if use_wfa else "")):
-                results, b_score, b_cagr, b_mdd = optimizer.optimize(
+            # [수정] 비동기 모드로 최적화 시작
+            with st.status("🚀 AI 최적화 탐색을 백그라운드에서 시작합니다...", expanded=True) as status:
+                st.write("사이드바에서 실시간 진행 상황을 확인하실 수 있습니다.")
+                st.write("탐색 중에도 다른 페이지를 자유롭게 이용하세요.")
+                
+                # 비동기 호출 (is_async=True)
+                bg_state = optimizer.optimize(
                     current_params, n_iter, s_date, e_date, opt_targets, trade_at, 
-                    target_period=target_period, progress_callback=progress_cb,
-                    wfa_ratio=wfa_ratio
+                    target_period=target_period, progress_callback=None, # 콜백은 사이드바에서 폴링
+                    wfa_ratio=wfa_ratio, n_jobs=n_jobs, is_async=True
                 )
-                # [신규] 결과를 세션 상태에 저장 (버튼 클릭 후 리그림 시 유실 방지)
-                st.session_state.opt_results = results
-                st.session_state.opt_baseline = {
-                    'score': b_score, 'cagr': b_cagr, 'mdd': b_mdd,
-                    'sharpe': base_res.get('sharpe', 0),
-                    'pf': base_res.get('pf', 0),
-                    'win_rate': base_res.get('win_rate', 0)
-                }
+                st.session_state.background_opt = bg_state
+                status.update(label="✅ 백그라운드 탐색 예약 완료!", state="complete", expanded=False)
+            
+            st.rerun() # 즉시 리프레시하여 사이드바 위젯 활성화
 
         # [신규] 세션 상태에 저장된 결과가 있으면 표시
         if 'opt_results' in st.session_state and st.session_state.opt_results:
@@ -204,7 +224,7 @@ class OptimizerView:
                 
                 sum_data.append(row)
             
-            st.dataframe(pd.DataFrame(sum_data).set_index("Rank"), use_container_width=True)
+            st.dataframe(pd.DataFrame(sum_data).set_index("Rank"), width='stretch')
             
             # 최고 성과 적용 및 저장
             best = top_results[0]
@@ -247,7 +267,7 @@ class OptimizerView:
                     st.warning("⚠️ 사이드바에서 Gemini API 키를 먼저 설정해 주세요.")
                 else:
                     period_text = "전체" if target_period == "전체 (2010~현재)" else target_period
-                    if st.button("🖋️ AI에게 전략 분석 리포트 요청하기", type="secondary", use_container_width=True):
+                    if st.button("🖋️ AI에게 전략 분석 리포트 요청하기", type="secondary", width='stretch'):
                         with st.spinner("AI가 성과 데이터를 정밀 분석하여 리포트를 작성 중입니다..."):
                             report = llm.generate_briefing(results, st.session_state.opt_baseline, period_text)
                             st.session_state.ai_report = report
@@ -263,7 +283,7 @@ class OptimizerView:
                 
                 with c_act1:
                     st.write("📋 **세션 관리**")
-                    if st.button("✨ 최고 성과 세션에 바로 적용", use_container_width=True):
+                    if st.button("✨ 최고 성과 세션에 바로 적용", width='stretch'):
                         st.session_state.current_params = best['cfg']
                         st.success("세션에 적용되었습니다. 상단 탭에서 '분석 결과'를 확인하세요.")
                         st.rerun()
@@ -274,7 +294,7 @@ class OptimizerView:
                     suggested_name = f"tqqq_strategy_Optimized_{datetime.datetime.now().strftime('%m%d_%H%M')}"
                     new_opt_name = st.text_input("저장할 전략 이름", value=suggested_name, help="입력한 이름으로 strategies 폴더에 저장됩니다.")
                     
-                    if st.button("💾 입력한 이름으로 저장하기", use_container_width=True):
+                    if st.button("💾 입력한 이름으로 저장하기", width='stretch'):
                         if new_opt_name.strip():
                             from core.storage import StrategyStorage
                             # 파일명에서 특수문자 및 확장자 제거 시도 (안정성)

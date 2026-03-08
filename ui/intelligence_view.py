@@ -63,7 +63,7 @@ class IntelligenceView:
             3.  🧠 **AI Engine**: 구글 Gemini 2.5 Flash (**데이터 0.0** / **리포트 0.3**)
             """)
 
-            if st.button("🚀 통합 동기화 시작 (Sync Now)", use_container_width=True):
+            if st.button("🚀 통합 동기화 시작 (Sync Now)", width='stretch'):
                 status_area = st.empty()
                 with st.spinner("시장 데이터 동기화 중..."):
                     # 1. Macro 수집 시작 표시

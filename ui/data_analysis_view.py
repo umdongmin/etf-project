@@ -234,14 +234,14 @@ class DataAnalysisView:
 
 
             
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
             st.divider()
 
         # 5. 테이블 출력 (합쳐진 데이터 사용)
         st.write(f"### 상세 리포트 (필터링된 항목: {len(df_table)}건)")
         st.dataframe(
             df_disp.set_index('발생 일자'), 
-            use_container_width=True,
+            width='stretch',
             column_config={
                 "신호 종류": st.column_config.TextColumn("분류", width="small"),
                 "발생 사유 (상세)": st.column_config.TextColumn("사유", width="large"),
@@ -282,14 +282,15 @@ class DataAnalysisView:
                 log_df.index = log_df.index.date
                 
                 base_w_col = f'{base_name}_Weight'
-                lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ', 'USD', 'SOXL', 'TMF'] if f'{t}_Weight' in log_df.columns]
+                lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ'] if f'{t}_Weight' in log_df.columns]
                 cols = ['Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'] + lev_group_cols + [
                     base_w_col, 'Cash_Weight', 
                     'RSI', 'RSI_Sig', 
                     'MACD', 'Signal_Line', 'MACD_Hist', 'MACD_Sig', 
                     'BB_Lower', 'BB_Upper', 'Peak_Price', 'ATR_20',
                     'WILLR', 'WILLR_Sig', 
-                    'ADX', 'DMP', 'DMN', 'SAR', 'STOCH_K', 'STOCH_D', 'FG', 'VIX', 'VXN'
+                    'ADX', 'DMP', 'DMN', 'SAR', 'STOCH_K', 'STOCH_D', 'FG', 'VXN',
+                    'News_Q'
                 ]
                 display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
                 
@@ -308,11 +309,12 @@ class DataAnalysisView:
                     'Value': '${:,.0f}', 'QQQ_Value': '${:,.0f}', 'Trade_Ret': '{:.2f}%', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 
                     'RSI': '{:.1f}', 'MACD': '{:.2f}', 'Signal_Line': '{:.2f}', 'MACD_Hist': '{:.2f}', 
                     'BB_Lower': '${:.2f}', 'BB_Upper': '${:.2f}', 'Peak_Price': '${:.2f}', 'ATR_20': '{:.2f}',
-                    'FG': '{:.0f}', 'VIX': '{:.1f}', 'VXN': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}',
-                    'ADX': '{:.1f}', 'Williams': '{:.1f}', 'DI+': '{:.1f}', 'DI-': '{:.1f}', 'Parabolic': '{:.2f}'
+                    'FG': '{:.0f}', 'VXN': '{:.1f}', 'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}',
+                    'ADX': '{:.1f}', 'Williams': '{:.1f}', 'DI+': '{:.1f}', 'DI-': '{:.1f}', 'Parabolic': '{:.2f}',
+                    'News_Q': '{:.2f}'
                 }
                 formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
-                st.dataframe(display_df.style.apply(style_signal, axis=1).format(formats, na_rep='-'), use_container_width=True, height=600)
+                st.dataframe(display_df.style.apply(style_signal, axis=1).format(formats, na_rep='-'), width='stretch', height=600)
 
             # 5-2. 💰 완료된 한 세트 거래 내역
             if closed_trades is not None and not closed_trades.empty:
@@ -331,7 +333,7 @@ class DataAnalysisView:
                         journal_df['Entry_Date'] = journal_df['Entry_Date'].dt.date
                         journal_df['Exit_Date'] = journal_df['Exit_Date'].dt.date
                         j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%', 'MDD': '{:.2f}%'}
-                        st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), use_container_width=True, height=400)
+                        st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), width='stretch', height=400)
 
             # 5-3. 📝 실시간 거래 체결 내역
             with st.expander("📝 실시간 거래 체결 내역 (Actual Execution Log)", expanded=False):
@@ -339,17 +341,17 @@ class DataAnalysisView:
                 
                 if not exec_df.empty:
                     exec_df.index = exec_df.index.date
-                    all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', 'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_name}_Weight']
+                    all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', f'{base_name}_Weight']
                     for col in all_weight_cols:
                         if col not in exec_df.columns:
                             exec_df[col] = 0.0
                     
                     e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'QLD_Weight', 'TQQQ_Weight', 
-                              'USD_Weight', 'SOXL_Weight', 'TMF_Weight', f'{base_name}_Weight', 
-                              'Cash_Weight', 'RSI', 'MACD', 'VIX']
+                              f'{base_name}_Weight', 
+                              'Cash_Weight', 'RSI', 'MACD', 'VXN']
                     
                     display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
-                    e_formats = {'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VIX': '{:.1f}'}
+                    e_formats = {'Value': '${:,.0f}', 'Lev_Weight': '{:.1%}', 'Cash_Weight': '{:.1%}', 'RSI': '{:.1f}', 'MACD': '{:.2f}', 'VXN': '{:.1f}'}
                     e_formats.update({c: '{:.1%}' for c in all_weight_cols})
                     
                     def style_exec(row):
@@ -358,6 +360,6 @@ class DataAnalysisView:
                         elif sig.startswith("매수"): return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
                         return [''] * len(row)
                     
-                    st.dataframe(display_exec_df.style.apply(style_exec, axis=1).format(e_formats, na_rep='-'), use_container_width=True)
+                    st.dataframe(display_exec_df.style.apply(style_exec, axis=1).format(e_formats, na_rep='-'), width='stretch')
                 else:
                     st.info("해당 기간 동안 실행된 매매 내역이 없습니다.")

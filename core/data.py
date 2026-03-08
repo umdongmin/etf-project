@@ -91,7 +91,7 @@ class DataService:
         # start_date = '2010-01-01'  # 🌟 파라미터로 대체됨
         
         data_dict = {}
-        tickers = ['QQQ', 'QLD', 'TQQQ', 'SOXX', 'USD', 'SOXL', 'TLT', 'TMF']
+        tickers = ['QQQ', 'QLD', 'TQQQ']
         
         # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 및 장 마감 여부 계산
         # 현재는 단순 5시간 차이로 계산 (서머타임 고려 시 4시간)
@@ -140,23 +140,23 @@ class DataService:
                         except: s.index = s.index.normalize()
                         v_data_list.append(s)
                 
-                vix_df = pd.DataFrame()
+                vxn_df = pd.DataFrame()
                 if v_data_list:
-                    vix_df = pd.concat(v_data_list, axis=1)
-                    vix_df = vix_df[~vix_df.index.duplicated(keep='first')]
+                    vxn_df = pd.concat(v_data_list, axis=1)
+                    vxn_df = vxn_df[~vxn_df.index.duplicated(keep='first')]
                     
                     # [신규] VIX/VXN도 장중 데이터 필터링 (마켓 클로즈 여부 반영)
-                    if not vix_df.empty and vix_df.index[-1].date() >= today_est:
+                    if not vxn_df.empty and vxn_df.index[-1].date() >= today_est:
                         if not is_market_closed:
-                            vix_df = vix_df[vix_df.index.date < today_est]
+                            vxn_df = vxn_df[vxn_df.index.date < today_est]
                         
-                    vix_df = vix_df.ffill().bfill()
+                    vxn_df = vxn_df.ffill().bfill()
             except Exception as e:
                 print(f"VIX/VXN Download Error: {e}")
-                vix_df = pd.DataFrame()
+                vxn_df = pd.DataFrame()
         except Exception as e:
             print(f"Main Download Error: {e}")
-            vix_df = pd.DataFrame()
+            vxn_df = pd.DataFrame()
 
         fg_df = pd.DataFrame()
         try:
@@ -173,11 +173,10 @@ class DataService:
             fg_df = pd.DataFrame(columns=['FearGreed'])
 
         macro_data_map = {}
-        fetch_status = {'ETF': 'Success', 'VIX': 'Pending', 'FearGreed': 'Pending', 'Macro': 'Pending'}
-        m_tickers_raw = ['^TNX', '^IRX', '^PCCR']
+        fetch_status = {'ETF': 'Success', 'VXN': 'Pending', 'FearGreed': 'Pending', 'Macro': 'Pending'}
+        m_tickers_raw = ['^TNX', '^IRX']
         try:
             m_data = yf.download(m_tickers_raw, period='5d', progress=False, group_by='ticker')
-            # 🌟 속도 저하의 주범인 PCCR(유령 티커)을 제거했습니다.
             m_map = {'^TNX': 'US10Y', '^IRX': 'US03M'} 
             for t_raw, t_name in m_map.items():
                 if t_raw in m_data and not m_data[t_raw].empty:
@@ -187,14 +186,8 @@ class DataService:
         except:
             fetch_status['Macro'] = 'Error'
         
-        if not vix_df.empty:
-            if 'VIX' in vix_df.columns:
-                vix_vals = vix_df['VIX'].dropna()
-                if not vix_vals.empty:
-                    macro_data_map['VIX'] = vix_vals.iloc[-1]
-                    fetch_status['VIX'] = 'Success'
-            if 'VXN' in vix_df.columns:
-                vxn_vals = vix_df['VXN'].dropna()
+            if 'VXN' in vxn_df.columns:
+                vxn_vals = vxn_df['VXN'].dropna()
                 if not vxn_vals.empty:
                     macro_data_map['VXN'] = vxn_vals.iloc[-1]
                     fetch_status['VXN'] = 'Success'
@@ -218,7 +211,7 @@ class DataService:
             print(f"News Data Load Error: {e}")
 
         print(f"데이터 수집 완료 ({len(data_dict)} 개 티커)")
-        return data_dict, fg_df, vix_df, macro_df, news_df, fetch_status, fetch_time
+        return data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time
 
     @classmethod
     def fetch_current_prices(cls, tickers):
@@ -248,8 +241,8 @@ class DataService:
         return prices
 
     @classmethod
-    def inject_virtual_close(cls, data_dict, current_prices, vix_df=None, fg_df=None):
-        """기존 데이터셋 마지막 행에 실시간 현재가를 '임시 종가'로 주입하고 지표 재계산"""
+    def inject_virtual_close(cls, data_dict, current_prices, vxn_df, fg_df=None):
+        """가상 종가를 주입하여 시뮬레이션을 실시간 데이터 기반으로 수행 (VIX/VXN 포함)"""
         cloned_dict = {}
         # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 계산
         now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5) 
@@ -282,28 +275,28 @@ class DataService:
                 cloned_dict[ticker] = df.copy()
 
         # 2. VIX/VXN 데이터 주입 (있는 경우)
-        new_vix_df = vix_df.copy() if vix_df is not None else pd.DataFrame()
-        if not new_vix_df.empty:
-            new_vix_df.index = new_vix_df.index.normalize()
+        new_vxn_df = vxn_df.copy() if vxn_df is not None else pd.DataFrame()
+        if not new_vxn_df.empty:
+            new_vxn_df.index = new_vxn_df.index.normalize()
             vix_val = current_prices.get('^VIX')
             vxn_val = current_prices.get('^VXN')
             
             # [수정] 0.0 값도 유효하므로 'is not None'으로 체크
             if (vix_val is not None) or (vxn_val is not None):
-                if new_vix_df.index[-1] == today_ts:
-                    if vix_val is not None: new_vix_df.loc[today_ts, 'VIX'] = vix_val
-                    if vxn_val is not None: new_vix_df.loc[today_ts, 'VXN'] = vxn_val
+                if new_vxn_df.index[-1] == today_ts:
+                    if vix_val is not None: new_vxn_df.loc[today_ts, 'VIX'] = vix_val
+                    if vxn_val is not None: new_vxn_df.loc[today_ts, 'VXN'] = vxn_val
                 else:
-                    new_v_row = new_vix_df.iloc[-1].copy()
+                    new_v_row = new_vxn_df.iloc[-1].copy()
                     if vix_val is not None: new_v_row['VIX'] = vix_val
                     if vxn_val is not None: new_v_row['VXN'] = vxn_val
-                    new_vix_df = pd.concat([new_vix_df, pd.DataFrame([new_v_row], index=[today_ts])])
+                    new_vxn_df = pd.concat([new_vxn_df, pd.DataFrame([new_v_row], index=[today_ts])])
 
         # 3. Fear & Greed 주입 (현재가 수집 시 같이 가져왔다면 - 향후 확장 대비)
         new_fg_df = fg_df.copy() if fg_df is not None else pd.DataFrame()
         # (현재 Fear & Greed는 실시간 API 수집이 번거로우므로 기존 값 ffill 하도록 둠)
 
-        return cloned_dict, new_vix_df, new_fg_df
+        return cloned_dict, new_vxn_df, new_fg_df
 
     @staticmethod
     @st.cache_data(ttl=3600)
