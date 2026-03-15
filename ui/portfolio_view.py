@@ -23,7 +23,7 @@ class PortfolioView:
         st.caption(f"📅 분석 기간 (적용됨): **{local_start} ~ {local_end}**")
 
         # 세션 상태 초기화: 포트폴리오 전략 목록
-        _portfolio_init_ver = 'v3'
+        _portfolio_init_ver = 'v4'
         _needs_portfolio_init = (
             'portfolio_configs' not in st.session_state
             or st.session_state.get('portfolio_init_ver') != _portfolio_init_ver
@@ -33,13 +33,24 @@ class PortfolioView:
         if _needs_portfolio_init:
             _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
             _default_bond_lev_params = copy.deepcopy(st.session_state.get('current_bond_lev_params')) or None
+            # DB에서 TQQQ 전략 이름 자동 탐색 (TQQQ 포함 이름 우선, 없으면 첫 번째)
+            _eq_strats = StrategyStorage.list_strategies(category='equity')
+            _default_eq_name = next((n for n in _eq_strats if 'TQQQ' in n or 'tqqq' in n), _eq_strats[0] if _eq_strats else '전략 A (TQQQ 베이스)')
+            _default_eq_params = StrategyStorage.load_strategy(_default_eq_name) or copy.deepcopy(st.session_state.current_params)
+            # DB에서 Bond 전략 이름 자동 탐색 (V8 우선, 없으면 V7, 없으면 첫 번째)
+            _bond_strats = StrategyStorage.list_strategies(category='bond')
+            _default_bond_name = next((n for n in _bond_strats if 'V8' in n), None) \
+                              or next((n for n in _bond_strats if 'V7' in n), None) \
+                              or (_bond_strats[0] if _bond_strats else '전략 B (TLT/TBF 채권)')
+            _default_bond_loaded = StrategyStorage.load_strategy(_default_bond_name) if _bond_strats else None
             st.session_state.portfolio_configs = [
-                {'name': '전략 A (TQQQ 베이스)', 'weight': 0.4, 'type': 'equity', 'params': copy.deepcopy(st.session_state.current_params)},
-                {'name': '전략 B (TLT/TBF 채권)', 'weight': 0.6, 'type': 'bond',
-                 'params': copy.deepcopy(st.session_state.get('current_bond_params', _default_bond_params)),
+                {'name': _default_eq_name, 'weight': 0.4, 'type': 'equity', 'params': copy.deepcopy(_default_eq_params)},
+                {'name': _default_bond_name, 'weight': 0.6, 'type': 'bond',
+                 'params': copy.deepcopy(_default_bond_loaded or st.session_state.get('current_bond_params', _default_bond_params)),
                  'lev_params': _default_bond_lev_params},
             ]
             st.session_state.portfolio_init_ver = _portfolio_init_ver
+            st.session_state.pop('portfolio_result', None)  # 초기화 시 이전 결과 제거
         
         if 'portfolio_total_capital' not in st.session_state:
             st.session_state.portfolio_total_capital = 10000.0
@@ -317,6 +328,15 @@ class PortfolioView:
                     st.caption(f"💡 {config['name']}의 주식 설정은 수정 즉시 반영됩니다.")
 
         with tab1:
+            # 결과 없으면 자동 시뮬레이션 실행
+            if 'portfolio_result' not in st.session_state:
+                configs_ok = (
+                    st.session_state.get('portfolio_configs')
+                    and abs(sum(c['weight'] for c in st.session_state.portfolio_configs) - 1.0) < 1e-5
+                )
+                if configs_ok:
+                    PortfolioView.run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, local_start, local_end)
+                    st.rerun()
             PortfolioView.render_dashboard()
 
     @staticmethod
@@ -331,7 +351,7 @@ class PortfolioView:
         f_macro = macro_df.loc[start_date:end_date] if not macro_df.empty else pd.DataFrame()
         
         # Portfolio Manager 초기화
-        rebalance_preset = st.session_state.get('portfolio_rebalance_preset', 'annual')
+        rebalance_preset = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
         pm = PortfolioManager(total_capital=total_cap, rebalance_preset=rebalance_preset)
         
         # 채권 전략 기본 파라미터 (V7)
