@@ -3,6 +3,7 @@ import pandas as pd
 import datetime
 from ui.chart_view import ChartView
 from ui.data_analysis_view import DataAnalysisView
+from ui.rolling_view import RollingLabView
 from core.engine import StrategyEngine
 
 class QuantLabView:
@@ -31,11 +32,14 @@ class QuantLabView:
             )
 
         # 2. 탭 UI 구성
-        tab_visual, tab_data = st.tabs(["📊 시각적 인사이트 (차트뷰)", "📝 심층 데이터 분석 (시그널 로그)"])
+        tab_visual, tab_data, tab_rolling = st.tabs([
+            "📊 시각적 인사이트 (차트뷰)", 
+            "📝 심층 데이터 분석 (시그널 로그)",
+            "🧬 롤링 윈도우 분석 (Rolling Lab)"
+        ])
 
         # [Tab 1: 기존 인사이트 센터 기능]
         with tab_visual:
-            # st.header 를 표시하지 않기 위해 flag 전달 (ChartView 내 수정 필요)
             ChartView.render(
                 data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, 
                 trade_at, current_params, smart_params=smart_params, comparison_list=st.session_state.get('comparison_list'),
@@ -54,4 +58,12 @@ class QuantLabView:
                 closed_trades=closed_trades,
                 bh_histories=bh_histories,
                 hide_header=True
+            )
+
+        # [Tab 3: 롤링 윈도우 분석]
+        with tab_rolling:
+            RollingLabView.render(
+                data_dict, fg_df, vxn_df, news_df, 
+                leverage_asset, base_asset, trade_at, 
+                current_params, smart_params=smart_params
             )

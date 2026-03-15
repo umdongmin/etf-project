@@ -11,6 +11,10 @@ class DataService:
     """데이터 수집 및 전처리를 담당하는 클래스"""
     @staticmethod
     def calculate_indicators(df):
+        # yfinance 최신 버전에서 단일 티커도 MultiIndex 컬럼을 반환할 수 있으므로 평탄화
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.copy()
+            df.columns = df.columns.get_level_values(0)
         if 'Close' not in df.columns: return df
         close_prices = pd.to_numeric(df['Close'], errors='coerce')
         df['RSI'] = ta.rsi(close_prices, length=14)
@@ -36,6 +40,26 @@ class DataService:
             if l_col and u_col:
                 df['BB_Lower'] = bbands[l_col[0]]
                 df['BB_Upper'] = bbands[u_col[0]]
+
+        # [신규] 이동평균선 추가
+        df['SMA60'] = close_prices.rolling(window=60).mean()
+        df['SMA200'] = close_prices.rolling(window=200).mean()
+
+        # [신규] MACD Histogram 명시적 추가
+        if macd is not None:
+            h_col = [c for c in macd.columns if 'MACDh_' in c]
+            if h_col:
+                df['MACD_Hist'] = macd[h_col[0]]
+                
+        # [신규] 이전치(Prev_) 데이터 생성 (시그널 판별용)
+        df['Prev_Close'] = close_prices.shift(1)
+        df['Prev_RSI'] = df['RSI'].shift(1)
+        df['Prev_RSI_SMA'] = df['RSI_SMA'].shift(1)
+        if 'MACD' in df.columns:
+            df['Prev_MACD'] = df['MACD'].shift(1)
+        if 'MACD_Hist' in df.columns:
+            df['Prev_MACD_Hist'] = df['MACD_Hist'].shift(1)
+            df['Prev2_MACD_Hist'] = df['MACD_Hist'].shift(2)
                 
         # [신규] 슬로우 스토캐스틱 추가 (12, 5, 5)
         if 'High' in df.columns and 'Low' in df.columns:
@@ -58,6 +82,10 @@ class DataService:
                 if dmp_col: df['DMP'] = adx[dmp_col[0]]
                 if dmn_col: df['DMN'] = adx[dmn_col[0]]
                 
+                # DMP/DMN 이전치 추가
+                df['Prev_DMP'] = df['DMP'].shift(1)
+                df['Prev_DMN'] = df['DMN'].shift(1)
+                
             # 2. Williams %R 추가 (14일 기준)
             willr = ta.willr(df['High'], df['Low'], close_prices, length=14)
             if willr is not None:
@@ -67,6 +95,8 @@ class DataService:
                 else:
                     willr_col = [c for c in willr.columns if 'WILLR' in c]
                     if willr_col: df['WILLR'] = willr[willr_col[0]]
+                # Williams %R 이전치 추가
+                df['Prev_WILLR'] = df['WILLR'].shift(1)
                 
             # 3. PSAR 추가 (단기 및 장기 방향성 추적 점)
             psar = ta.psar(df['High'], df['Low'], close_prices)
@@ -79,7 +109,58 @@ class DataService:
                 if l_col: psar_combined = psar_combined.fillna(psar[l_col[0]])
                 if s_col: psar_combined = psar_combined.fillna(psar[s_col[0]])
                 df['PSAR'] = psar_combined
-                
+                df['Prev_SAR'] = df['PSAR'].shift(1)
+
+        # [신규 추가] ATR 변동성 지표 (20일 기준)
+        df['ATR_20'] = ta.atr(df['High'], df['Low'], close_prices, length=20)
+        df['Prev_ATR_20'] = df['ATR_20'].shift(1)
+        df['ATR_14'] = ta.atr(df['High'], df['Low'], close_prices, length=14)
+        df['Prev_ATR_14'] = df['ATR_14'].shift(1)
+
+        # [신규 추가] RSI slope (기울기) — Buy2_Cross 필터용 (C-4B)
+        df['RSI_slope3'] = df['RSI'].diff(3)
+        df['RSI_slope5'] = df['RSI'].diff(5)
+
+        # [신규 추가] StochRSI (14, 14, 3, 3) — Buy2_Cross 강도 확인용 (C-4B)
+        try:
+            srsi = ta.stochrsi(close_prices, length=14, rsi_length=14, k=3, d=3)
+            if srsi is not None:
+                k_col = [c for c in srsi.columns if 'STOCHRSIk_' in c]
+                d_col = [c for c in srsi.columns if 'STOCHRSId_' in c]
+                if k_col: df['StochRSI_K'] = srsi[k_col[0]]
+                if d_col: df['StochRSI_D'] = srsi[d_col[0]]
+        except Exception:
+            pass
+
+        return df
+
+    @staticmethod
+    def calculate_bond_indicators(df, prices_all=None):
+        """채권 전략(V7)을 위한 지표 계산"""
+        df = df.copy()
+        
+        # 1. FFV (10Y 적정금리) - macro_backtest.py 고정 수식 적용
+        NEUTRAL_REAL_RATE = 0.75  # r*
+        TERM_PREMIUM      = 0.50  # 기간 프리미엄
+        
+        if 'exp_inf' in df.columns:
+            df['ffv'] = df['exp_inf'] + NEUTRAL_REAL_RATE + TERM_PREMIUM
+            
+            # app.py 등에서 넘겨준 TNX 가격 데이터와 결합
+            if prices_all is not None and isinstance(prices_all, pd.DataFrame) and '^TNX' in prices_all.columns:
+                # ── 데이터 정렬 중요: 일일 TNX 데이터를 매크로 인덱스에 맞게 리인덱싱 후 채움 ──
+                df['tnx_val'] = prices_all['^TNX'].reindex(df.index).ffill()
+                df['gap'] = df['tnx_val'] - df['ffv']
+        
+        # 2. TLT RSI (일일 데이터 기반으로 먼저 계산 후 매크로 인덱스에 매핑)
+        if prices_all is not None and isinstance(prices_all, pd.DataFrame) and 'TLT' in prices_all.columns:
+            daily_rsi = ta.rsi(prices_all['TLT'], length=14)
+            df['tlt_rsi'] = daily_rsi.reindex(df.index).ffill()
+        
+        # 3. 수익률 곡선 모멘텀 (10Y-2Y)
+        if 't10y2y' in df.columns:
+            df['yc_mom'] = df['t10y2y'].diff(63) # 약 3개월 모멘텀
+        
         return df
 
     @classmethod
@@ -91,7 +172,7 @@ class DataService:
         # start_date = '2010-01-01'  # 🌟 파라미터로 대체됨
         
         data_dict = {}
-        tickers = ['QQQ', 'QLD', 'TQQQ']
+        tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TBF', 'BIL', 'TMF', 'TMV', '^TNX']
         
         # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 및 장 마감 여부 계산
         # 현재는 단순 5시간 차이로 계산 (서머타임 고려 시 4시간)
@@ -145,6 +226,10 @@ class DataService:
                     vxn_df = pd.concat(v_data_list, axis=1)
                     vxn_df = vxn_df[~vxn_df.index.duplicated(keep='first')]
                     
+                    # [신규] VIX/VXN 이전치(Prev) 추가 (엔진 호환성)
+                    if 'VIX' in vxn_df.columns: vxn_df['Prev_VIX'] = vxn_df['VIX'].shift(1)
+                    if 'VXN' in vxn_df.columns: vxn_df['Prev_VXN'] = vxn_df['VXN'].shift(1)
+                    
                     # [신규] VIX/VXN도 장중 데이터 필터링 (마켓 클로즈 여부 반영)
                     if not vxn_df.empty and vxn_df.index[-1].date() >= today_est:
                         if not is_market_closed:
@@ -172,43 +257,80 @@ class DataService:
         except:
             fg_df = pd.DataFrame(columns=['FearGreed'])
 
-        macro_data_map = {}
-        fetch_status = {'ETF': 'Success', 'VXN': 'Pending', 'FearGreed': 'Pending', 'Macro': 'Pending'}
-        m_tickers_raw = ['^TNX', '^IRX']
+        # [신규] Bond Strategy를 위한 FRED 데이터 수집
+        fetch_status = {'VXN': 'Pending', 'FearGreed': 'Pending', 'FRED': 'Pending'}
+        macro_df = pd.DataFrame()
+        fred_status = 'Pending'
         try:
-            m_data = yf.download(m_tickers_raw, period='5d', progress=False, group_by='ticker')
-            m_map = {'^TNX': 'US10Y', '^IRX': 'US03M'} 
-            for t_raw, t_name in m_map.items():
-                if t_raw in m_data and not m_data[t_raw].empty:
-                    val = m_data[t_raw]['Close'].dropna().iloc[-1]
-                    macro_data_map[t_name] = val
-            fetch_status['Macro'] = 'Success'
-        except:
-            fetch_status['Macro'] = 'Error'
-        
-            if 'VXN' in vxn_df.columns:
-                vxn_vals = vxn_df['VXN'].dropna()
-                if not vxn_vals.empty:
-                    macro_data_map['VXN'] = vxn_vals.iloc[-1]
-                    fetch_status['VXN'] = 'Success'
+            print("FRED 매크로 데이터 수집 중 (Bond Strategy)...")
+            # macro_backtest.py에서 검증된 7개 시리즈
+            macro_series = [
+                ('DFEDTARU', 'ff_rate', 0),
+                ('CPILFESL', 'core_cpi', 30),
+                ('PPIACO', 'ppi', 14),
+                ('UNRATE', 'unrate', 30),
+                ('NROU', 'nrou', 45),
+                ('T10YIE', 'exp_inf', 0),
+                ('T10Y2Y', 't10y2y', 0)
+            ]
+            
+            macro_data_list = []
+            api_key = os.getenv("FRED_API_KEY")
+            
+            if api_key:
+                for sid, col, lag in macro_series:
+                    try:
+                        url = (f"https://api.stlouisfed.org/fred/series/observations"
+                               f"?series_id={sid}&api_key={api_key}"
+                               f"&file_type=json&observation_start={start_date}&observation_end={end_date}")
+                        r = requests.get(url, timeout=10)
+                        if r.status_code == 200:
+                            obs = r.json().get('observations', [])
+                            temp = pd.DataFrame(obs)
+                            if not temp.empty:
+                                temp['date'] = pd.to_datetime(temp['date'])
+                                temp['value'] = pd.to_numeric(temp['value'], errors='coerce')
+                                temp = temp.set_index('date')[['value']].rename(columns={'value': col})
+                                if lag > 0:
+                                    temp.index = temp.index + datetime.timedelta(days=lag)
+                                macro_data_list.append(temp)
+                    except Exception as e:
+                        print(f"FRED Fetch Error ({sid}): {e}")
+                
+                if macro_data_list:
+                    # 모든 매크로 데이터 병합 및 일 단위 리인덱싱(오늘까지) 및 ffill
+                    macro_df = pd.concat(macro_data_list, axis=1)
+                    # [수정] 인덱스 정규화 및 리인덱싱으로 빈 날짜 채움
+                    if not macro_df.empty:
+                        # UTC+9 기준 오늘 날짜까지 확장
+                        now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
+                        full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst.normalize(), freq='D')
+                        macro_df = macro_df.reindex(full_idx).ffill().bfill()
+                    fred_status = 'Success'
+                    fetch_status['FRED'] = 'Success'
+        except Exception as e:
+            print(f"Macro Data Fetch Error: {e}")
+            fred_status = 'Error'
+            fetch_status['FRED'] = 'Error'
+
+        if not vxn_df.empty and 'VXN' in vxn_df.columns:
+            vxn_vals = vxn_df['VXN'].dropna()
+            if not vxn_vals.empty:
+                fetch_status['VXN'] = 'Success'
         if not fg_df.empty: fetch_status['FearGreed'] = 'Success'
+
+        # [신규] 채권 데이터에 채권 전용 지표 추가
+        if 'TLT' in data_dict:
+            # ^TNX를 포함한 전체 종가 데이터를 넘겨 FFV Gap 계산
+            prices_all = pd.DataFrame({t: data_dict[t]['Close'] for t in data_dict if 'Close' in data_dict[t].columns})
+            macro_df = cls.calculate_bond_indicators(macro_df, prices_all)
         
-        macro_df = pd.DataFrame([macro_data_map])
+        # [수정] macro_df는 이제 시계열 데이터를 포함함
+        # macro_df = pd.DataFrame([macro_data_map])
         fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # [신규] 뉴스 심리 데이터 로드 (Supabase 우선 지원)
+        # [삭제] 뉴스 심리 데이터 로드 (AI 보조 지표 기능 제거로 인한 삭제)
         news_df = pd.DataFrame()
-        try:
-            news_svc = NewsService()
-            # 로컬 파일이 있거나, Supabase 설정이 되어 있는 경우 로드 시도
-            if news_svc.supabase_url or os.path.exists(news_svc.db_path):
-                news_df = news_svc.get_sentiment_data()
-                if news_df.empty:
-                    print(" [INFO] 뉴스 데이터셋이 비어 있습니다. (수파베이스 또는 로컬)")
-            else:
-                print(" [WARNING] 뉴스 DB 연결 경로(로컬/원격)를 찾을 수 없습니다.")
-        except Exception as e:
-            print(f"News Data Load Error: {e}")
 
         print(f"데이터 수집 완료 ({len(data_dict)} 개 티커)")
         return data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time

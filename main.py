@@ -110,7 +110,7 @@ try:
             print(f"📡 분석 대상: {fetch_start_date} ~ 오늘")
             
             # 2-1. 데이터 수집
-            data_raw, fg_raw, vix_raw, _, news_raw, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
+            data_raw, fg_raw, vix_raw, macro_raw, news_raw, _, _ = DataService.fetch_live_data(start_date=fetch_start_date)
             all_tickers = list(data_raw.keys())
             # VIX/VXN 실시간 조회를 위해 티커 추가
             preview_tickers = all_tickers + ['^VIX', '^VXN']
@@ -131,6 +131,14 @@ try:
                 salt='vFinal_Batch_Live'
             )
 
+            # 2-3. 채권 전략 분석 (신규)
+            from core.storage import StrategyStorage
+            bond_strat = StrategyStorage.load_strategy("Bond_V7_Custom") # 기본값 또는 저장된 값
+            if not bond_strat: 
+                bond_strat = {'ffv_lo': 0.0, 'ffv_hi': 0.8, 'yc_inv': -0.15, 'yc_steep': 0.1, 'tlt_rsi_max': 70}
+            
+            bond_res = StrategyEngine.predict_bond_signal(data_raw, macro_raw, params=bond_strat)
+
             # 3. 알림 전송
             if not gh.empty:
                 latest = gh.iloc[-1]
@@ -148,22 +156,23 @@ try:
                     prev_summary = gh.iloc[-2]['Summary'] if len(gh) > 1 else "정보 없음"
                     new_summary = latest['Summary']
                     
-                    # 🔹 메시지 생성
-                    msg = (
-                        f"🔔 **TQQQ 매매 시그널 발생! ({signal_type})**\n\n"
-                        f"� **상세 신호**: `{signal}`\n"
-                        f"� **포지션 변화**:\n"
-                        f" - [기존] `{prev_summary}`\n"
-                        f" - [변경] `{new_summary}`\n\n"
-                        f"📊 **주요 지표**:\n"
-                        f" - RSI: `{latest['RSI']:.1f}` / VXN: `{latest['VXN']:.1f}`"
-                    )
+                    # 🌟 [신규] 채권 신호 포함
+                    bond_text = ""
+                    if bond_res:
+                        bond_text = f"\n\n📉 **채권 전략 (V7) 예상 포지션**: `{bond_res['signal']}`\n• 매크로 상태: {bond_res['f_state']}\n• FFV Gap: {bond_res['gap']:.2f}\n• Yield Curve: {bond_res['yc']:.2f}"
+
+                    header = "📢 **ETF Golden Strategy 분석 리포트**"
+                    msg = f"{header}\n\n결과: {signal_type} {latest['Asset']}\n오늘 종가(예상): **${latest['Close']:,.2f}**\n\n📌 **상세 정보**\n• {latest['Summary']}\n• RSI: {latest['RSI']:.1f}, VXN: {latest['VXN']:.1f}\n\n🔄 **포지션 요약**\n• {prev_summary} ➡️ **{new_summary}**{bond_text}"
                     
-                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                                   json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=15)
-                    print(f"✅ [Worker] Trade signal detected. Alert sent!", flush=True)
+                    # 텔레그램 전송 (requests 사용)
+                    send_url = f"https://api.telegram.org/bot{token}/sendMessage"
+                    payload = {"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}
+                    r = requests.post(send_url, json=payload, timeout=10)
+                    print(f"📡 Telegram Send: {r.status_code}, {r.text}", flush=True)
                 else:
-                    print(f"ℹ️ [Worker] Current status: {signal}. No action needed. Skipping alert.", flush=True)
+                    print(f"ℹ️ [Worker] Current status: {signal}. No trade action needed. Skipping alert.", flush=True)
+            else:
+                print("ℹ️ No historical data available, skipping Telegram alert.", flush=True)
         except Exception as e:
             print(f"❌ [Worker Error]: {e}", flush=True)
             import traceback

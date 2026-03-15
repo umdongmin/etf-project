@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import os
 import json
 import datetime
@@ -90,7 +90,7 @@ class OptimizerView:
                     for r in reb_opts:
                         if current_params.get(r): opt_count += 1
                     
-                    st.success(f"🎯 **{opt_count}**개의 사용자 지정 파라미터가 선택됨 (매매 전략 설정 탭에서 변경 가능)")
+                    st.success(f"🎯 **{opt_count}**개의 사용자 지정 파라미터가 선택됨 (주식 전략 설정 탭에서 변경 가능)")
             with col_p3:
                 st.write("") # 간격 조절
                 use_wfa = st.checkbox("🧪 WFA(전진 분석) 모드", value=False, key="dash_use_wfa", help="데이터를 훈련(IS)과 검증(OOS)으로 분할하여 '과최적화' 여부를 테스트합니다.")

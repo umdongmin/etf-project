@@ -8,7 +8,20 @@ class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @st.cache_data(ttl=3600, show_spinner=False)
     @staticmethod
-    def run_golden_strategy(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False):
+    def run_golden_strategy(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0):
+        gen = StrategyEngine._run_generator(
+            data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, cash_ratio, 
+            start_date, end_date, params, trade_at, smart_params, salt, fast_mode, allocated_capital
+        )
+        try:
+            state = next(gen)
+            while True:
+                state = gen.send(None)
+        except StopIteration as e:
+            return e.value
+
+    @staticmethod
+    def _run_generator(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0):
         if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame(), []
         
         # [신규] 파라미터 정규화 (JSON 로드 시 중첩된 params/smart_params 제거 및 최상위 병합)
@@ -26,6 +39,23 @@ class StrategyEngine:
         
         base_df = data_dict[base_asset]
         combined = base_df[['Close', 'RSI']].copy()
+        
+        # [신규] 전역 날짜 동기화 - 데이터가 없는 기간은 초기 자본보존을 위해 Reindex
+        if start_date or end_date:
+            # 기준 인덱스 생성 (주말 제외 평일 기준 또는 데이터셋의 합집합)
+            # 여기서는 편의상 base_df의 전체 인덱스를 사용하되, 범위만 제한함
+            full_idx = base_df.index
+            if start_date:
+                if isinstance(start_date, (str, datetime.date)):
+                    sd = pd.Timestamp(start_date)
+                    full_idx = full_idx[full_idx >= sd]
+            if end_date:
+                if isinstance(end_date, (str, datetime.date)):
+                    ed = pd.Timestamp(end_date)
+                    full_idx = full_idx[full_idx <= ed]
+            
+            # Reindex하여 빈 날짜(데이터 시작 전) 확보
+            combined = combined.reindex(full_idx)
         
         # [추가] 시가 데이터 확보
         if 'Open' in base_df.columns:
@@ -97,6 +127,11 @@ class StrategyEngine:
         # [신규] Williams %R 데이터베이스에서 복사
         if 'WILLR' in base_df.columns:
             combined['WILLR'] = base_df['WILLR']
+
+        # [신규 C-4B] RSI slope / StochRSI 데이터 복사
+        for _col in ['RSI_slope3', 'RSI_slope5', 'StochRSI_K', 'StochRSI_D']:
+            if _col in base_df.columns:
+                combined[_col] = base_df[_col]
             
         # [신규] ADX 및 DI 지표 계산 추가 (시그널용) - 위에서 ADX 없을 때 0으로 채웠으므로 계산 시도
         if 'High' in base_df.columns and 'Low' in base_df.columns:
@@ -173,7 +208,8 @@ class StrategyEngine:
         if end_date: dates = dates[dates.date <= end_date]
         if len(dates) == 0: return pd.DataFrame(columns=['Value', 'Stage', 'Asset', 'Trade_Label']), pd.DataFrame(), []
 
-        portfolio_value, cash = 10000.0, 10000.0 * cash_ratio
+        portfolio_value, cash = allocated_capital, allocated_capital * cash_ratio
+        current_total_val = portfolio_value # Unify with other generators
         current_planned_asset, rebalance_stage, last_entry_price = base_asset, 0, 0
         peak_price, peak_macd = 0, 0
         holdings = {t: 0.0 for t in data_dict.keys()}
@@ -241,6 +277,77 @@ class StrategyEngine:
         bb_u_idx = col_idx.get('BB_Upper', -1)
         sma60_idx = col_idx.get('SMA60', -1)
         sma200_idx = col_idx.get('SMA200', -1)
+        vxn_idx = col_idx.get('VXN', col_idx.get('VIX', -1))
+
+        # [신규] 동적 현금 비중 파라미터 추출
+        dc_params = (smart_params.get('dynamic_cash') or {}) if smart_params else {}
+        use_dc = dc_params.get('use', False)
+
+        # [신규] 루프 시작 전 전체 기간의 Regime 미리 계산 (벡터화 연산으로 속도 확보)
+        if use_dc:
+            # 보수적 접근: MA200과 VXN이 둘 다 있어야 함
+            if sma200_idx >= 0 and vxn_idx >= 0:
+                # [수정] VXN × Dev200 2차원 국면 판단 (use_dev200_regime=True 시 활성화)
+                _use_dev200_regime = dc_params.get('use_dev200_regime', False)
+                def get_regime(row):
+                    p  = row['Close']
+                    v  = row['VXN'] if 'VXN' in row else row['VIX']
+                    ma = row['SMA200']
+                    dev200 = (p / ma) if (ma and ma > 0) else 1.0
+
+                    if _use_dev200_regime:
+                        # ── VXN × Dev200 2차원 국면 ──────────────────────────────
+                        # hot    : VXN 낮음 AND Dev200 높음 (저변동 강세장)
+                        # caution: VXN 중간 AND Dev200 하락 (MDD 핵심 구간)
+                        # bear   : VXN 급등 OR Dev200 급락 (패닉/붕괴)
+                        # normal : 나머지
+                        hot_vxn  = dc_params.get('hot_vxn',  20.0)
+                        hot_dev  = dc_params.get('hot_dev',   1.10)
+                        caut_vxn = dc_params.get('caution_vxn', 30.0)
+                        caut_dev = dc_params.get('caution_dev',  1.05)
+                        bear_vxn = dc_params.get('bear_vxn',  35.0)
+                        bear_dev = dc_params.get('bear_dev',   0.95)
+
+                        if v >= bear_vxn or dev200 <= bear_dev: return 'bear'
+                        if v >= caut_vxn and dev200 < caut_dev: return 'caution'
+                        if v < hot_vxn  and dev200 >= hot_dev:  return 'hot'
+                        return 'normal'
+                    else:
+                        # ── 기존 VXN 1차원 국면 (하위 호환) ─────────────────────
+                        b_vxn, c_vxn, bear_vxn = dc_params.get('bull_vxn', 18.0), dc_params.get('caution_vxn', 35.0), dc_params.get('bear_vxn', 40.0)
+                        ma_buffer = dc_params.get('ma200_buffer', 0.0)
+                        if p < ma * (1 - ma_buffer/100.0) or v >= bear_vxn: return 'bear'
+                        if v >= c_vxn: return 'caution'
+                        if v >= b_vxn: return 'neutral'
+                        return 'bull'
+                
+                # combined 전체에서 계산 후 reindex
+                regimes = combined.apply(get_regime, axis=1)
+                
+                # [수정] 문자열 rolling apply 오류 방지를 위한 숫자 매핑 방식 적용
+                # use_dev200_regime 시 'hot/normal/caution/bear', 기존은 'bull/neutral/caution/bear'
+                if _use_dev200_regime:
+                    r_map = {'hot': 0, 'normal': 1, 'caution': 2, 'bear': 3}
+                else:
+                    r_map = {'bull': 0, 'neutral': 1, 'caution': 2, 'bear': 3}
+                inv_r_map = {v: k for k, v in r_map.items()}
+                num_regimes = regimes.map(r_map)
+                
+                # 3일 일관성(Rolling Mode) 적용: 3일 중 가장 많이 발생한 국면 선택 (동수 시 최신값)
+                rolled_num = num_regimes.rolling(window=3).apply(
+                    lambda x: pd.Series(x).value_counts().idxmax() if len(x)==3 else x[-1],
+                    raw=False
+                )
+                combined['Regime'] = rolled_num.map(inv_r_map)
+            else:
+                combined['Regime'] = 'bull' # 기본값
+        else:
+            combined['Regime'] = 'bull'
+        
+        regime_idx = combined.columns.get_loc('Regime')
+        # [수정] 행렬 데이터 재추출 (Regime 컬럼 포함)
+        combined_matrix = combined.loc[dates].values
+        col_idx = {col: i for i, col in enumerate(combined.columns)}
 
         for i in range(len(dates)):
             date = dates[i]
@@ -261,6 +368,12 @@ class StrategyEngine:
             
             trade_label = ""
             rebalance_cause = ""
+            # [긴급 수정] 목표 상태 변수 초기화 (현재 상태 유지가 기본 - UnboundLocalError 방지)
+            new_planned = current_planned_asset
+            new_stage = rebalance_stage
+            target_lev_pct = (1.0 if new_stage == 3 else (0.70 if new_stage == 2 else (0.30 if new_stage == 1 else 0.0)))
+            rebalance_needed = False
+
             is_delayed = False
             delay_reason = ""
             current_signal_ref = None
@@ -278,11 +391,27 @@ class StrategyEngine:
                         prices[t] = price # Fallback (should not happen properly configured)
                 
                 if pd.isna(prices[base_asset]):
+                    # 데이터 부재 시(상장 전 등) 가치 유지하며 Yield하여 동기화 유지
+                    state_dict = {
+                        'date': date,
+                        'cash': cash,
+                        'portfolio_value': portfolio_value,
+                        'stage': int(rebalance_stage),
+                        'history_row': None,
+                        'holdings': dict(holdings)
+                    }
+                    injected = yield state_dict
+                    if injected and isinstance(injected, dict) and 'cash_delta' in injected:
+                        portfolio_value += injected['cash_delta']
+                        cash += injected['cash_delta']
                     continue
             except Exception as e:
                 pass
             
-            # (중략) 이후 로직 동일
+            # [중요] 일일 포트폴리오 가치 업데이트 (재계산)
+            # 재밸런싱 신호가 없더라도 매일 시장 가격 변동을 반영해야 함
+            portfolio_value = cash + sum(holdings[t] * prices.get(t, 0) for t in holdings if prices.get(t, 0) > 0)
+            current_total_val = portfolio_value # 동기화
             
             # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
             if trade_at == "익일 시가" and pending_rebalance is not None:
@@ -297,8 +426,19 @@ class StrategyEngine:
                     
                     required = currently_holding + [pending_rebalance['planned']]
                     if any(t not in trade_prices or pd.isna(trade_prices[t]) for t in required):
+                        # 동기화 유지하며 건너뜀
+                        state_dict = {
+                            'date': date, 'cash': cash, 'portfolio_value': portfolio_value,
+                            'stage': int(rebalance_stage), 'history_row': None, 'holdings': dict(holdings)
+                        }
+                        yield state_dict
                         continue
                 except:
+                    state_dict = {
+                        'date': date, 'cash': cash, 'portfolio_value': portfolio_value,
+                        'stage': int(rebalance_stage), 'history_row': None, 'holdings': dict(holdings)
+                    }
+                    yield state_dict
                     continue
                 
                 # 거래 시점의 자산 가치 재계산
@@ -419,6 +559,10 @@ class StrategyEngine:
             prev_vxn = row_arr[col_idx['Prev_VXN']] if 'Prev_VXN' in col_idx else row_arr[col_idx['Prev_VIX']] if 'Prev_VIX' in col_idx else 0
             vxn_jump_pct = ((vxn / prev_vxn - 1) * 100) if prev_vxn > 0 else 0
             
+            # [신규] 200일 이격도 계산 (시그널용)
+            sma200_v = row_arr[sma200_idx] if sma200_idx >= 0 and row_arr[sma200_idx] > 0 else 0
+            cur_dev200 = price / sma200_v if sma200_v > 0 else 0
+
             # [신규] 다이버전스용 고점 추적
             if current_planned_asset != base_asset:
                 if price > peak_price:
@@ -430,6 +574,11 @@ class StrategyEngine:
             # [신규] Williams %R 지표 확보
             willr_val = row.get('WILLR', 0)
             prev_willr = row.get('Prev_WILLR', 0)
+
+            # [신규 C-4B] RSI slope / StochRSI 지표 확보
+            rsi_slope3_val  = row.get('RSI_slope3', float('nan'))
+            rsi_slope5_val  = row.get('RSI_slope5', float('nan'))
+            stochrsi_k_val  = row.get('StochRSI_K', float('nan'))
             
             if params:
                 is_rsi_golden_cross = (prev_rsi < prev_rsi_sma) and (rsi > rsi_sma)
@@ -529,22 +678,81 @@ class StrategyEngine:
                         a = True
                         rs.append(f"AI뉴스Z점수{op}{val}")
 
+                    if bp.get('use_dev200') and sma200_v > 0:
+                        op = bp.get('dev200_op', '>=')
+                        val = bp.get('dev200_val', 1.0)
+                        if op == '>': c &= (cur_dev200 > val)
+                        elif op == '>=': c &= (cur_dev200 >= val)
+                        elif op == '<': c &= (cur_dev200 < val)
+                        elif op == '<=': c &= (cur_dev200 <= val)
+                        a = True
+                        rs.append(f"이격도(200){op}{val}")
+
+                    # [신규 C-4B] RSI slope 하한 필터 (use=False → BASE 동일)
+                    # RSI 상승 속도가 rsi_slope_val 미만이면 매수 차단
+                    if bp.get('use_rsi_slope'):
+                        period = bp.get('rsi_slope_period', 5)
+                        val    = bp.get('rsi_slope_val', 3.0)
+                        slope  = rsi_slope5_val if period == 5 else rsi_slope3_val
+                        import math
+                        if not math.isnan(slope):
+                            c &= (slope >= val)
+                        a = True
+                        rs.append(f"RSI기울기({period}일)>={val:.1f}")
+
+                    # [신규 C-4B] StochRSI_K 하한 필터 (use=False → BASE 동일)
+                    # StochRSI_K가 stochrsi_val 미만이면 매수 차단
+                    if bp.get('use_stochrsi'):
+                        val   = bp.get('stochrsi_val', 30.0)
+                        import math
+                        if not math.isnan(stochrsi_k_val):
+                            c &= (stochrsi_k_val >= val)
+                        a = True
+                        rs.append(f"StochRSI_K>={val:.1f}")
+
                     return a, c, rs
+
+                # ── [국면 분기] VXN × Dev200 기반 국면 판단 ──────────────────────
+                # regime 파라미터가 있고 use=True 일 때만 국면별 시그널 전환
+                # hot  : VXN < hot_vxn_max AND Dev200 > hot_dev200_min  → 과열 구간
+                # panic: VXN > panic_vxn_min                            → 패닉/공포 구간
+                # normal: 그 외                                         → 기본 BASE 시그널
+                _regime_cfg = (params.get('regime') or {})
+                _use_regime = _regime_cfg.get('use', False)
+                _active_buy_signals  = params['buy_signals']
+                _active_sell_signals = params['sell_signals']
+                if _use_regime and cur_dev200 > 0:
+                    _hot_vxn   = _regime_cfg.get('hot_vxn_max', 20)
+                    _hot_dev   = _regime_cfg.get('hot_dev200_min', 1.10)
+                    _panic_vxn = _regime_cfg.get('panic_vxn_min', 30)
+                    if vxn < _hot_vxn and cur_dev200 > _hot_dev:
+                        # 과열 국면: hot_buy_signals / hot_sell_signals 로 교체
+                        if 'hot_buy_signals' in _regime_cfg:
+                            _active_buy_signals = _regime_cfg['hot_buy_signals']
+                        if 'hot_sell_signals' in _regime_cfg:
+                            _active_sell_signals = _regime_cfg['hot_sell_signals']
+                    elif vxn > _panic_vxn:
+                        # 패닉 국면: panic_buy_signals_regime / panic_sell_signals 로 교체
+                        if 'panic_buy_signals_regime' in _regime_cfg:
+                            _active_buy_signals = _regime_cfg['panic_buy_signals_regime']
+                        if 'panic_sell_signals' in _regime_cfg:
+                            _active_sell_signals = _regime_cfg['panic_sell_signals']
+                # ─────────────────────────────────────────────────────────────
 
                 is_buy_signal = False
                 buy_signal_idx = -1
                 signal_reason = ""
-                for idx, bp in enumerate(params['buy_signals']):
+                for idx, bp in enumerate(_active_buy_signals):
                     active, cond, reasons = check_buy_cond(bp, idx + 1, buy_wait_flags)
                     if active and cond:
                         is_buy_signal = True
                         buy_signal_idx = idx + 1
                         signal_reason = " / ".join(reasons)
                         break
-                
+
                 is_sell_signal = False
                 sell_signal_idx = -1 # [신규] 어떤 매도 신호가 발생했는지 추적
-                for idx, sp in enumerate(params['sell_signals']):
+                for idx, sp in enumerate(_active_sell_signals):
                     cond, active = True, False
                     reasons = []
                     
@@ -646,6 +854,17 @@ class StrategyEngine:
                         elif op == '<=': cond &= (n_z <= val)
                         active = True
                         reasons.append(f"AI뉴스Z점수{op}{val}")
+
+                    # [신규] 200일 이격도 조건 추가 (매도)
+                    if sp.get('use_dev200') and sma200_v > 0:
+                        op = sp.get('dev200_op', '>=')
+                        val = sp.get('dev200_val', 1.0)
+                        if op == '>': cond &= (cur_dev200 > val)
+                        elif op == '>=': cond &= (cur_dev200 >= val)
+                        elif op == '<': cond &= (cur_dev200 < val)
+                        elif op == '<=': cond &= (cur_dev200 <= val)
+                        active = True
+                        reasons.append(f"이격도(200){op}{val}")
                     
                     if active and cond: 
                         is_sell_signal = True
@@ -703,22 +922,29 @@ class StrategyEngine:
                 
                 b_up, b_down, s_up, s_down = 0.03, -0.03, 0.03, -0.03
 
-            # [수정] 스마트 레버리지 필터링 (VIX Safety vs RSI Turbo 분리)
+            # [수정] 스마트 레버리지 필터링 (RSI Turbo)
+            # VXN Safety는 아래 버그수정 블록에서 강제 청산으로 처리됨
             effective_lev_asset = leverage_asset
             smart_reason = ""
-            
+
             if smart_params:
-                use_vxn = smart_params.get('use_vxn_safety', smart_params.get('use_vix_safety', False))
-                exit_val = smart_params.get('vxn_exit', smart_params.get('vix_exit', 31))
-                if use_vxn and vxn > exit_val:
-                    effective_lev_asset = target_group[0]
-                    smart_reason = f"대피(VXN:{vxn:.1f})"
-                elif smart_params.get('use_rsi_turbo') and rsi < smart_params.get('rsi_turbo', 31):
+                if smart_params.get('use_rsi_turbo') and rsi < smart_params.get('rsi_turbo', 31):
                     effective_lev_asset = target_group[2]
                     smart_reason = f"가속(RSI:{rsi:.1f})"
+                elif smart_params.get('use_qld_decel') and rebalance_stage == 2:
+                    # [신규] QLD Decelerate: S2 + 위험 조건 시 QLD 감속
+                    qd = (smart_params.get('qld_decel') or {})
+                    decel_vxn = qd.get('vxn_min', 28.0)
+                    decel_dev = qd.get('dev200_max', 1.05)
+                    if vxn >= decel_vxn or cur_dev200 < decel_dev:
+                        effective_lev_asset = target_group[1]  # QLD
+                        smart_reason = f"감속(VXN:{vxn:.1f}/Dev:{cur_dev200:.3f})"
+                    else:
+                        effective_lev_asset = leverage_asset
+                        smart_reason = "정상(Normal)"
                 else:
                     effective_lev_asset = leverage_asset
-                    if use_vxn or smart_params.get('use_rsi_turbo'):
+                    if smart_params.get('use_rsi_turbo'):
                         smart_reason = "정상(Normal)"
 
             # (기존 prices 위치 삭제됨 - 상단으로 이동)
@@ -727,12 +953,30 @@ class StrategyEngine:
             
             # [신규 추가] 수익률 nan 방지를 위한 수치 정규화 (Defensive Check)
             if pd.isna(current_total_val) or current_total_val <= 0:
-                current_total_val = history[-1]['Value'] if history else 10000.0
+                current_total_val = history[-1]['Value'] if history else allocated_capital
                 
             rebalance_needed = False
             new_planned = current_planned_asset
             new_stage = rebalance_stage
-            
+
+            # [버그수정] VXN Safety 강제 청산: VXN 초과 시 기존 레버리지 보유 포지션을 즉시 QQQ로 청산
+            # 기존 코드는 effective_lev_asset만 교체하여 매수 신호 없으면 레버리지를 계속 보유하는 버그가 있었음
+            if smart_params:
+                use_vxn = smart_params.get('use_vxn_safety', smart_params.get('use_vix_safety', False))
+                exit_val = smart_params.get('vxn_exit', smart_params.get('vix_exit', 31))
+                # [Step A] VXN Safety Dev200 필터: 0.0이면 비활성(기존 동작), >0이면 Dev200 >= 값일 때만 청산
+                vxn_dev_filter = float(smart_params.get('vxn_dev_filter', 0.0))
+                dev_cond = True if vxn_dev_filter <= 0.0 else (cur_dev200 >= vxn_dev_filter)
+                if use_vxn and vxn > exit_val and dev_cond and rebalance_stage > 0:
+                    rebalance_needed = True
+                    new_planned = base_asset
+                    new_stage = 0
+                    target_lev_pct = 0.0
+                    dev_info = f" Dev200>={vxn_dev_filter:.2f}({cur_dev200:.2f})" if vxn_dev_filter > 0 else ""
+                    rebalance_cause = f"VXN대피({vxn:.1f}>{exit_val}){dev_info}"
+                    if not fast_mode:
+                        signal_events.append({'date': date, 'type': 'VXN대피청산', 'reason': rebalance_cause, 'price': price, 'executed': False})
+
             # [신규] 모든 활성 세트(trade_slots)의 보유 기간 중 최저 수익률(MDD용) 갱신
             for slot in trade_slots:
                 asset_to_check = slot.get('asset', leverage_asset)
@@ -796,10 +1040,60 @@ class StrategyEngine:
             if last_entry_price == 0:
                 last_entry_price = prices[base_asset]
 
-            etf_funds = current_total_val * (1 - cash_ratio)
+            # [신규] 동적 현금 비중 적용
+            eff_cash_ratio = cash_ratio # 기본값 (고정 비중)
+            if use_dc:
+                cur_regime = row_arr[regime_idx]
+                
+                # [강화] 국면 전환 시 즉각 리밸런싱 강제 (지연 방지)
+                if i > 0:
+                    prev_regime = combined_matrix[i-1][regime_idx]
+                    if cur_regime != prev_regime:
+                        rebalance_needed = True
+                        rebalance_cause = f"국면전환({prev_regime}->{cur_regime})"
+
+                if _use_dev200_regime:
+                    # VXN × Dev200 2차원 국면 현금비율 (hot/normal/caution/bear)
+                    ratio_map = {
+                        'hot':     dc_params.get('cash_hot',     0.0) / 100.0,
+                        'normal':  dc_params.get('cash_normal',  0.0) / 100.0,
+                        'caution': dc_params.get('cash_caution', 30.0) / 100.0,
+                        'bear':    dc_params.get('cash_bear',    80.0) / 100.0,
+                    }
+                else:
+                    # 기존 VXN 1차원 국면 현금비율 (bull/neutral/caution/bear)
+                    ratio_map = {
+                        'bull':    dc_params.get('cash_bull',    0.0) / 100.0,
+                        'neutral': dc_params.get('cash_neutral', 20.0) / 100.0,
+                        'caution': dc_params.get('cash_caution', 30.0) / 100.0,
+                        'bear':    dc_params.get('cash_bear',    80.0) / 100.0,
+                    }
+                eff_cash_ratio = ratio_map.get(cur_regime, cash_ratio)
+
+            etf_funds = current_total_val * (1 - eff_cash_ratio)
             lev_candidates = ['QLD', 'TQQQ']
             current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
             current_lev_pct = current_lev_funds / etf_funds if etf_funds > 0 else 0
+
+            # [신규] 국면별 Stage 비율 강제 조정 (regime_stage 파라미터)
+            # current_lev_pct 계산 후 실행 → 현재 비중이 국면 허용치 초과 시 즉시 리밸런싱 트리거
+            _rs_cfg = (params.get('regime_stage') or {}) if params else {}
+            if _rs_cfg.get('use', False) and cur_dev200 > 0 and is_buy_process:
+                _rs_c_vxn = _rs_cfg.get('caution_vxn', 30.0)
+                _rs_c_dev = _rs_cfg.get('caution_dev', 1.05)
+                _rs_b_vxn = _rs_cfg.get('bear_vxn', 35.0)
+                _rs_b_dev = _rs_cfg.get('bear_dev', 0.95)
+                if vxn >= _rs_b_vxn or cur_dev200 <= _rs_b_dev:
+                    _rs_ratios = {3: _rs_cfg.get('bear_s3', 1.0), 2: _rs_cfg.get('bear_s2', 0.70), 1: _rs_cfg.get('bear_s1', 0.30)}
+                elif vxn >= _rs_c_vxn and cur_dev200 < _rs_c_dev:
+                    _rs_ratios = {3: _rs_cfg.get('caution_s3', 1.0), 2: _rs_cfg.get('caution_s2', 0.70), 1: _rs_cfg.get('caution_s1', 0.30)}
+                else:
+                    _rs_ratios = None
+                if _rs_ratios and new_stage in _rs_ratios:
+                    _rs_limit = _rs_ratios[new_stage]
+                    if current_lev_pct > _rs_limit + 0.02:  # 현재 비중이 허용치 초과 시
+                        target_lev_pct = _rs_limit
+                        rebalance_needed = True
 
             # [리밸런싱 판정 우선순위 조정] 매입(신호/가격)이 매도(신호/가격)보다 우선함
             is_buy_process = (current_planned_asset != base_asset)
@@ -825,14 +1119,39 @@ class StrategyEngine:
             # (1) 시그널 매입 판정 (모드 공통)
             buy_signal_hit = is_buy_signal and not is_mode_consistent and effective_lev_asset in prices
 
+            # [Step 1-4] 매수 인터락: VXN > X AND Dev200 > Y 동시 충족 시 매수 신호 차단
+            # params: use_buy_interlock(bool), interlock_vxn(float), interlock_dev(float),
+            #         interlock_min_stage(int, 1=전체/2=S2이상/3=S3만)
+            if buy_signal_hit and params and params.get('use_buy_interlock', False):
+                il_vxn = params.get('interlock_vxn', 25.0)
+                il_dev = params.get('interlock_dev', 1.1)
+                il_min_stage = params.get('interlock_min_stage', 1)
+                if vxn > il_vxn and cur_dev200 > il_dev and rebalance_stage >= il_min_stage - 1:
+                    buy_signal_hit = False
+                    if not fast_mode:
+                        signal_events.append({'date': date, 'type': '매수인터락', 'reason': f"VXN({vxn:.1f}>{il_vxn}) AND Dev200({cur_dev200:.3f}>{il_dev})", 'price': price, 'executed': False})
+
             # (2) 고정 비율 트리거 계산
             fixed_buy_hit = False
             fixed_sell_hit = False
+            interlock_ok = True  # 기본값: 리밸런싱 허용
+            
             if use_fixed:
                 up_thresh = abs(b_up if current_planned_asset == leverage_asset else s_up)
                 down_thresh = abs(b_down if current_planned_asset == leverage_asset else s_down)
                 price_trigger = (price_change >= 1 + up_thresh or price_change <= 1 - down_thresh)
-                fixed_buy_hit = (rebalance_stage in [1, 2] and is_buy_process and is_mode_consistent and price_trigger)
+                
+                # [신규] 리밸런싱 인터락 (이격도/VXN 조건)
+                use_reb_interlock = params.get('use_reb_interlock', False)
+                if use_reb_interlock:
+                    reb_dev = params.get('reb_interlock_dev', 1.13)
+                    reb_vxn = params.get('reb_interlock_vxn', 22.0)
+                    # 이격도와 VXN이 동시에 과열(상향)/안정(하향) 임계값을 넘으면 추가 매수 차단
+                    if cur_dev200 >= reb_dev and vxn >= reb_vxn:
+                        interlock_ok = False
+
+                fixed_buy_hit = (rebalance_stage in [1, 2] and is_buy_process and is_mode_consistent 
+                                 and (price_change >= 1 + up_thresh) and interlock_ok)
                 fixed_sell_hit = (rebalance_stage in [1, 2, 3] and not is_buy_process and price_trigger)
 
             # (3) ATR 트리거 계산
@@ -921,7 +1240,7 @@ class StrategyEngine:
 
             # [신규] S3(레버리지 100%) 전용 보호 조건 처리 (Emergency Defensive)
             # 여러 개의 신호 중 하나라도 충족되면(OR) 작동함
-            s3_p_list = params.get('s3_protection', [])
+            s3_p_list = (params.get('s3_protection') or [])
             if not isinstance(s3_p_list, list): s3_p_list = [s3_p_list]
             
             if rebalance_stage == 3:
@@ -1026,7 +1345,17 @@ class StrategyEngine:
                     pb_idx = new_stage - 1 # 1->0, 2->1, 3->2
                     if pb_idx >= 0 and pb_idx < len(pb_list) and pb_list[pb_idx]:
                         # 독립적인 하락장 매수 시그널 (Panic Buy Signal S1, S2, S3) 검사
-                        active, cond, pb_reasons = check_buy_cond(pb_list[pb_idx], pb_idx + 1, panic_buy_wait_flags)
+                        # [수정] Dev200 기반 RSI 조건 완화: dev200이 낮을수록(깊은 낙폭) panic_buy RSI 완화
+                        # dev200_rsi_map = [{"dev200_max": 0.90, "rsi_val": 38}, ...] 형식
+                        pb_cfg = pb_list[pb_idx]
+                        dev200_rsi_map = pb_cfg.get('dev200_rsi_map', [])
+                        if dev200_rsi_map and cur_dev200 > 0:
+                            pb_cfg = dict(pb_cfg)  # 원본 불변 복사본 생성
+                            for tier in sorted(dev200_rsi_map, key=lambda x: x['dev200_max'], reverse=True):
+                                if cur_dev200 <= tier['dev200_max']:
+                                    pb_cfg['rsi_val'] = tier['rsi_val']
+                                    break
+                        active, cond, pb_reasons = check_buy_cond(pb_cfg, pb_idx + 1, panic_buy_wait_flags)
                         if active and cond:
                             passed_panic = True
                             panic_buy_wait_flags[pb_idx + 1] = False # 충족 성공 시 대기(알람) 초기화
@@ -1158,7 +1487,7 @@ class StrategyEngine:
                     peak_price = prices[base_asset] # 리밸런싱 시 고점 초기화
 
                     # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
-                    cash = current_total_val * cash_ratio
+                    cash = current_total_val * eff_cash_ratio
                     current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
                 else:
                     pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned, 'signal_ref': current_signal_ref}
@@ -1184,9 +1513,9 @@ class StrategyEngine:
                         condition_label = rebalance_cause
                     
                     if passed_panic:
-                        if new_stage == 1: limit = smart_params.get('panic_rsi_s1', 27)
-                        elif new_stage == 2: limit = smart_params.get('panic_rsi_s2', 28)
-                        else: limit = smart_params.get('panic_rsi_s3', 30)
+                        # [수정] 상수값(27, 28, 30) 대신 실제 config에 설정된 rsi_val 사용
+                        pb_cfg = pb_list[pb_idx]
+                        limit = pb_cfg.get('rsi_val', 30)
                         condition_label = f"RSI조건(RSI<{limit})"
 
                     trade_label = f"{prefix}(S{new_stage}): {condition_label}"
@@ -1259,11 +1588,12 @@ class StrategyEngine:
                     'Cash_Weight': log_cash_weight,
                     'Lev_Weight': log_lev_weight,
                     'Stage': int(rebalance_stage),
+                    'Regime': row_arr[regime_idx] if use_dc else 'bull',
                     'Asset': log_asset_name,
                     'Drop_Acc': row_arr[col_idx['Drop_Acc']] if 'Drop_Acc' in col_idx else 0,
                     'Gap_Down': row_arr[col_idx['Gap_Down']] if 'Gap_Down' in col_idx else 0,
                     'S3_Drop_Limit': s3_drop_triggered_val, # [기록]
-                    'S3_Sell3_Event': s3_sell3_event_val, # [복구]
+                    'S3_Sell3_Event': s3_sell3_event_val, # [기록]
                     'S3_Detail': s3_detail_val, # [신규 추가]
                     'Trade_Label': trade_label,
                     'Summary': ", ".join(summary_p),
@@ -1306,9 +1636,422 @@ class StrategyEngine:
                         history[-1][f'{t}_Weight'] = (holdings[t] * prices.get(t, 0)) / current_total_val if current_total_val > 0 else 0
                 history[-1][f'{base_asset}_Weight'] = (holdings.get(base_asset, 0) * prices.get(base_asset, 0)) / current_total_val if current_total_val > 0 else 0
 
+            # [신규] 하루 단위 진행 후 외부 자금 수신 대기 (Generator + send 패턴)
+            state_dict = {
+                'date': date,
+                'cash': cash,
+                'portfolio_value': current_total_val,
+                'stage': int(rebalance_stage),
+                'history_row': history[-1] if history else None,
+                'holdings': dict(holdings)
+            }
+            injected = yield state_dict
+            if injected and isinstance(injected, dict) and 'cash_delta' in injected:
+                delta = injected['cash_delta']
+                if delta >= 0:
+                    # 자금 수혈: 그대로 현금 추가
+                    cash += delta
+                    current_total_val += delta
+                else:
+                    # 자금 환수: 현금 우선 차감, 부족분은 포지션 비례 강제 매도
+                    withdraw = abs(delta)
+                    if cash >= withdraw:
+                        cash -= withdraw
+                        current_total_val -= withdraw
+                    else:
+                        # 현금으로 충당 가능한 만큼 먼저 사용
+                        remaining = withdraw - cash
+                        cash = 0.0
+                        # 보유 포지션 전체 평가액 계산
+                        holdings_val = sum(holdings[t] * prices.get(t, 0) for t in holdings if prices.get(t, 0) > 0)
+                        if holdings_val > 0:
+                            sell_ratio = min(remaining / holdings_val, 1.0)
+                            for t in list(holdings.keys()):
+                                p = prices.get(t, 0)
+                                if p > 0:
+                                    shares_to_sell = holdings[t] * sell_ratio
+                                    holdings[t] -= shares_to_sell
+                                    cash += shares_to_sell * p  # 실제 매도금 중 remaining 초과분은 현금으로 잔류
+                            cash -= remaining  # 환수 금액만큼 제거 (매도금 > remaining인 경우 잔류분 유지)
+                            cash = max(cash, 0.0)
+                        current_total_val = cash + sum(holdings[t] * prices.get(t, 0) for t in holdings if prices.get(t, 0) > 0)
+
         if not history:
             return pd.DataFrame(columns=['Value', 'Stage', 'Asset', 'Trade_Label']), pd.DataFrame(), []
         return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades), signal_events
+
+    @staticmethod
+    def run_bond_strategy(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None, **kwargs):
+        """Bond Strategy V7 구현 (TLT/TBF/BIL) - generator 기반 통합 호출"""
+        gen = StrategyEngine._run_bond_generator(data_dict, macro_df, start_date, end_date, params, allocated_capital, lev_params=lev_params)
+        try:
+            state = next(gen)
+            while True:
+                # Standalone 실행 시에는 주입되는 자금이 없으므로 None 전달
+                state = gen.send(None)
+        except StopIteration as e:
+            return e.value
+
+    @staticmethod
+    @staticmethod
+    def _run_bond_generator(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None):
+        """Bond Strategy V7+V8 구현 (Generator 버전)
+
+        Layer 1 (V7): 매크로 신호로 기초자산 결정 (TLT / TBF / BIL)
+        Layer 2 (V8): 기초자산 기준 buy/sell 신호 + 가격 트리거로 레버리지 스테이지 결정
+                      TLT → TMF (S1:30% / S2:70% / S3:100%)
+                      TBF → TMV (S1:30% / S2:70% / S3:100%)
+        """
+        # 1. 데이터 준비
+        if 'TLT' not in data_dict or macro_df.empty:
+            return pd.DataFrame(), pd.DataFrame(), []
+
+        tlt_df = data_dict['TLT']
+        tbf_df = data_dict.get('TBF', pd.DataFrame())
+        bil_df = data_dict.get('BIL', pd.DataFrame())
+        tmf_df = data_dict.get('TMF', pd.DataFrame())
+        tmv_df = data_dict.get('TMV', pd.DataFrame())
+
+        # 가격 데이터 병합
+        combined = tlt_df[['Close']].copy().rename(columns={'Close': 'TLT'})
+        if not tbf_df.empty: combined['TBF'] = tbf_df['Close']
+        if not bil_df.empty: combined['BIL'] = bil_df['Close']
+        if not tmf_df.empty: combined['TMF'] = tmf_df['Close']
+        if not tmv_df.empty: combined['TMV'] = tmv_df['Close']
+        combined = combined.join(macro_df, how='left').ffill()
+
+        # ── Layer 1 지표 (V7용) ──
+        if 'tlt_rsi' not in combined.columns:
+            combined['tlt_rsi'] = ta.rsi(combined['TLT'], length=14)
+
+        # ── Layer 2 지표 (V8용): 기초자산(TLT/TBF) 기준 RSI·MACD ──
+        if lev_params is not None:
+            _tlt_rsi     = ta.rsi(combined['TLT'], length=14).fillna(50)
+            _tlt_rsi_sma = _tlt_rsi.rolling(9).mean().fillna(50)
+            _tlt_macd_df = ta.macd(combined['TLT'], fast=12, slow=26, signal=9)
+            combined['_tlt_rsi']      = _tlt_rsi
+            combined['_tlt_rsi_sma']  = _tlt_rsi_sma
+            combined['_tlt_macd']     = _tlt_macd_df['MACD_12_26_9'] if _tlt_macd_df is not None else 0
+            combined['_tlt_macd_sig'] = _tlt_macd_df['MACDs_12_26_9'] if _tlt_macd_df is not None else 0
+            combined['_tlt_macd_h']   = _tlt_macd_df['MACDh_12_26_9'] if _tlt_macd_df is not None else 0
+
+            if 'TBF' in combined.columns:
+                _tbf_rsi     = ta.rsi(combined['TBF'], length=14).fillna(50)
+                _tbf_rsi_sma = _tbf_rsi.rolling(9).mean().fillna(50)
+                _tbf_macd_df = ta.macd(combined['TBF'], fast=12, slow=26, signal=9)
+                combined['_tbf_rsi']      = _tbf_rsi
+                combined['_tbf_rsi_sma']  = _tbf_rsi_sma
+                combined['_tbf_macd']     = _tbf_macd_df['MACD_12_26_9'] if _tbf_macd_df is not None else 0
+                combined['_tbf_macd_sig'] = _tbf_macd_df['MACDs_12_26_9'] if _tbf_macd_df is not None else 0
+                combined['_tbf_macd_h']   = _tbf_macd_df['MACDh_12_26_9'] if _tbf_macd_df is not None else 0
+
+        # 파라미터 로드
+        _bond_defaults = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
+        if params is None or 'ffv_lo' not in params:
+            params = {**_bond_defaults, **(params or {})}
+
+        # ─ F1: FF금리 상태머신 ─
+        combined['ff_1m_change'] = combined['ff_rate'].diff(21)
+        f1_states = []
+        current_f1, days_frozen = 'NEUTRAL', 0
+        for i in range(len(combined)):
+            if i > 0:
+                days_frozen = (days_frozen + 1 if combined['ff_rate'].iloc[i] == combined['ff_rate'].iloc[i - 1] else 0)
+            chg = combined['ff_1m_change'].iloc[i]
+            if chg > 0.10: current_f1 = 'RISING'; days_frozen = 0
+            elif chg < -0.10: current_f1 = 'FALLING'; days_frozen = 0
+            elif current_f1 == 'RISING' and days_frozen >= 21: current_f1 = 'NEUTRAL'
+            f1_states.append(current_f1)
+        combined['f1_state'] = f1_states
+
+        # ─ F2: 인플레이션 ─
+        combined['cpi_yoy'] = combined['core_cpi'].pct_change(252).ffill()
+        combined['cpi_accel'] = combined['cpi_yoy'].diff(63)
+        combined['ppi_3m_avg'] = combined['ppi'].rolling(window=63).mean()
+        combined['ppi_dir'] = combined['ppi_3m_avg'].diff(1)
+        combined['f2_state'] = np.where((combined['cpi_accel'] < 0) & (combined['ppi_dir'] < 0), 'FALLING',
+                                        np.where((combined['cpi_accel'] > 0) & (combined['ppi_dir'] > 0), 'RISING', 'NEUTRAL'))
+
+        # ─ F3: 고용 ─
+        combined['emp_gap'] = combined['unrate'] - combined['nrou']
+        combined['emp_gap_3m_chg'] = combined['emp_gap'].diff(63)
+        combined['f3_state'] = np.where((combined['emp_gap'] > 0.3) | (combined['emp_gap_3m_chg'] > 0), 'FALLING',
+                                        np.where(combined['emp_gap'] < -0.2, 'RISING', 'NEUTRAL'))
+
+        # ─ 최종 상태 투표 ─
+        def vote_state(row):
+            votes = [row['f1_state'], row['f2_state'], row['f3_state']]
+            from collections import Counter
+            c = Counter(votes); top = c.most_common(1)[0]
+            return top[0] if top[1] >= 2 else 'NEUTRAL'
+        combined['final_state'] = combined.apply(vote_state, axis=1)
+
+        if 'yc_mom' not in combined.columns and 't10y2y' in combined.columns:
+            combined['yc_mom'] = combined['t10y2y'].diff(63)
+
+        # ── 날짜 범위 적용 ──
+        if start_date or end_date:
+            full_idx = combined.index
+            if start_date:
+                sd = pd.Timestamp(start_date)
+                full_idx = full_idx[full_idx >= sd]
+            if end_date:
+                ed = pd.Timestamp(end_date)
+                full_idx = full_idx[full_idx <= ed]
+            combined = combined.reindex(full_idx)
+
+        dates = combined.index
+
+        # ── V8 레버리지 파라미터 ──
+        _use_lev = lev_params is not None
+        _reb_up   = abs(lev_params.get('buy_reb_up',    0.02)) if _use_lev else 0.02
+        _reb_dn   = abs(lev_params.get('buy_reb_down',  0.02)) if _use_lev else 0.02
+        _buy_sigs = lev_params.get('buy_signals', [])          if _use_lev else []
+        _sell_sigs= lev_params.get('sell_signals', [])         if _use_lev else []
+
+        # ── 헬퍼: buy_signals / sell_signals 평가 (기초자산 기준) ──
+        def _check_buy(pfx, row, prev_row):
+            """lev_params buy_signals 조건을 pfx(tlt/tbf) 지표로 평가"""
+            rsi      = row.get(f'_{pfx}_rsi', 50)
+            prev_rsi = prev_row.get(f'_{pfx}_rsi', 50)
+            rsi_sma  = row.get(f'_{pfx}_rsi_sma', 50)
+            prev_rsi_sma = prev_row.get(f'_{pfx}_rsi_sma', 50)
+            macd_h   = row.get(f'_{pfx}_macd_h', 0)
+            macd_val = row.get(f'_{pfx}_macd', 0)
+            prev_macd= prev_row.get(f'_{pfx}_macd', 0)
+            is_rsi_cross = (prev_rsi < prev_rsi_sma) and (rsi >= rsi_sma)
+            for sig in _buy_sigs:
+                hit = True
+                if sig.get('rsi_val', 0) > 0 and not sig.get('rsi_cross', False):
+                    if rsi > sig['rsi_val']: hit = False
+                if sig.get('rsi_cross', False):
+                    if not is_rsi_cross: hit = False
+                if sig.get('macd_inc', False):
+                    if macd_val <= prev_macd: hit = False
+                if sig.get('macd_signal_below', False):
+                    if macd_h >= 0: hit = False
+                if hit:
+                    return True
+            return False
+
+        def _check_sell(pfx, row, prev_row):
+            """lev_params sell_signals 조건을 pfx(tlt/tbf) 지표로 평가"""
+            rsi      = row.get(f'_{pfx}_rsi', 50)
+            prev_rsi = prev_row.get(f'_{pfx}_rsi', 50)
+            rsi_sma  = row.get(f'_{pfx}_rsi_sma', 50)
+            prev_rsi_sma = prev_row.get(f'_{pfx}_rsi_sma', 50)
+            macd_h   = row.get(f'_{pfx}_macd_h', 0)
+            prev_macd_h = prev_row.get(f'_{pfx}_macd_h', 0)
+            macd_val = row.get(f'_{pfx}_macd', 0)
+            prev_macd = prev_row.get(f'_{pfx}_macd', 0)
+            is_rsi_dead = (prev_rsi > prev_rsi_sma) and (rsi < rsi_sma)
+            is_macd_dead = (prev_macd_h > 0) and (macd_h <= 0)
+            for sig in _sell_sigs:
+                hit = True
+                if sig.get('rsi_val', 0) > 0:
+                    if rsi < sig['rsi_val']: hit = False
+                if sig.get('rsi_dec', False):
+                    if rsi >= prev_rsi: hit = False
+                if sig.get('rsi_dead', False):
+                    if not is_rsi_dead: hit = False
+                if sig.get('macd_dead', False):
+                    if not is_macd_dead: hit = False
+                if sig.get('macd_dec', False):
+                    if macd_val >= prev_macd: hit = False
+                if sig.get('macd_signal_above', False):
+                    if macd_h <= 0: hit = False
+                if hit:
+                    return True
+            return False
+
+        # ── 시뮬레이션 상태 변수 ──
+        results = []
+        portfolio_value = allocated_capital
+        current_asset   = 'BIL'
+
+        # Layer 2 스테이지 상태 (TLT/TBF 각각 독립)
+        tlt_stage      = 0   # 0=없음 / 1=S1(30%) / 2=S2(70%) / 3=S3(100%)
+        tbf_stage      = 0
+        tlt_in_signal  = False  # True=신호 발생 후 가격 모드
+        tbf_in_signal  = False
+
+        for i in range(len(dates)):
+            date     = dates[i]
+            row      = combined.loc[date]
+            prev_row = combined.loc[dates[i - 1]] if i > 0 else row
+
+            state   = row['final_state']
+            f1      = row['f1_state']
+            rsi     = row.get('tlt_rsi', 50)
+            gap_val = row.get('gap', 0)
+            yc_val  = row.get('t10y2y', 0)
+            ycm     = row.get('yc_mom', 0)
+
+            # ── Layer 1: V7 기초자산 결정 ──
+            target = 'BIL'
+            if state == 'RISING':
+                target = 'TBF'
+            elif state == 'FALLING':
+                target = 'TLT' if (current_asset == 'TLT' or rsi <= 55) else 'BIL'
+            elif state == 'NEUTRAL':
+                target = 'TLT'
+
+            # V6: FFV Filter
+            if not np.isnan(gap_val):
+                if gap_val < params['ffv_lo'] and target == 'TLT': target = 'BIL'
+                elif gap_val > params['ffv_hi'] and target == 'TBF': target = 'BIL'
+
+            # V7: YC Override
+            if not np.isnan(yc_val) and not np.isnan(ycm):
+                if yc_val < params['yc_inv']:
+                    if target == 'TLT': target = 'BIL'
+                    if target != 'BIL' or gap_val <= params['ffv_hi']: target = 'TBF'
+                elif (ycm > params['yc_steep'] and yc_val < 1.0 and f1 == 'FALLING' and gap_val > params['ffv_lo']):
+                    target = 'TLT'
+
+            # ── Layer 2: V8 레버리지 스테이지 머신 ──
+            lev_stage     = 0
+            lev_frac      = 0.0
+            lev_asset_key = None
+
+            if _use_lev and i > 0:
+                # TLT → TMF 스테이지 머신
+                if target == 'TLT':
+                    tlt_px_now  = row.get('TLT', np.nan)
+                    tlt_px_prev = prev_row.get('TLT', np.nan)
+                    tlt_chg = (tlt_px_now / tlt_px_prev) if (not np.isnan(tlt_px_now) and not np.isnan(tlt_px_prev) and tlt_px_prev > 0) else 1.0
+
+                    buy_hit  = _check_buy('tlt', row, prev_row)
+                    sell_hit = _check_sell('tlt', row, prev_row)
+
+                    if sell_hit:
+                        # 매도 신호: 즉시 S0 (신호 우선)
+                        tlt_stage     = 0
+                        tlt_in_signal = False
+                    elif not tlt_in_signal:
+                        # 신호 모드: buy_signal → S1 진입
+                        if buy_hit and tlt_stage < 3:
+                            tlt_stage    += 1
+                            tlt_in_signal = True
+                    else:
+                        # 가격 모드: reb_up → 스테이지 업 / reb_down → 스테이지 다운
+                        if tlt_chg >= 1.0 + _reb_up and tlt_stage < 3:
+                            tlt_stage += 1
+                        elif tlt_chg <= 1.0 - _reb_dn and tlt_stage > 0:
+                            tlt_stage -= 1
+                            if tlt_stage == 0:
+                                tlt_in_signal = False
+
+                    lev_stage = tlt_stage
+                    tbf_stage = 0; tbf_in_signal = False  # TLT 구간에서는 TBF 스테이지 초기화
+
+                # TBF → TMV 스테이지 머신
+                elif target == 'TBF':
+                    tbf_px_now  = row.get('TBF', np.nan)
+                    tbf_px_prev = prev_row.get('TBF', np.nan)
+                    tbf_chg = (tbf_px_now / tbf_px_prev) if (not np.isnan(tbf_px_now) and not np.isnan(tbf_px_prev) and tbf_px_prev > 0) else 1.0
+
+                    buy_hit  = _check_buy('tbf', row, prev_row)
+                    sell_hit = _check_sell('tbf', row, prev_row)
+
+                    if sell_hit:
+                        tbf_stage     = 0
+                        tbf_in_signal = False
+                    elif not tbf_in_signal:
+                        if buy_hit and tbf_stage < 3:
+                            tbf_stage    += 1
+                            tbf_in_signal = True
+                    else:
+                        if tbf_chg >= 1.0 + _reb_up and tbf_stage < 3:
+                            tbf_stage += 1
+                        elif tbf_chg <= 1.0 - _reb_dn and tbf_stage > 0:
+                            tbf_stage -= 1
+                            if tbf_stage == 0:
+                                tbf_in_signal = False
+
+                    lev_stage = tbf_stage
+                    tlt_stage = 0; tlt_in_signal = False  # TBF 구간에서는 TLT 스테이지 초기화
+
+                else:
+                    # BIL 구간: 모든 스테이지 초기화
+                    tlt_stage = 0; tlt_in_signal = False
+                    tbf_stage = 0; tbf_in_signal = False
+                    lev_stage = 0
+
+                lev_frac = {1: 0.30, 2: 0.70, 3: 1.0}.get(lev_stage, 0.0)
+                if lev_frac > 0:
+                    lev_asset_key = 'TMF' if target == 'TLT' else ('TMV' if target == 'TBF' else None)
+
+            # ── 수익률 계산 ──
+            if i > 0:
+                prev_date = dates[i - 1]
+                if lev_asset_key and lev_frac > 0:
+                    base_key  = 'TLT' if lev_asset_key == 'TMF' else 'TBF'
+                    px_lev_c  = row.get(lev_asset_key, np.nan)
+                    px_lev_p  = prev_row.get(lev_asset_key, np.nan)
+                    px_bas_c  = row.get(base_key, np.nan)
+                    px_bas_p  = prev_row.get(base_key, np.nan)
+                    if (not np.isnan(px_lev_c) and not np.isnan(px_lev_p) and px_lev_p > 0
+                            and not np.isnan(px_bas_c) and not np.isnan(px_bas_p) and px_bas_p > 0):
+                        daily_ret = lev_frac * (px_lev_c / px_lev_p) + (1 - lev_frac) * (px_bas_c / px_bas_p)
+                    else:
+                        daily_ret = 1.0
+                else:
+                    asset_key = target if target in combined.columns else 'BIL'
+                    px_c = row.get(asset_key, np.nan)
+                    px_p = prev_row.get(asset_key, np.nan)
+                    daily_ret = (px_c / px_p if not np.isnan(px_c) and not np.isnan(px_p) and px_p > 0 else 1.0)
+                portfolio_value *= daily_ret
+
+            summary_parts = [f"상태:{state}"]
+            if not np.isnan(gap_val): summary_parts.append(f"FFV:{gap_val:+.2f}")
+            if yc_val < params['yc_inv']: summary_parts.append("YC역전")
+            elif (ycm > params['yc_steep'] and yc_val < 1.0): summary_parts.append("YC스티프닝")
+
+            history_row = {
+                'Date': date, 'Value': portfolio_value, 'Asset': target,
+                'Trade_Label': f"{target} 진입" if target != current_asset else f"{target} 유지",
+                'Summary': " | ".join(summary_parts), 'f_state': state, 'gap': gap_val,
+                't10y2y': yc_val, 'yc_mom': ycm, 'tlt_rsi': rsi,
+                'ff_rate': row.get('ff_rate', 0), 'core_cpi': row.get('core_cpi', 0),
+                'Stage': lev_stage, 'lev_frac': lev_frac,
+                'lev_asset': lev_asset_key if lev_asset_key else target,
+            }
+            results.append(history_row)
+
+            state_dict = {
+                'date': date,
+                'cash': 0,
+                'portfolio_value': portfolio_value,
+                'history_row': history_row
+            }
+            injected = yield state_dict
+            if injected and isinstance(injected, dict) and 'cash_delta' in injected:
+                portfolio_value += injected['cash_delta']
+
+            current_asset = target
+
+        res_df = pd.DataFrame(results).set_index('Date')
+        return res_df, pd.DataFrame(), []
+
+    @staticmethod
+    def predict_bond_signal(data_dict, macro_df, params=None):
+        """본드 전략 예상 신호 추출"""
+        try:
+            res_df, _, _ = StrategyEngine.run_bond_strategy(data_dict, macro_df, params=params)
+            if not res_df.empty:
+                latest = res_df.iloc[-1]
+                return {
+                    'date': latest.name,
+                    'signal': latest.get('Asset', 'BIL'),
+                    'f_state': latest.get('f_state', 0),
+                    'gap': latest.get('gap', 0),
+                    'yc': latest.get('t10y2y', 0),
+                    'rsi': latest.get('tlt_rsi', 0)
+                }
+        except Exception as e:
+            print(f"Bond Signal Prediction Error: {e}")
+        return None
 
     @staticmethod
     def predict_today_signal(data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, cash_ratio, start_date, end_date, params, trade_at, smart_params):
@@ -1323,18 +2066,6 @@ class StrategyEngine:
                 start_date, None, params, trade_at, smart_params, salt=dyn_salt
             )
             
-            if not golden_history.empty:
-                latest = golden_history.iloc[-1]
-                print(f"PREVIEW SUCCESS: Date={latest.name}, Signal={latest.get('Trade_Label')}")
-                return {
-                    'date': latest.name,
-                    'signal': latest.get('Trade_Label', '중립'),
-                    'summary': latest.get('Summary', '특이사항 없음'),
-                    'price': latest.get('Close', 0),
-                    'rsi': latest.get('RSI', 0),
-                    'vxn': latest.get('VXN', 0),
-                    'stage': latest.get('Stage', 0)
-                }
             if not golden_history.empty:
                 latest = golden_history.iloc[-1]
                 print(f"PREVIEW SUCCESS: Date={latest.name}, Signal={latest.get('Trade_Label')}")

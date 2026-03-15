@@ -59,7 +59,7 @@ class IntelligenceService:
         except Exception as e: print(f"Intelligence DB Init Error: {e}")
 
     def sync_market_intelligence(self, date_str, news_service, analyst_reports=None):
-        """뉴스 수집 -> 데이터 정형화 -> 리포트 생성 통합 동기화"""
+        """뉴스 수집 -> 리포트 생성 통합 동기화 (정량 지수 정형화 과정 제거)"""
         if not self.llm.client: return None
         
         # 1. 뉴스 데이터 수집
@@ -68,21 +68,27 @@ class IntelligenceService:
         all_headlines = list(set(macro + micro))
         if not all_headlines: return None
 
-        # 2. 정량 데이터 생성 및 저장
-        quant_data = news_service.score_news_with_gemini(date_str, all_headlines)
-        if quant_data:
-            news_service.save_sentiment(date_str, quant_data, raw_headlines="\n".join(all_headlines), source="integrated_quant")
+        # 2. 정성 리포트 생성 (정량 데이터 정보 없이 헤드라인만 사용)
+        prompt = f"""당신은 월스트리트 수석 전략가입니다. 
+다음 뉴스 헤드라인들을 심층 분석하여 '한국어'로 전문적인 마크다운 마켓 리포트를 작성하세요.
+추상적인 수치 지표 보다는 뉴스의 맥락과 시장에 미칠 실질적인 영향력을 중심으로 서술하세요.
 
-        # 3. 정성 리포트 생성
-        prompt = f"당신은 월스트리트 전략가입니다. 다음 정형화 데이터와 뉴스 헤드라인을 바탕으로 '한국어'로 전문적인 마크다운 리포트를 작성하세요. 모든 섹션 제목과 본문은 반드시 한국어로 작성해야 합니다.\n\n[데이터]: {quant_data}\n[뉴스]: {'/'.join(all_headlines)}"
+[뉴스 헤드라인]:
+{'/'.join(all_headlines)}
+"""
         try:
             response = self.llm.client.models.generate_content(model=self.llm.model_name, contents=prompt, config={'temperature': 0.3})
             resp_text = response.text.strip()
+            
+            # 지표는 기본값으로 고정 (UI에서 숨김 처리됨)
             report_data = {
-                "date": date_str, "report_title": f"{date_str} AI 마켓 인텔리전스",
-                "content": resp_text, "sentiment_score": quant_data.get('sentiment', 0.0),
-                "reliability_score": quant_data.get('reliability', 0.5),
-                "source_count": len(all_headlines), "source_metadata": all_headlines
+                "date": date_str, 
+                "report_title": f"{date_str} AI 마켓 인텔리전스",
+                "content": resp_text, 
+                "sentiment_score": 0.0,
+                "reliability_score": 0.5,
+                "source_count": len(all_headlines), 
+                "source_metadata": all_headlines
             }
             self.save_report(date_str, report_data, all_headlines)
             return report_data

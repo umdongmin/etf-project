@@ -250,6 +250,11 @@ class StrategyOptimizer:
                     cand['buy_signals'][i]['use_news_z'] = trial.suggest_categorical(f"{prefix}use_news_z", [True, False])
                     if cand['buy_signals'][i]['use_news_z']:
                         cand['buy_signals'][i]['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", 0.5, 3.0)
+                    
+                    # [신규] 200일 이격도 탐색
+                    cand['buy_signals'][i]['use_dev200'] = trial.suggest_categorical(f"{prefix}use_dev200", [True, False])
+                    if cand['buy_signals'][i]['use_dev200']:
+                        cand['buy_signals'][i]['dev200_val'] = trial.suggest_float(f"{prefix}dev200_val", 0.8, 1.2)
 
             if "매도 시그널 (Full)" in targets:
                 # 매도 신호 (1~4)
@@ -286,6 +291,11 @@ class StrategyOptimizer:
                         # Z점수가 매우 낮을 때 (비정상적 투매) 대응
                         cand['sell_signals'][i]['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", -2.5, -0.5)
 
+                    # [신규] 200일 이격도 탐색
+                    cand['sell_signals'][i]['use_dev200'] = trial.suggest_categorical(f"{prefix}use_dev200", [True, False])
+                    if cand['sell_signals'][i]['use_dev200']:
+                        cand['sell_signals'][i]['dev200_val'] = trial.suggest_float(f"{prefix}dev200_val", 0.9, 1.3)
+
             if "리밸런싱 및 ATR 변동성 (Full)" in targets: # 오타 수정: 벨 -> 밸
                 # 고정 비율
                 cand['use_fixed_reb'] = trial.suggest_categorical("use_fixed", [True, False])
@@ -294,6 +304,12 @@ class StrategyOptimizer:
                     cand['buy_reb_down'] = trial.suggest_float("buy_reb_down", -0.07, -0.02)
                     cand['sell_reb_up'] = trial.suggest_float("sell_reb_up", 0.01, 0.05)
                     cand['sell_reb_down'] = trial.suggest_float("sell_reb_down", -0.05, -0.01)
+                    
+                    # [신규] 리밸런싱 인터락 최적화
+                    cand['use_reb_interlock'] = trial.suggest_categorical("use_reb_int", [True, False])
+                    if cand['use_reb_interlock']:
+                        cand['reb_interlock_dev'] = trial.suggest_float("reb_int_dev", 1.05, 1.25)
+                        cand['reb_interlock_vxn'] = trial.suggest_float("reb_int_vxn", 15.0, 35.0)
 
                 # ATR 변동성
                 cand['use_atr_reb'] = trial.suggest_categorical("use_atr", [True, False])
@@ -369,6 +385,12 @@ class StrategyOptimizer:
                         r = p.get('rng_news_z_val', [-1.0, 4.0])
                         p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
                         print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+                    
+                    if p.get('opt_dev200_val'):
+                        p['use_dev200'] = True
+                        r = p.get('rng_dev200_val', [0.8, 1.3])
+                        p['dev200_val'] = trial.suggest_float(f"{prefix}dev200_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}dev200_val: {p['dev200_val']}")
 
                 # 2. 매도 시그널 타겟팅
                 for i in range(len(cand['sell_signals'])):
@@ -416,6 +438,12 @@ class StrategyOptimizer:
                         r = p.get('rng_news_z_val', [-4.0, 1.0])
                         p['news_z_val'] = trial.suggest_float(f"{prefix}news_z_val", float(r[0]), float(r[1]))
                         print(f"  [SUGGEST][T{trial.number}] {prefix}news_z_val: {p['news_z_val']}")
+
+                    if p.get('opt_dev200_val'):
+                        p['use_dev200'] = True
+                        r = p.get('rng_dev200_val', [0.8, 1.3])
+                        p['dev200_val'] = trial.suggest_float(f"{prefix}dev200_val", float(r[0]), float(r[1]))
+                        print(f"  [SUGGEST][T{trial.number}] {prefix}dev200_val: {p['dev200_val']}")
 
                 # 3. 리밸런싱 타겟팅
                 if cand.get('use_fixed_reb'):
@@ -467,6 +495,35 @@ class StrategyOptimizer:
                         r = p.get('rng_willr_val', [-95, -50])
                         p['willr_val'] = trial.suggest_int(f"{prefix}willr_val", int(r[0]), int(r[1]))
                         print(f"  [SUGGEST][T{trial.number}] {prefix}willr_val: {p['willr_val']}")
+
+                # 5. 동적 현금 비중 (Dynamic Cash) 타겟팅
+                dc = cand.get('dynamic_cash', {})
+                if dc.get('use'):
+                    if dc.get('opt_bull_vxn'):
+                        r = dc.get('rng_bull_vxn', [10.0, 25.0])
+                        dc['bull_vxn'] = trial.suggest_float("dc_bull_vxn", float(r[0]), float(r[1]), step=0.5)
+                    if dc.get('opt_caution_vxn'):
+                        r = dc.get('rng_caution_vxn', [25.0, 40.0])
+                        dc['caution_vxn'] = trial.suggest_float("dc_caution_vxn", float(r[0]), float(r[1]), step=0.5)
+                    if dc.get('opt_bear_vxn'):
+                        r = dc.get('rng_bear_vxn', [35.0, 50.0])
+                        dc['bear_vxn'] = trial.suggest_float("dc_bear_vxn", float(r[0]), float(r[1]), step=0.5)
+                    if dc.get('opt_ma200_buffer'):
+                        r = dc.get('rng_ma200_buffer', [0.0, 5.0])
+                        dc['ma200_buffer'] = trial.suggest_float("dc_ma200_buffer", float(r[0]), float(r[1]), step=0.1)
+                    
+                    if dc.get('opt_cash_bull'):
+                        r = dc.get('rng_cash_bull', [0.0, 30.0])
+                        dc['cash_bull'] = trial.suggest_float("dc_cash_bull", float(r[0]), float(r[1]), step=1.0)
+                    if dc.get('opt_cash_neutral'):
+                        r = dc.get('rng_cash_neutral', [0.0, 60.0])
+                        dc['cash_neutral'] = trial.suggest_float("dc_cash_neutral", float(r[0]), float(r[1]), step=1.0)
+                    if dc.get('opt_cash_caution'):
+                        r = dc.get('rng_cash_caution', [0.0, 90.0])
+                        dc['cash_caution'] = trial.suggest_float("dc_cash_caution", float(r[0]), float(r[1]), step=1.0)
+                    if dc.get('opt_cash_bear'):
+                        r = dc.get('rng_cash_bear', [0.0, 100.0])
+                        dc['cash_bear'] = trial.suggest_float("dc_cash_bear", float(r[0]), float(r[1]), step=1.0)
             
             if "S3 보호 조건 (Gap/Acc)" in targets:
                 for i in range(len(cand['s3_protection'])):
@@ -681,9 +738,27 @@ class StrategyOptimizer:
                     'use_sl_ctrl':'use_sl_control',
                     'use_vxn':'use_vxn_safety',
                     'set_sl_limit':'set_sl_limit',
-                    'use_set_sl':'use_set_sl'
+                    'use_set_sl':'use_set_sl',
+                    # 동적 현금 비중 매핑
+                    'dc_bull_vxn': 'bull_vxn',
+                    'dc_caution_vxn': 'caution_vxn',
+                    'dc_bear_vxn': 'bear_vxn',
+                    'dc_ma200_buffer': 'ma200_buffer',
+                    'dc_cash_bull': 'cash_bull',
+                    'dc_cash_neutral': 'cash_neutral',
+                    'dc_cash_caution': 'cash_caution',
+                    'dc_cash_bear': 'cash_bear'
                 }
-                cfg[map_dict.get(key, key)] = val
+                if key.startswith('dc_') and 'dynamic_cash' in cfg:
+                    field = map_dict.get(key, key)
+                    cfg['dynamic_cash'][field] = val
+                else:
+                    map_dict.get(key, key)
+                    # 리밸런싱 인터락 매핑 추가
+                    if key == 'use_reb_int': key = 'use_reb_interlock'
+                    if key == 'reb_int_dev': key = 'reb_interlock_dev'
+                    if key == 'reb_int_vxn': key = 'reb_interlock_vxn'
+                    cfg[map_dict.get(key, key)] = val
         
         if 'panic_rsi_s1' in cfg and 'panic_buy_signals' in cfg:
             for i, rsi_val in enumerate([cfg.get('panic_rsi_s1'), cfg.get('panic_rsi_s2'), cfg.get('panic_rsi_s3')]):
@@ -744,8 +819,11 @@ class StrategyOptimizer:
                 # AI 필터 파라미터 추출 추가
                 params[f"{p}use_news_q"] = sig.get('use_news_q', False)
                 if sig.get('use_news_q'): params[f"{p}news_q_val"] = sig.get('news_q_val', 0.9)
-                params[f"{p}use_news_z"] = sig.get('use_news_z', False)
                 if sig.get('use_news_z'): params[f"{p}news_z_val"] = sig.get('news_z_val', 1.0)
+                
+                # [신규] 200일 이격도 추출
+                params[f"{p}use_dev200"] = sig.get('use_dev200', False)
+                if sig.get('use_dev200'): params[f"{p}dev200_val"] = sig.get('dev200_val', 1.0)
 
         if "매도 시그널 (Full)" in targets:
             for i, sig in enumerate(cfg['sell_signals'][:4]):
@@ -761,8 +839,11 @@ class StrategyOptimizer:
                 params[f"{p}use_sar"] = sig['use_sar']
                 params[f"{p}use_willr"] = sig['use_willr']
                 params[f"{p}rsi_val"] = sig['rsi_val']
-                if sig['use_chandelier']: params[f"{p}chan_mult"] = sig['chandelier_mult']
                 if sig['use_willr']: params[f"{p}willr_val"] = sig['willr_val']
+                
+                # [신규] 200일 이격도 추출
+                params[f"{p}use_dev200"] = sig.get('use_dev200', False)
+                if sig.get('use_dev200'): params[f"{p}dev200_val"] = sig.get('dev200_val', 1.0)
 
         if "리밸런싱 및 ATR 변동성 (Full)" in targets: # 오타 수정: 벨 -> 밸
             params["use_fixed"] = cfg['use_fixed_reb']
@@ -771,6 +852,11 @@ class StrategyOptimizer:
                 params["buy_reb_down"] = cfg['buy_reb_down']
                 params["sell_reb_up"] = cfg['sell_reb_up']
                 params["sell_reb_down"] = cfg['sell_reb_down']
+                # 리밸런싱 인터락 초기치 추출
+                params["use_reb_int"] = cfg.get('use_reb_interlock', False)
+                if cfg.get('use_reb_interlock'):
+                    params["reb_int_dev"] = cfg.get('reb_interlock_dev', 1.13)
+                    params["reb_int_vxn"] = cfg.get('reb_interlock_vxn', 22.0)
             params["use_atr"] = cfg['use_atr_reb']
             if cfg['use_atr_reb']:
                 params["atr_p_buy"] = cfg['atr_period_buy']
@@ -804,5 +890,18 @@ class StrategyOptimizer:
             params["sl_ctrl_lim"] = cfg['sl_control_limit']
             params["use_set_sl"] = cfg['use_set_sl']
             params["set_sl_lim"] = cfg['set_sl_limit']
+
+        # [신규] 동적 현금 비중 파라미터 추출
+        if 'dynamic_cash' in cfg:
+            dc = cfg['dynamic_cash']
+            if dc.get('use'):
+                if dc.get('opt_bull_vxn'): params["dc_bull_vxn"] = dc.get('bull_vxn', 18.0)
+                if dc.get('opt_caution_vxn'): params["dc_caution_vxn"] = dc.get('caution_vxn', 35.0)
+                if dc.get('opt_bear_vxn'): params["dc_bear_vxn"] = dc.get('bear_vxn', 40.0)
+                if dc.get('opt_ma200_buffer'): params["dc_ma200_buffer"] = dc.get('ma200_buffer', 0.0)
+                if dc.get('opt_cash_bull'): params["dc_cash_bull"] = dc.get('cash_bull', 0.0)
+                if dc.get('opt_cash_neutral'): params["dc_cash_neutral"] = dc.get('cash_neutral', 20.0)
+                if dc.get('opt_cash_caution'): params["dc_cash_caution"] = dc.get('cash_caution', 30.0)
+                if dc.get('opt_cash_bear'): params["dc_cash_bear"] = dc.get('cash_bear', 80.0)
 
         return params

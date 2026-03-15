@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 from core.storage import StrategyStorage
 from core.engine import StrategyEngine
 from ui.tester_view import TesterView
-from ui.optimizer_view import OptimizerView
 
 # [신규] 시뮬레이션 캐싱 래퍼 (성능 최적화 및 안정성 확보)
 def deep_tuple(obj):
@@ -56,7 +55,7 @@ class HistoryLabView:
 
     @staticmethod
     def render(data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, trade_at, current_params, smart_params=None, salt=None):
-        st.header("📜 매매 전략 설정 및 역사적 분석")
+        st.header("📜 주식 전략 설정 및 역사적 분석")
         st.caption("전략을 저장하거나 불러오고, 2010년부터 현재까지의 성과를 분석합니다. [v2.3]")
 
         st.divider()
@@ -124,9 +123,17 @@ class HistoryLabView:
                                 'use_fixed_reb': True, 'use_atr_reb': True,
                                 'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 3.0, 'atr_mult_sell': 10.0,
                                 'atr_period_buy': 20, 'atr_period_sell': 20,
-                                'use_panic': True, 'panic_ma': 200, 
-                                'use_vxn_safety': False, 'vxn_exit': 31,
-                                'use_rsi_turbo': False, 'rsi_turbo': 31
+                                'use_panic': True, 'panic_ma': 200,
+                                'use_vxn_safety': False, 'vxn_exit': 31, 'vxn_dev_filter': 0.0,
+                                'use_rsi_turbo': False, 'rsi_turbo': 31,
+                                'use_reb_interlock': False, 'reb_interlock_dev': 1.13, 'reb_interlock_vxn': 22.0,
+                                'use_buy_interlock': False, 'interlock_vxn': 25.0,
+                                'interlock_dev': 1.1, 'interlock_min_stage': 1,
+                                'dynamic_cash': {
+                                    'use': False, 'bull_vxn': 18.0, 'caution_vxn': 35.0, 'bear_vxn': 40.0,
+                                    'ma200_buffer': 0.0, 'cash_bull': 0.0, 'cash_neutral': 20.0,
+                                    'cash_caution': 30.0, 'cash_bear': 80.0
+                                }
                             }
 
                             # [수정] 중첩 데이터 평활화 (Flatten) - overwrite (update) 사용
@@ -160,12 +167,21 @@ class HistoryLabView:
                                 'panic_ma': 'panic_ma_sel',
                                 'use_vxn_safety': 'use_vxn_safety_chk',
                                 'vxn_exit': 'vxn_exit_sli',
+                                'vxn_dev_filter': 'vxn_dev_filter_inp',
                                 'use_rsi_turbo': 'use_rsi_turbo_chk',
                                 'rsi_turbo': 'rsi_turbo_sli',
                                 'use_sl_control': 'use_sl_control_chk',
                                 'sl_control_limit': 'sl_control_lim_sli',
                                 'use_set_sl': 'use_set_sl_chk',
-                                'set_sl_limit': 'set_sl_lim_sli'
+                                'set_sl_limit': 'set_sl_lim_sli',
+                                # 리밸런싱 및 매수 신호 인터락 (추가)
+                                'use_reb_interlock': 'use_reb_interlock',
+                                'reb_interlock_dev': 'reb_interlock_dev',
+                                'reb_interlock_vxn': 'reb_interlock_vxn',
+                                'use_buy_interlock': 'use_buy_interlock',
+                                'interlock_vxn': 'interlock_vxn',
+                                'interlock_dev': 'interlock_dev',
+                                'interlock_min_stage': 'interlock_min_stage'
                             }
 
                             for p_key, w_key in key_map.items():
@@ -298,6 +314,19 @@ class HistoryLabView:
                                 st.session_state[f"opt_chk_pb_willr_{i}"] = pb.get('opt_willr_val', False)
                                 st.session_state[f"rng_sld_pb_willr_{i}"] = pb.get('rng_willr_val', [-95, -50])
 
+                            # [신규] 동적 현금 비중(Dynamic Cash) 설정 동기화
+                            dc = config.get('dynamic_cash', {})
+                            if dc:
+                                st.session_state.dc_use_toggle = dc.get('use', False)
+                                st.session_state.dc_bull_v_sli = float(dc.get('bull_vxn', 18.0))
+                                st.session_state.dc_caution_v_sli = float(dc.get('caution_vxn', 35.0))
+                                st.session_state.dc_bear_v_sli = float(dc.get('bear_vxn', 40.0))
+                                st.session_state.dc_ma_buf_sli = float(dc.get('ma200_buffer', 0.0))
+                                st.session_state.dc_cash_bull_val = float(dc.get('cash_bull', 0.0))
+                                st.session_state.dc_cash_neutral_val = float(dc.get('cash_neutral', 20.0))
+                                st.session_state.dc_cash_caution_val = float(dc.get('cash_caution', 30.0))
+                                st.session_state.dc_cash_bear_val = float(dc.get('cash_bear', 80.0))
+
                             # 리밸런싱 모드 및 ATR 설정 동기화
                             st.session_state.use_fixed_chk = config.get('use_fixed_reb', True)
                             st.session_state.use_atr_chk = config.get('use_atr_reb', False)
@@ -309,24 +338,8 @@ class HistoryLabView:
                             st.session_state.atr_p_buy = int(config.get('atr_period_buy', 20))
                             st.session_state.atr_p_sell = int(config.get('atr_period_sell', 20))
                             
-                            # [신규] 리밸런싱 최적화 🎯 및 범위(rng) 동기화
-                            st.session_state.opt_chk_buy_reb_up = config.get('opt_buy_reb_up', False)
-                            st.session_state.rng_sld_buy_reb_up = config.get('rng_buy_reb_up', [0.1, 5.0])
-                            st.session_state.opt_chk_buy_reb_down = config.get('opt_buy_reb_down', False)
-                            st.session_state.rng_sld_buy_reb_down = config.get('rng_buy_reb_down', [-15.0, -1.0])
-                            st.session_state.opt_chk_sell_reb_up = config.get('opt_sell_reb_up', False)
-                            st.session_state.rng_sld_sell_reb_up = config.get('rng_sell_reb_up', [0.5, 10.0])
-                            st.session_state.opt_chk_sell_reb_down = config.get('opt_sell_reb_down', False)
-                            st.session_state.rng_sld_sell_reb_down = config.get('rng_sell_reb_down', [-10.0, -0.5])
-                            
-                            st.session_state.opt_chk_atr_m_buy_up = config.get('opt_atr_m_buy_up', False)
-                            st.session_state.rng_sld_atr_m_buy_up = config.get('rng_atr_m_buy_up', [1.0, 20.0])
-                            st.session_state.opt_chk_atr_m_buy_down = config.get('opt_atr_m_buy_down', False)
-                            st.session_state.rng_sld_atr_m_buy_down = config.get('rng_atr_m_buy_down', [0.5, 5.0])
-                            st.session_state.opt_chk_atr_m_sell = config.get('opt_atr_m_sell', False)
-                            st.session_state.rng_sld_atr_m_sell = config.get('rng_atr_m_sell', [1.0, 6.0])
-
                             st.session_state.loaded_strat_name = target_strat
+                            st.session_state.trigger_recalc_history = True # [신규] 로드 즉시 재시뮬레이션 트리거
                             st.success(f"'{target_strat}' 모든 설정 및 UI 로드 완료!")
                             st.rerun()
             else:
@@ -336,45 +349,84 @@ class HistoryLabView:
         start_date, end_date = TesterView.render_period_selector()
         st.divider()
         
-        with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
-            # 중첩된 설정(시그널 리스트 등)의 변경을 감지하기 위해 Deep Tuplification 적용
-            params_tuple = deep_tuple(current_params)
-            smart_tuple = deep_tuple(smart_params)
-            
-            golden_history, closed_trades, all_signal_events = get_cached_strategy_result(
-                data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, current_params['cash_ratio_pct']/100.0, 
-                start_date, end_date, params_tuple, trade_at, smart_tuple, salt
-            )
-            
-            st.session_state.last_golden_result = {
-                'history': golden_history.copy(),
-                'base': base_asset,
-                'lev': leverage_asset
-            }
-            
-            b1, b2, b3 = ("QQQ", "QLD", "TQQQ")
-            
-            bh_1 = StrategyEngine.run_benchmark(data_dict, b1, start_date, end_date)
-            bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
-            bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
-            
-        st.divider()
+        # [수정] 파라미터 변경 감지 해시 계산
+        current_hash = hash(str(current_params) + str(smart_params))
+        last_hash = st.session_state.get('last_run_hash_history')
         
-        # [수정] 탭 상태 유지를 위한 세션 상태 기반 탭 시스템 구현
-        tab_list = ["📊 분석 결과 & 상세 로그", "📝 매매 전략 설정", "🚀 AI 최적화 탐색 (Optimizer)"]
+        if last_hash and current_hash != last_hash:
+            st.warning("⚠️ 전략 설정이 변경되었습니다. 정확한 분석을 위해 [주식 전략 설정] 탭 하단의 [재시뮬레이션 실행] 버튼을 눌러주세요.")
+
+        # [수정] 모든 탭에서 공용으로 사용할 데이터 초기화 및 로드
+        res = st.session_state.get('last_history_result')
+        golden_history = res['history'] if res else pd.DataFrame()
+        closed_trades = res['closed_trades'] if res else pd.DataFrame()
+        all_signal_events = res['events'] if res else []
+        
+        # [신규] 재시뮬레이션 필요 여부 판단 (결과가 없거나 요청 시)
+        should_run = st.session_state.get('trigger_recalc_history', False) or golden_history.empty
+        
+        if should_run:
+            with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
+                params_tuple = deep_tuple(current_params)
+                smart_tuple = deep_tuple(smart_params)
+                
+                # [수정] get_cached_strategy_result 호출 (cash_ratio_pct 처리 포함)
+                new_gh, new_ct, new_se = get_cached_strategy_result(
+                    data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, current_params['cash_ratio_pct']/100.0, 
+                    start_date, end_date, params_tuple, trade_at, smart_tuple, salt
+                )
+                
+                st.session_state.last_history_result = {
+                    'history': new_gh,
+                    'closed_trades': new_ct,
+                    'events': new_se,
+                    'base': base_asset,
+                    'lev': leverage_asset
+                }
+                st.session_state.last_run_hash_history = current_hash
+                st.session_state.trigger_recalc_history = False
+                
+                # 데이터 갱신 후 즉시 반영을 위해 변수 업데이트
+                golden_history = new_gh
+                closed_trades = new_ct
+                all_signal_events = new_se
+
+        # 벤치마크 데이터 로드 (분석 탭에서 주로 쓰이지만 대시보드 요약을 위해 미리 로드)
+        bh_1, bh_2, bh_3 = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        b1, b2, b3 = ("QQQ", "QLD", "TQQQ")
+        if not golden_history.empty:
+            with st.spinner('벤치마크 데이터 준비 중...'):
+                bh_1 = StrategyEngine.run_benchmark(data_dict, b1, start_date, end_date)
+                bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
+                bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
+
+        # [수정] 탭 시스템 구현
+        tab_list = ["📊 분석 결과 & 상세 로그", "📝 주식 전략 설정"]
+        
         if 'history_active_tab' not in st.session_state:
             st.session_state.history_active_tab = tab_list[0]
             
-        # 가로형 라디오 버튼을 탭처럼 활용 (label_visibility="collapsed"로 깔끔하게)
         active_tab = st.radio("Navigation", tab_list, 
                              index=tab_list.index(st.session_state.history_active_tab),
                              horizontal=True, label_visibility="collapsed")
         st.session_state.history_active_tab = active_tab
         
-        st.write("") # 간격 조절
+        st.write("") 
 
         if active_tab == tab_list[0]:
-            # tab1 내용
+
+            if golden_history.empty:
+                st.info("시뮬레이션 결과가 없습니다. [주식 전략 설정] 탭에서 [재시뮬레이션 실행]을 눌러주세요.")
+                return
+
+            st.session_state.last_golden_result = {
+                'history': golden_history.copy(),
+                'closed_trades': closed_trades,
+                'benchmarks': {b1: bh_1, b2: bh_2, b3: bh_3},
+                'base': leverage_asset,
+                'lev': leverage_asset
+            }
+
             if golden_history.empty:
                 st.warning("분석할 데이터가 충분하지 않습니다.")
             else:
@@ -445,45 +497,44 @@ class HistoryLabView:
             TesterView.render_summary_dashboard(golden_history)
             st.divider()
 
-            st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
-            c_sel1, c_sel2, c_sel3 = st.columns(3)
-            use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
-            use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
-            
-            # [수정] 최적화 모드 토글
-            opt_mode = c_sel3.toggle("🎯 최적화 대상 설정 모드", value=st.session_state.get('opt_mode_active', False), key="opt_mode_main_toggle")
-            st.session_state.opt_mode_active = opt_mode
-            
-            st.session_state.current_params['use_fixed_reb'] = use_fixed
-            st.session_state.current_params['use_atr_reb'] = use_atr
+            # [수정] st.form 재도입: 설정값 변경 시마다 발생하는 화면 깜빡임 방지
+            with st.form("strategy_settings_form"):
+                st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
+                c_sel1, c_sel2, c_sel3 = st.columns(3)
+                use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
+                use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
+                
+                ticker_map = {
+                    "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)"
+                }
 
-            ticker_map = {
-                "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)"
-            }
+                # 1. 상단 섹션 (기준 자산 및 매매 시그널)
+                new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
+                # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
+                new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
+                
+                st.write("---")
+                # [수정] st.form_submit_button 사용: 클릭 시에만 모든 값이 한꺼번에 업데이트됨
+                submitted = st.form_submit_button("🚀 설정값 확정 및 재시뮬레이션 실행", width='stretch', type="primary")
+                
+                if submitted:
+                    # [신규] 폼 제출 시에만 세션 상태 동기화 및 재계산 트리거
+                    st.session_state.current_params['use_fixed_reb'] = use_fixed
+                    st.session_state.current_params['use_atr_reb'] = use_atr
+                    st.session_state.current_params.update(new_params_top)
+                    st.session_state.current_params.update(new_params_bottom)
+                    
+                    st.session_state.trigger_recalc_history = True
+                    st.rerun()
 
-            # [수정] st.form 제거: 모든 변경사항이 즉각 반영되도록 함 (탭 전환 시 유실 방지)
-            # 1. 상단 섹션 (기준 자산 및 매매 시그널)
-            new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
-            # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
-            new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
-            
-            # [신규] 실시간 동기화: UI 위젯에서 변경된 값을 즉시 session_state에 병합 (Pull 방식)
-            st.session_state.current_params.update(new_params_top)
-            st.session_state.current_params.update(new_params_bottom)
-
-            st.write("---")
-            col_btn1, col_btn2 = st.columns(2)
-            # form_submit_button 대신 일반 button 사용
-            if col_btn1.button("🚀 설정값 확정 및 강제 재시뮬레이션", width='stretch'):
-                st.rerun()
-            
+            st.write("")
+            col_btn2_dummy, col_btn2 = st.columns([3, 1])
             if col_btn2.button("🧼 시스템 데이터 완전 초기화 (캐시 삭제)", width='stretch'):
                 st.cache_data.clear()
                 st.success("캐시가 성공적으로 삭제되었습니다.")
                 st.rerun()
 
-        elif active_tab == tab_list[2]:
-            OptimizerView.render(data_dict, fg_df, vxn_df, news_df, st.session_state.current_params)
+
 
     @staticmethod
     def render_yearly_table(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), smart_params=None, selected_comparisons=[]):

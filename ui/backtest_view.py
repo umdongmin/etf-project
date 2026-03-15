@@ -10,140 +10,142 @@ from core.engine import StrategyEngine
 class BacktestView:
     """백테스트 결과 표시 UI 구성 클래스"""
     @staticmethod
-    def render_results(golden_history, bh_histories, closed_trades, base_asset, leverage_asset, smart_params=None):
+    def render_results(golden_history, bh_histories, closed_trades, base_asset, leverage_asset, smart_params=None, is_bond=False):
         if golden_history.empty:
             st.warning("⚠️ 선택하신 기간에 대한 백테스트 결과가 없습니다. (자산 상장일 이전이거나 데이터 수집 오류)")
             return
             
-        # [신규] 실시간 시그널 프리뷰 (Close Betting)
-        with st.container():
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.markdown("### 🛑 실시간 시그널 프리뷰 (Beta)")
+        if not is_bond:
+            # [신규] 실시간 시그널 프리뷰 (Close Betting)
+            with st.container():
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.markdown("### 🛑 실시간 시그널 프리뷰 (Beta)")
+                    
+                    # [신규] 서머타임 기간 판별 (현재 2026년 기준: 3/8 ~ 11/1)
+                    now = datetime.datetime.now()
+                    dst_start = datetime.datetime(now.year, 3, 8) # 2026년 3월 둘째 일요일
+                    dst_end = datetime.datetime(now.year, 11, 1)  # 2026년 11월 첫째 일요일
+                    is_dst = dst_start <= now < dst_end
+                    
+                    dst_status = "☀️ **현재 서머타임 적용 중**" if is_dst else "❄️ **현재 서머타임 해제 중**"
+                    dst_color = "#e67e22" if is_dst else "#3498db"
+                    
+                    # [신규] 분석 기간 정보 (사용자 투자 시작일 반영 여부 확인용)
+                    analysis_start = golden_history.index.min().strftime('%Y-%m-%d')
+                    analysis_end = golden_history.index.max().strftime('%Y-%m-%d')
+                    
+                    st.markdown(f"""
+                    <div style="font-size: 13px; color: #444; background: #f8f9fa; padding: 10px; border-radius: 8px; border-left: 4px solid {dst_color}; margin-bottom: 10px;">
+                        🇺🇸 <b>미국 정규장 운영 시간 (한국 기준):</b><br>
+                        • <b>서머타임 (03/08 ~ 11/01):</b> 22:30 ~ 05:00<br>
+                        • <b>평시/겨울 (11/02 ~ 03/07):</b> 23:30 ~ 06:00<br>
+                        <div style="margin-top: 5px; color: {dst_color}; font-size: 14px;">{dst_status}</div>
+                        <hr style="margin: 8px 0; border: 0.5px solid #eee;">
+                        📊 <b>분석 기준 기간:</b> <span style="color:#d35400; font-weight:bold;">{analysis_start} ~ {analysis_end}</span> (데이터 최신화 완료)
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.caption(f"분석 시작일({analysis_start}) 기준의 상태를 바탕으로 오늘({analysis_end})의 예상 매매 신호를 도출합니다.")
+                with col2:
+                    # 버튼 클릭 시 app.py에서 처리하도록 신호 전달
+                    # 버튼을 누르면 예측 프로세스가 시작됨
+                    if st.button("현재가 기준 신호 계산", width='stretch', type="primary"):
+                        st.session_state.trigger_preview = True
                 
-                # [신규] 서머타임 기간 판별 (현재 2026년 기준: 3/8 ~ 11/1)
-                now = datetime.datetime.now()
-                dst_start = datetime.datetime(now.year, 3, 8) # 2026년 3월 둘째 일요일
-                dst_end = datetime.datetime(now.year, 11, 1)  # 2026년 11월 첫째 일요일
-                is_dst = dst_start <= now < dst_end
-                
-                dst_status = "☀️ **현재 서머타임 적용 중**" if is_dst else "❄️ **현재 서머타임 해제 중**"
-                dst_color = "#e67e22" if is_dst else "#3498db"
-                
-                # [신규] 분석 기간 정보 (사용자 투자 시작일 반영 여부 확인용)
-                analysis_start = golden_history.index.min().strftime('%Y-%m-%d')
-                analysis_end = golden_history.index.max().strftime('%Y-%m-%d')
-                
-                st.markdown(f"""
-                <div style="font-size: 13px; color: #444; background: #f8f9fa; padding: 10px; border-radius: 8px; border-left: 4px solid {dst_color}; margin-bottom: 10px;">
-                    🇺🇸 <b>미국 정규장 운영 시간 (한국 기준):</b><br>
-                    • <b>서머타임 (03/08 ~ 11/01):</b> 22:30 ~ 05:00<br>
-                    • <b>평시/겨울 (11/02 ~ 03/07):</b> 23:30 ~ 06:00<br>
-                    <div style="margin-top: 5px; color: {dst_color}; font-size: 14px;">{dst_status}</div>
-                    <hr style="margin: 8px 0; border: 0.5px solid #eee;">
-                    📊 <b>분석 기준 기간:</b> <span style="color:#d35400; font-weight:bold;">{analysis_start} ~ {analysis_end}</span> (데이터 최신화 완료)
-                </div>
-                """, unsafe_allow_html=True)
-                st.caption(f"분석 시작일({analysis_start}) 기준의 상태를 바탕으로 오늘({analysis_end})의 예상 매매 신호를 도출합니다.")
-            with col2:
-                # 버튼 클릭 시 app.py에서 처리하도록 신호 전달
-                # 버튼을 누르면 예측 프로세스가 시작됨
-                if st.button("현재가 기준 신호 계산", width='stretch', type="primary"):
-                    st.session_state.trigger_preview = True
+                # 프리뷰 결과가 세션에 있으면 표시
+                if st.session_state.get('preview_result'):
+                    res = st.session_state['preview_result']
+                    p_sig = str(res['signal'])
+                    current_stage = int(golden_history.iloc[-1]['Stage'])
+                    preview_stage = int(res.get('stage', current_stage))
+                    
+                    # 색상 결정
+                    if p_sig.startswith("매도"): p_bg = "rgba(52, 152, 219, 0.2)"; p_txt = "#3498db"
+                    elif p_sig.startswith("매수"): p_bg = "rgba(231, 76, 60, 0.2)"; p_txt = "#e74c3c"
+                    else: p_bg = "rgba(127, 140, 141, 0.15)"; p_txt = "#555"
+                    
+                    # 상태 변화 체크
+                    status_change = ""
+                    if current_stage != preview_stage:
+                        status_change = f" <span style='color:#e67e22; font-size:14px;'>(⚠️ S{current_stage} → S{preview_stage} 변경 예상)</span>"
+                    else:
+                        status_change = f" <span style='color:#27ae60; font-size:14px;'>(✅ S{current_stage} 상태 유지 예상)</span>"
+    
+                    # 시간 체크 (실시간 여부)
+                    is_today = res['date'].date() == datetime.datetime.now().date()
+                    time_label = "🔴 실시간(장중)" if is_today else "⚪ 장마감후(마지막 종가)"
+                    
+                    st.markdown(f"""
+                    <div style="background-color:{p_bg}; border: 2px solid {p_txt}; padding:18px; border-radius:12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
+                        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                            <span style="font-weight:bold; color:{p_txt}; font-size:16px;">오늘의 예상 시그널: <span style="font-size:22px; font-weight:900;">{p_sig}</span>{status_change}</span>
+                            <span style="font-size:12px; background:#eee; padding:3px 8px; border-radius:15px; color:#666;">{time_label}</span>
+                        </div>
+                        <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; font-size:13px; color:#444; border-top:1px solid rgba(0,0,0,0.1); pt:10px; margin-top:10px; padding-top:10px;">
+                            <div><b>기준일:</b> {res['date'].strftime('%Y-%m-%d')}</div>
+                            <div><b>현재가:</b> ${res['price']:.2f}</div>
+                            <div><b>RSI:</b> {res['rsi']:.1f}</div>
+                            <div><b>VXN:</b> {res['vxn']:.1f}</div>
+                        </div>
+                        <div style="margin-top:12px; font-size:14px; padding:8px; background:rgba(255,255,255,0.5); border-radius:6px;">
+                            📝 <b>전략 요약:</b> {res['summary']}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    if st.button("프리뷰 로그 닫기"):
+                        del st.session_state['preview_result']
+                        st.rerun()
+    
+            st.divider()
+            latest = golden_history.iloc[-1]
+            st.subheader(f"📍 상태 요약 ({latest.name.date()})")
             
-            # 프리뷰 결과가 세션에 있으면 표시
-            if st.session_state.get('preview_result'):
-                res = st.session_state['preview_result']
-                p_sig = str(res['signal'])
-                current_stage = int(golden_history.iloc[-1]['Stage'])
-                preview_stage = int(res.get('stage', current_stage))
-                
-                # 색상 결정
-                if p_sig.startswith("매도"): p_bg = "rgba(52, 152, 219, 0.2)"; p_txt = "#3498db"
-                elif p_sig.startswith("매수"): p_bg = "rgba(231, 76, 60, 0.2)"; p_txt = "#e74c3c"
-                else: p_bg = "rgba(127, 140, 141, 0.15)"; p_txt = "#555"
-                
-                # 상태 변화 체크
-                status_change = ""
-                if current_stage != preview_stage:
-                    status_change = f" <span style='color:#e67e22; font-size:14px;'>(⚠️ S{current_stage} → S{preview_stage} 변경 예상)</span>"
-                else:
-                    status_change = f" <span style='color:#27ae60; font-size:14px;'>(✅ S{current_stage} 상태 유지 예상)</span>"
+            # Trade_Label 사용 (매도 우선 체크하여 과매수 오매칭 방지)
+            sig = str(latest['Trade_Label']) if 'Trade_Label' in latest else "중립"
+            if sig.startswith("매도"): sig_color = "#3498db" # Blue
+            elif sig.startswith("매수"): sig_color = "#e74c3c" # Red
+            elif "진행중" in sig: sig_color = "#f39c12" # Orange
+            else: sig_color = "#7f8c8d" # Gray (중립)
+            
+            st.markdown(f'<div style="background-color:{sig_color}; padding:20px; border-radius:10px; text-align:center; color:white;">'
+                        f'<h2 style="margin:0;">{sig} 상태</h2>'
+                        f'<div style="margin-top:10px; font-weight:bold;">{latest.get("Summary", "내역 없음")}</div></div>', unsafe_allow_html=True)
+        
+        if not is_bond:
+            # metrics 계산 시 PortfolioValue 컬럼명 정규화
+            metrics = {}
+            for k, v in bh_histories.items():
+                temp_df = v.copy()
+                if 'Value' in temp_df.columns: temp_df.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+                metrics[k] = calculate_metrics(temp_df)
+            
+            temp_strat = golden_history.copy()
+            if 'Value' in temp_strat.columns: temp_strat.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+            metrics['Strategy'] = calculate_metrics(temp_strat)
+            
+            s_m = metrics['Strategy']
+            
+            # 그룹별 지표 렌더링
+            m_col1, m_col2, m_col3 = st.columns(3)
+            
+            with m_col1:
+                st.markdown("##### 📈 수익 및 성장")
+                st.metric("누적 수익률", f"{s_m['Cumulative Return']:.1%}")
+                st.metric("CAGR", f"{s_m['CAGR']:.1%}")
+                st.metric("최종 자산", f"${s_m['Final Value']:,.0f}")
 
-                # 시간 체크 (실시간 여부)
-                is_today = res['date'].date() == datetime.datetime.now().date()
-                time_label = "🔴 실시간(장중)" if is_today else "⚪ 장마감후(마지막 종가)"
-                
-                st.markdown(f"""
-                <div style="background-color:{p_bg}; border: 2px solid {p_txt}; padding:18px; border-radius:12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05);">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-                        <span style="font-weight:bold; color:{p_txt}; font-size:16px;">오늘의 예상 시그널: <span style="font-size:22px; font-weight:900;">{p_sig}</span>{status_change}</span>
-                        <span style="font-size:12px; background:#eee; padding:3px 8px; border-radius:15px; color:#666;">{time_label}</span>
-                    </div>
-                    <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; font-size:13px; color:#444; border-top:1px solid rgba(0,0,0,0.1); pt:10px; margin-top:10px; padding-top:10px;">
-                        <div><b>기준일:</b> {res['date'].strftime('%Y-%m-%d')}</div>
-                        <div><b>현재가:</b> ${res['price']:.2f}</div>
-                        <div><b>RSI:</b> {res['rsi']:.1f}</div>
-                        <div><b>VXN:</b> {res['vxn']:.1f}</div>
-                    </div>
-                    <div style="margin-top:12px; font-size:14px; padding:8px; background:rgba(255,255,255,0.5); border-radius:6px;">
-                        📝 <b>전략 요약:</b> {res['summary']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                if st.button("프리뷰 로그 닫기"):
-                    del st.session_state['preview_result']
-                    st.rerun()
+            with m_col2:
+                st.markdown("##### 🛡️ 리스크 및 방어")
+                st.metric("MDD", f"{s_m['MDD']:.1%}")
+                st.metric("MAR Index", f"{s_m['MAR']:.2f}")
+                st.metric("최대 회복 기간", f"{s_m['Max_Recovery']}일")
 
-        st.divider()
-        latest = golden_history.iloc[-1]
-        st.subheader(f"📍 상태 요약 ({latest.name.date()})")
-        
-        # Trade_Label 사용 (매도 우선 체크하여 과매수 오매칭 방지)
-        sig = str(latest['Trade_Label']) if 'Trade_Label' in latest else "중립"
-        if sig.startswith("매도"): sig_color = "#3498db" # Blue
-        elif sig.startswith("매수"): sig_color = "#e74c3c" # Red
-        elif "진행중" in sig: sig_color = "#f39c12" # Orange
-        else: sig_color = "#7f8c8d" # Gray (중립)
-        
-        st.markdown(f'<div style="background-color:{sig_color}; padding:20px; border-radius:10px; text-align:center; color:white;">'
-                    f'<h2 style="margin:0;">{sig} 상태</h2>'
-                    f'<div style="margin-top:10px; font-weight:bold;">{latest["Summary"]}</div></div>', unsafe_allow_html=True)
-        
-        # metrics 계산 시 PortfolioValue 컬럼명 정규화
-        metrics = {}
-        for k, v in bh_histories.items():
-            temp_df = v.copy()
-            if 'Value' in temp_df.columns: temp_df.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
-            metrics[k] = calculate_metrics(temp_df)
-        
-        temp_strat = golden_history.copy()
-        if 'Value' in temp_strat.columns: temp_strat.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
-        metrics['Strategy'] = calculate_metrics(temp_strat)
-        
-        s_m = metrics['Strategy']
-        
-        # 그룹별 지표 렌더링
-        m_col1, m_col2, m_col3 = st.columns(3)
-        
-        with m_col1:
-            st.markdown("##### 📈 수익 및 성장")
-            st.metric("누적 수익률", f"{s_m['Cumulative Return']:.1%}")
-            st.metric("CAGR", f"{s_m['CAGR']:.1%}")
-            st.metric("최종 자산", f"${s_m['Final Value']:,.0f}")
-
-        with m_col2:
-            st.markdown("##### 🛡️ 리스크 및 방어")
-            st.metric("MDD", f"{s_m['MDD']:.1%}")
-            st.metric("MAR Index", f"{s_m['MAR']:.2f}")
-            st.metric("최대 회복 기간", f"{s_m['Max_Recovery']}일")
-
-        with m_col3:
-            st.markdown("##### ⚡ 매매 효율성")
-            st.metric("Sharpe Ratio", f"{s_m['Sharpe']:.2f}")
-            st.metric("승률 (일별)", f"{s_m['Win_Rate']:.1%}")
-            st.metric("손익비", f"{s_m['Profit_Factor']:.2f}")
+            with m_col3:
+                st.markdown("##### ⚡ 매매 효율성")
+                st.metric("Sharpe Ratio", f"{s_m['Sharpe']:.2f}")
+                st.metric("승률 (일별)", f"{s_m['Win_Rate']:.1%}")
+                st.metric("손익비", f"{s_m['Profit_Factor']:.2f}")
         
         st.subheader("성과 비교 차트 (상세 분석)")
         fig = go.Figure()
@@ -206,13 +208,15 @@ class BacktestView:
             if 'RSI' in golden_history.columns: add_backtest_vrects(golden_history, golden_history['RSI'] <= r_turbo, "blue", "turbo")
 
         st.plotly_chart(fig, width='stretch')
-        BacktestView.render_returns_heatmap(golden_history, bh_histories, leverage_asset)
-        BacktestView.render_monte_carlo(golden_history)
+        if not is_bond:
+            BacktestView.render_returns_heatmap(golden_history, bh_histories, leverage_asset)
+            BacktestView.render_monte_carlo(golden_history)
 
-        st.divider()
-        st.subheader("전략 성과 요약")
-        sum_df = pd.DataFrame([{"전략": k, "수익률": f"{v['Cumulative Return']:.2%}", "CAGR": f"{v['CAGR']:.2%}", "MDD": f"{v['MDD']:.2%}", "Sharpe": f"{v['Sharpe']:.2f}", "MAR": f"{v['MAR']:.2f}", "승률": f"{v['Win_Rate']:.1%}", "손익비": f"{v['Profit_Factor']:.2f}"} for k, v in metrics.items()])
-        st.table(sum_df.set_index("전략"))
+        if not is_bond:
+            st.divider()
+            st.subheader("전략 성과 요약")
+            sum_df = pd.DataFrame([{"전략": k, "수익률": f"{v['Cumulative Return']:.2%}", "CAGR": f"{v['CAGR']:.2%}", "MDD": f"{v['MDD']:.2%}", "Sharpe": f"{v['Sharpe']:.2f}", "MAR": f"{v['MAR']:.2f}", "승률": f"{v['Win_Rate']:.1%}", "손익비": f"{v['Profit_Factor']:.2f}"} for k, v in metrics.items()])
+            st.table(sum_df.set_index("전략"))
         
         st.divider()
         with st.expander("전체 일별 상세로그 확인"):
@@ -233,6 +237,10 @@ class BacktestView:
             
             base_w_col = f'{base_asset}_Weight'
             lev_group_cols = [f'{t}_Weight' for t in ['QLD', 'TQQQ'] if f'{t}_Weight' in log_df.columns]
+            
+            # [신규] 채권 관련 지표 컬럼 추가
+            bond_cols = ['gap', 't10y2y', 'yc_mom', 'tlt_rsi', 'ff_rate', 'core_cpi']
+            
             # 가치 관련 컬럼을 가장 앞쪽에 배치하여 확인 용이하도록 수정
             cols = [
                 'Value', 'QQQ_Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'Trade_Ret', 'Trade_Status', 'Trade_Entry_Date'
@@ -243,7 +251,7 @@ class BacktestView:
                 'BB_Lower', 'BB_Upper', 'Peak_Price', 'ATR_20',
                 'WILLR', 'WILLR_Sig', 
                 'ADX', 'DMP', 'DMN', 'SAR', 'STOCH_K', 'STOCH_D', 'VXN'
-            ]
+            ] + bond_cols
             display_df = log_df[[c for c in cols if c in log_df.columns]].sort_index(ascending=False)
             
             # 컬럼명 리네임 (가독성 향상)
@@ -263,7 +271,9 @@ class BacktestView:
                 'BB_Lower': '${:.2f}', 'BB_Upper': '${:.2f}', 'Peak_Price': '${:.2f}', 'ATR_20': '{:.2f}',
                 'VXN': '{:.1f}', 'ADX': '{:.1f}', 
                 'Williams': '{:.1f}', 'DI+': '{:.1f}', 'DI-': '{:.1f}', 'Parabolic': '{:.2f}',
-                'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}'
+                'STOCH_K': '{:.1f}', 'STOCH_D': '{:.1f}',
+                'gap': '{:.2f}', 't10y2y': '{:.2f}', 'yc_mom': '{:.2f}', 'tlt_rsi': '{:.1f}',
+                'ff_rate': '{:.1f}', 'core_cpi': '{:.1f}'
             }
             formats.update({c: '{:.1%}' for c in lev_group_cols + [base_w_col]})
             
