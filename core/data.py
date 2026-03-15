@@ -3,12 +3,40 @@ import pandas_ta as ta
 import yfinance as yf
 import requests
 import datetime
+import time
 import os
 import streamlit as st
 from core.news_service import NewsService
 
 class DataService:
     """데이터 수집 및 전처리를 담당하는 클래스"""
+
+    @staticmethod
+    def _yf_download_with_retry(*args, max_retries=3, **kwargs):
+        """yf.download를 Rate Limit 오류 시 exponential backoff으로 재시도"""
+        delays = [5, 15, 30]
+        for attempt in range(max_retries):
+            try:
+                result = yf.download(*args, **kwargs)
+                if result is not None and not result.empty:
+                    return result
+                # 빈 결과도 재시도
+                if attempt < max_retries - 1:
+                    time.sleep(delays[attempt])
+            except Exception as e:
+                err_str = str(e).lower()
+                if 'ratelimit' in err_str or 'too many requests' in err_str or '429' in err_str:
+                    if attempt < max_retries - 1:
+                        wait = delays[attempt]
+                        print(f"[yfinance] Rate limit 감지 — {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
+                        time.sleep(wait)
+                    else:
+                        print(f"[yfinance] Rate limit 재시도 초과: {e}")
+                        raise
+                else:
+                    raise
+        return pd.DataFrame()
+
     @staticmethod
     def calculate_indicators(df):
         # yfinance 최신 버전에서 단일 티커도 MultiIndex 컬럼을 반환할 수 있으므로 평탄화
@@ -183,7 +211,7 @@ class DataService:
 
         try:
             print(f"메인 티커 데이터 다운로드 중: {tickers}...")
-            full_data = yf.download(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
+            full_data = cls._yf_download_with_retry(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
             print("메인 데이터 다운로드 완료. 처리 중...")
             for ticker in tickers:
                 if ticker in full_data and not full_data[ticker].empty:
@@ -211,7 +239,7 @@ class DataService:
                 v_data_list = []
                 for name, ticker in v_tickers.items():
                     print(f"{name} ({ticker}) 다운로드 중...")
-                    raw = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                    raw = cls._yf_download_with_retry(ticker, start=start_date, end=end_date, progress=False)
                     if not raw.empty:
                         c_data = raw['Close']
                         s = c_data.iloc[:, 0].copy() if isinstance(c_data, pd.DataFrame) else c_data.copy()
@@ -341,7 +369,7 @@ class DataService:
         prices = {}
         try:
             # period='1d'로 가장 최근 1분봉 또는 마지막가를 가져옴
-            data = yf.download(tickers, period='1d', interval='1m', progress=False)
+            data = cls._yf_download_with_retry(tickers, period='1d', interval='1m', progress=False)
             if not data.empty:
                 # pandas_ta 등으로 가공하지 않고 원본 종가만 취함
                 if len(tickers) > 1:
