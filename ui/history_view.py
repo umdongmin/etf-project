@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
@@ -608,8 +608,8 @@ class HistoryLabView:
                 return f'background-color: rgba(255, 23, 68, {alpha});'
             except: return ''
 
-        st.dataframe(df.style.applymap(style_returns, subset=[c for c in df.columns if "수익" in c])\
-                            .applymap(style_mdd, subset=[c for c in df.columns if "MDD" in c]), width='stretch', height=520)
+        st.dataframe(df.style.map(style_returns, subset=[c for c in df.columns if "수익" in c])\
+                            .map(style_mdd, subset=[c for c in df.columns if "MDD" in c]), width='stretch', height=520)
 
     @staticmethod
     def render_overall_summary(s_h, b1_h, b2_h, b3_h, b_names=("QQQ", "QLD", "TQQQ"), selected_comparisons=[]):

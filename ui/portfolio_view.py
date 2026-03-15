@@ -474,15 +474,19 @@ class PortfolioView:
         # 개별 전략 곡선
         colors = ['#2979ff', '#ff9100', '#f44336', '#9c27b0']
         for i, (name, data) in enumerate(individuals.items()):
-            hist_df = data['history']
+            hist_df = data.get('history', pd.DataFrame())
+            if hist_df.empty:
+                continue
             
-            # [수정] 성과 컬럼 유연하게 탐색
-            val_col = 'Value'
-            if 'Value' not in hist_df.columns:
-                if 'PortfolioValue' in hist_df.columns:
-                    val_col = 'PortfolioValue'
-                elif 'Close' in hist_df.columns:
-                    val_col = 'Close'
+            # [수정] 성과 컬럼 유연하게 탐색 (KeyError 방지 강건성 강화)
+            val_col = None
+            for col in ['Value', 'PortfolioValue', 'Close']:
+                if col in hist_df.columns:
+                    val_col = col
+                    break
+            
+            if val_col is None:
+                continue
             
             fig.add_trace(go.Scatter(
                 x=hist_df.index, y=hist_df[val_col], 
@@ -618,9 +622,9 @@ class PortfolioView:
             calmar_cols = [c for c in df.columns if '칼마' in c]
 
             return df.style \
-                .applymap(color_ret, subset=ret_cols) \
-                .applymap(color_mdd, subset=mdd_cols) \
-                .applymap(color_calmar, subset=calmar_cols) \
+                .map(color_ret, subset=ret_cols) \
+                .map(color_mdd, subset=mdd_cols) \
+                .map(color_calmar, subset=calmar_cols) \
                 .format("{:+.1%}", subset=ret_cols + mdd_cols) \
                 .format("{:.2f}", subset=calmar_cols, na_rep="-")
 

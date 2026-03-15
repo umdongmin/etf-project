@@ -177,7 +177,7 @@ class RollingLabView:
 
         display_df = res_df[["구간", "시작일", "종료일", "최종 수익률", "연평균(CAGR)", "MDD"]].set_index("구간")
         st.dataframe(
-            display_df.style.applymap(color_ret, subset=["최종 수익률", "연평균(CAGR)"]),
+            display_df.style.map(color_ret, subset=["최종 수익률", "연평균(CAGR)"]),
             width='stretch'
         )
 

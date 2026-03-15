@@ -286,7 +286,7 @@ class BacktestView:
 
             st.dataframe(
                 display_df.style.apply(style_signal, axis=1)
-                .applymap(highlight_signals, subset=[c for c in ['RSI Signal', 'MACD Signal', 'Williams Signal'] if c in display_df.columns])
+                .map(highlight_signals, subset=[c for c in ['RSI Signal', 'MACD Signal', 'Williams Signal'] if c in display_df.columns])
                 .format(formats, na_rep='-'), 
                 width='stretch', height=600
             )
