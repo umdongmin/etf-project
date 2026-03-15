@@ -474,12 +474,18 @@ class PortfolioView:
         # 개별 전략 곡선
         colors = ['#2979ff', '#ff9100', '#f44336', '#9c27b0']
         for i, (name, data) in enumerate(individuals.items()):
-            # individual_results[name] contains 'history', 'closed_trades', etc.
-            # wait, run_portfolio returns individual_results as a dict of dataframes (history)?
-            # let's check portfolio_manager.py: individual_results[name] = {"history": ..., ...}
             hist_df = data['history']
+            
+            # [수정] 성과 컬럼 유연하게 탐색
+            val_col = 'Value'
+            if 'Value' not in hist_df.columns:
+                if 'PortfolioValue' in hist_df.columns:
+                    val_col = 'PortfolioValue'
+                elif 'Close' in hist_df.columns:
+                    val_col = 'Close'
+            
             fig.add_trace(go.Scatter(
-                x=hist_df.index, y=hist_df['Value'], 
+                x=hist_df.index, y=hist_df[val_col], 
                 name=f"Strat: {name}", 
                 line=dict(width=1.5, color=colors[i % len(colors)]),
                 opacity=0.7
