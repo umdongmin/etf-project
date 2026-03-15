@@ -34,8 +34,8 @@ class PortfolioView:
             _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
             _default_bond_lev_params = copy.deepcopy(st.session_state.get('current_bond_lev_params')) or None
             st.session_state.portfolio_configs = [
-                {'name': '전략 A (TQQQ 베이스)', 'weight': 0.7, 'type': 'equity', 'params': copy.deepcopy(st.session_state.current_params)},
-                {'name': '전략 B (TLT/TBF 채권)', 'weight': 0.3, 'type': 'bond',
+                {'name': '전략 A (TQQQ 베이스)', 'weight': 0.4, 'type': 'equity', 'params': copy.deepcopy(st.session_state.current_params)},
+                {'name': '전략 B (TLT/TBF 채권)', 'weight': 0.6, 'type': 'bond',
                  'params': copy.deepcopy(st.session_state.get('current_bond_params', _default_bond_params)),
                  'lev_params': _default_bond_lev_params},
             ]
@@ -133,7 +133,7 @@ class PortfolioView:
                 'asymmetric':  '⚖️ 비대칭 (상 15% / 하 5%)',
             }
             preset_keys = list(PRESET_LABELS.keys())
-            current_preset = st.session_state.get('portfolio_rebalance_preset', 'annual')
+            current_preset = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
             preset_idx = preset_keys.index(current_preset) if current_preset in preset_keys else 1
             selected_preset = col_rb.selectbox(
                 "🔄 리밸런싱 전략",

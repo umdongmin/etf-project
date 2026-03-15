@@ -4,7 +4,7 @@ from core.engine import StrategyEngine
 
 class PortfolioManager:
     """여러 전략을 결합하여 포트폴리오를 구성하고 리밸런싱을 수행하는 클래스"""
-    
+
     # 리밸런싱 프리셋 정의
     REBALANCE_PRESETS = {
         # UI 키와 완전 일치 (portfolio_view.py PRESET_LABELS 기준)
@@ -17,15 +17,43 @@ class PortfolioManager:
         'asymmetric':  {'method': 'threshold', 'upper_band': 0.15, 'lower_band': 0.05, 'min_interval_days': 21},
     }
 
-    def __init__(self, strategies=None, rebalance_preset='none', total_capital=10000.0):
+    def __init__(self, strategies=None, rebalance_preset='none', total_capital=10000.0,
+                 regime_series=None, regime_weights=None, custom_preset_cfg=None):
         """
-        strategies: dict { 'strategy_name': { 'weight': 0.7, 'engine_kwargs': dict, 'strat_type': 'equity'/'bond' } }
+        strategies        : dict { 'strategy_name': { 'weight': 0.7, 'engine_kwargs': dict, 'strat_type': 'equity'/'bond' } }
+        regime_series     : pd.Series indexed by date → regime label ('bull'/'neutral'/'caution'/'bear')
+                            None이면 각 전략의 고정 weight 사용 (기존 동작 유지)
+        regime_weights    : dict { 'bull': {'strategy_name': 0.8, ...}, 'neutral': {...}, ... }
+                            None이면 고정 weight 사용
+        custom_preset_cfg : dict — REBALANCE_PRESETS에 없는 임시 프리셋을 직접 주입
+                            예: {'method': 'threshold', 'upper_band': 0.12, 'lower_band': 0.07, 'min_interval_days': 21}
+                            설정 시 rebalance_preset 값은 무시됨
         """
         self.strategies = strategies if strategies else {}
         self.rebalance_preset = rebalance_preset
         self.total_capital = total_capital
         self._last_rebalance_day_idx = 0
         self.history = []
+
+        # Dynamic Weight 설정 (None이면 기존 fixed weight 동작)
+        self.regime_series    = regime_series    # pd.Series[date] → str
+        self.regime_weights   = regime_weights   # dict: regime → {name: weight}
+        self.custom_preset_cfg = custom_preset_cfg  # dict or None
+
+    def _get_target_weight(self, name: str, current_date) -> float:
+        """현재 날짜의 Regime에 따라 target weight 반환.
+        regime_series / regime_weights가 None이면 전략 고정 weight를 반환 (하위 호환).
+        """
+        if self.regime_series is not None and self.regime_weights is not None:
+            # date 타입 통일 (datetime.date or pd.Timestamp 모두 허용)
+            lookup = current_date
+            if hasattr(lookup, 'date'):
+                lookup = lookup.date()
+            regime = self.regime_series.get(lookup, 'neutral')
+            rw = self.regime_weights.get(regime, {})
+            if name in rw:
+                return rw[name]
+        return self.strategies[name]['weight']
 
     def register_strategy(self, name, weight, engine_kwargs, strat_type='equity'):
         """시뮬레이션에 참여할 전략 등록"""
@@ -91,8 +119,11 @@ class PortfolioManager:
                         del states[name]
                         break
 
-        # 리밸런싱 프리셋 파라미터 로드
-        preset_cfg = self.REBALANCE_PRESETS.get(self.rebalance_preset, {'method': 'none'})
+        # 리밸런싱 프리셋 파라미터 로드 (custom_preset_cfg 우선)
+        if self.custom_preset_cfg is not None:
+            preset_cfg = self.custom_preset_cfg
+        else:
+            preset_cfg = self.REBALANCE_PRESETS.get(self.rebalance_preset, {'method': 'none'})
         rb_method = preset_cfg['method']
 
         # 2. 록스텝(Lockstep) 시뮬레이션 엔진 루프
@@ -126,7 +157,7 @@ class PortfolioManager:
                         upper_band = preset_cfg.get('upper_band', preset_cfg.get('band', 0.10))
                         lower_band = preset_cfg.get('lower_band', preset_cfg.get('band', 0.10))
                         for name in active_names:
-                            target_w = self.strategies[name]['weight']
+                            target_w = self._get_target_weight(name, current_date)
                             curr_w = states[name]['portfolio_value'] / current_total_portfolio_value
                             drift = curr_w - target_w
                             if drift > upper_band or drift < -lower_band:
@@ -136,7 +167,7 @@ class PortfolioManager:
                 if do_rebalance:
                     self._last_rebalance_day_idx = loop_day_idx
                     for name in active_names:
-                        target_w = self.strategies[name]['weight']
+                        target_w = self._get_target_weight(name, current_date)
                         target_val = target_w * current_total_portfolio_value
                         curr_val = states[name]['portfolio_value']
                         cash_injections[name] = target_val - curr_val

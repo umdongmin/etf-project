@@ -150,10 +150,26 @@ class BacktestView:
         st.subheader("성과 비교 차트 (상세 분석)")
         fig = go.Figure()
         
+        # 벤치마크 곡선 (Robustness 강화)
         for k, v in bh_histories.items():
-            fig.add_trace(go.Scatter(x=v.index, y=v['Value']/10000, name=k, opacity=0.5, line=dict(width=1.5)))
+            if v.empty:
+                continue
+            
+            val_col_v = 'Value'
+            if 'Value' not in v.columns:
+                if 'PortfolioValue' in v.columns: val_col_v = 'PortfolioValue'
+                elif 'Close' in v.columns: val_col_v = 'Close'
+                else: continue
+                
+            fig.add_trace(go.Scatter(x=v.index, y=v[val_col_v]/10000, name=k, opacity=0.5, line=dict(width=1.5)))
         
-        fig.add_trace(go.Scatter(x=golden_history.index, y=golden_history['Value']/10000, name='Strategy', line=dict(color='blue', width=2.5)))
+        # 전략 곡선 (Robustness 강화)
+        val_col_g = 'Value'
+        if 'Value' not in golden_history.columns:
+            if 'PortfolioValue' in golden_history.columns: val_col_g = 'PortfolioValue'
+            elif 'Close' in golden_history.columns: val_col_g = 'Close'
+        
+        fig.add_trace(go.Scatter(x=golden_history.index, y=golden_history[val_col_g]/10000, name='Strategy', line=dict(color='blue', width=2.5)))
         
         v_exit = smart_params.get('vix_exit', 29) if smart_params else 29
         r_turbo = smart_params.get('rsi_turbo', 31) if smart_params else 31
@@ -168,16 +184,16 @@ class BacktestView:
         normal_buys = buy_pts.drop(turbo_buys.index)
 
         if not normal_buys.empty:
-            fig.add_trace(go.Scatter(x=normal_buys.index, y=normal_buys['Value']/10000, mode='markers', 
+            fig.add_trace(go.Scatter(x=normal_buys.index, y=normal_buys[val_col_g]/10000, mode='markers', 
                                      name='Normal Buy', marker=dict(symbol='triangle-up', size=8, color='#af52de', opacity=0.8)))
         if not normal_sells.empty:
-            fig.add_trace(go.Scatter(x=normal_sells.index, y=normal_sells['Value']/10000, mode='markers', 
+            fig.add_trace(go.Scatter(x=normal_sells.index, y=normal_sells[val_col_g]/10000, mode='markers', 
                                      name='Normal Sell', marker=dict(symbol='triangle-down', size=8, color='#00b0ff', opacity=0.8)))
         if not turbo_buys.empty:
-            fig.add_trace(go.Scatter(x=turbo_buys.index, y=turbo_buys['Value']/10000, mode='markers', 
+            fig.add_trace(go.Scatter(x=turbo_buys.index, y=turbo_buys[val_col_g]/10000, mode='markers', 
                                      name='Turbo Buy ▲', marker=dict(symbol='triangle-up', size=14, color='#7b1fa2', line=dict(color='white', width=1))))
         if not safety_sells.empty:
-            fig.add_trace(go.Scatter(x=safety_sells.index, y=safety_sells['Value']/10000, mode='markers', 
+            fig.add_trace(go.Scatter(x=safety_sells.index, y=safety_sells[val_col_g]/10000, mode='markers', 
                                      name='Safety Sell ▼', marker=dict(symbol='triangle-down', size=14, color='#01579b', line=dict(color='white', width=1))))
 
         fig.update_layout(
