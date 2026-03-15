@@ -497,7 +497,13 @@ class GoldenStrategyApp:
                         if not macro_df.empty:
                             st.write("- 매크로 데이터 최신 날짜:", macro_df.index.max())
                             st.write("- 주요 지표 결측치: ", macro_df.isna().sum().to_dict())
-                        st.write(f"- TLT 데이터 수: {len(data_dict.get('TLT', []))} 행")
+                        tlt_len = len(data_dict.get('TLT', []))
+                        st.write(f"- TLT 데이터 수: {tlt_len} 행")
+                        if tlt_len == 0:
+                            st.warning("⚠️ TLT 데이터 없음 — yfinance Rate Limit 가능성. 아래 버튼으로 캐시를 초기화하세요.")
+                            if st.button("🔄 데이터 캐시 초기화 후 재시도", key="clear_cache_bond"):
+                                DataService.load_all_data.clear()
+                                st.rerun()
                         st.write(f"- 최적화 파라미터: {st.session_state.current_bond_params}")
 
         elif menu == "🧠 AI 뉴스 분석 리포트":
