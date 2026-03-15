@@ -469,12 +469,14 @@ class PortfolioView:
         metrics = calculate_metrics(combined)
         
         st.subheader("📊 통합 포트폴리오 성과")
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3, m4, m5 = st.columns(5)
         total_ret = (metrics['Final Value']/st.session_state.portfolio_total_capital - 1)*100
+        calmar = metrics['CAGR'] / abs(metrics['MDD']) if metrics['MDD'] != 0 else 0
         m1.metric("최종 자산", f"${metrics['Final Value']:,.2f}")
         m2.metric("누적 수익률", f"{total_ret:+.1f}%")
         m3.metric("연평균 (CAGR)", f"{metrics['CAGR']*100:.1f}%")
         m4.metric("최대 낙폭 (MDD)", f"{metrics['MDD']*100:.1f}%")
+        m5.metric("칼마 지수", f"{calmar:.2f}")
 
         # 2. 자산 곡선 차트
         st.write("---")
