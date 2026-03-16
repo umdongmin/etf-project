@@ -16,12 +16,11 @@ class TesterView:
         c1, c2, c3 = st.columns(3)
         base_asset_opts = ["QQQ", "QLD", "TQQQ"]
         leverage_asset_opts = ["QLD", "TQQQ"]
-        trade_at_opts = ["종가", "익일 시가"]
         def fmt(x): return ticker_map[x] if ticker_map and x in ticker_map else x
         def k(base_key): return f"{key_prefix}{base_key}"
         base_asset = c1.selectbox("기준 자산 (시그널)", base_asset_opts, index=base_asset_opts.index(current_params.get('base_asset', 'QQQ')), format_func=fmt, key=k("conf_base"))
         leverage_asset = c2.selectbox("매매 대상 자산", leverage_asset_opts, index=leverage_asset_opts.index(current_params.get('leverage_asset', 'QLD')), format_func=fmt, key=k("conf_lev"))
-        trade_at = c3.radio("매매 시점", trade_at_opts, index=trade_at_opts.index(current_params.get('trade_at', '종가')), horizontal=True, key=k("conf_trade_at"))
+        trade_at = '종가'  # 익일 시가 기능 제거, 항상 종가 체결
         st.divider()
         col_buy, col_sell = st.columns(2)
         buy_signals = []
@@ -258,17 +257,12 @@ class TesterView:
                 'atr_period_buy': atr_p_buy, 'atr_period_sell': atr_p_sell
             }
 
-        # (3) 공통 설정 및 파라미터 취합
-        with c3:
-            st.markdown("##### 🧱 공통 설정")
-            cash_ratio_pct = st.number_input("현금 유지 비율(%)", 0.0, 100.0, float(current_params.get('cash_ratio_pct', 0.0)), 1.0, key=k("conf_cash"))
-            
         reb_params = {
             'use_fixed_reb': use_fixed,
             'use_atr_reb': use_atr,
             **fixed_params,
             **atr_params,
-            'cash_ratio_pct': cash_ratio_pct
+            'cash_ratio_pct': 0.0
         }
         
         with st.expander("🛡️ 하락장 및 스마트 대응 설정 (Smart Filter)"):

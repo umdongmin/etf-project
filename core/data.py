@@ -230,7 +230,32 @@ class DataService:
                     df = cls.calculate_indicators(df)
                     data_dict[ticker] = df
             print(f"티커별 지표 계산 완료 ({len(data_dict)}개 티커)")
-            
+
+            # 핵심 티커 누락 시 개별 재시도
+            critical = ['QQQ', 'TQQQ', 'TLT', 'TMF', 'TBF']
+            missing = [t for t in critical if t not in data_dict]
+            if missing:
+                print(f"[경고] 누락 티커 개별 재시도: {missing}")
+                time.sleep(5)
+                for t in missing:
+                    try:
+                        raw = cls._yf_download_with_retry(t, start=start_date, end=end_date, progress=False)
+                        if not raw.empty:
+                            df = raw.copy()
+                            if isinstance(df.columns, pd.MultiIndex):
+                                df.columns = df.columns.get_level_values(0)
+                            df = df.ffill().bfill()
+                            df = cls.calculate_indicators(df)
+                            data_dict[t] = df
+                            print(f"  [{t}] 개별 재시도 성공 ({len(df)}행)")
+                    except Exception as e:
+                        print(f"  [{t}] 개별 재시도 실패: {e}")
+
+            # 핵심 티커가 여전히 없으면 캐시 저장 방지 (예외 발생)
+            still_missing = [t for t in ['QQQ', 'TLT'] if t not in data_dict]
+            if still_missing:
+                raise RuntimeError(f"핵심 티커 로드 실패 (캐시 저장 안함): {still_missing}")
+
             # VIX 및 VXN 데이터 별도 수집 (동기화)
             # VIX 및 VXN 데이터 별도 수집 (동기화)
             try:
@@ -449,6 +474,6 @@ class DataService:
         return cloned_dict, new_vxn_df, new_fg_df
 
     @staticmethod
-    @st.cache_data(ttl=3600)
+    @st.cache_data(ttl=21600)  # 6시간 캐시 (Rate Limit 방지)
     def load_all_data():
         return DataService.fetch_live_data()

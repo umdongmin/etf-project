@@ -18,6 +18,7 @@ from ui.history_view import HistoryLabView
 from ui.quant_lab_view import QuantLabView
 from ui.intelligence_view import IntelligenceView
 from ui.portfolio_view import PortfolioView
+from ui.portfolio_realtime_view import PortfolioRealtimeView
 from ui.tester_view import TesterView
 from utils.metrics import calculate_metrics
 
@@ -33,10 +34,10 @@ class GoldenStrategyApp:
         # 사이드바 공통 메뉴
         st.sidebar.title("🚀 Golden Strategy v3.0")
         menu = st.sidebar.radio("메인 메뉴", [
-            "📊 실시간 백테스트", 
+            "🛰️ 실시간 모니터링",
             "📈 포트폴리오 매니저",
-            "🔬 퀀트 분석 연구실", 
-            "📜 주식 전략 설정", 
+            "🔬 퀀트 분석 연구실",
+            "📜 주식 전략 설정",
             "📉 채권 전략 설정",
             "🧠 AI 뉴스 분석 리포트"
         ])
@@ -238,13 +239,28 @@ class GoldenStrategyApp:
             if 'start_input' not in st.session_state:
                 st.session_state.start_input = current_year_jan1 if min_d <= current_year_jan1 else min_d
             if 'end_input' not in st.session_state:
-                st.session_state.end_input = max_d
+                st.session_state.end_input = datetime.date.today()
 
             def on_year_change():
                 if st.session_state.q_year != "직접 선택":
                     yr = int(st.session_state.q_year)
                     st.session_state.start_input = datetime.date(yr, 1, 1)
                     st.session_state.end_input = datetime.date(yr, 12, 31)
+
+            st.sidebar.divider()
+            st.sidebar.subheader("💸 거래 수수료 설정")
+            use_fee = st.sidebar.toggle("수수료 적용", value=st.session_state.get('global_use_fee', True), key='global_use_fee')
+            if use_fee:
+                fee_pct = st.sidebar.number_input("수수료율 (%)", min_value=0.0, max_value=1.0,
+                    value=st.session_state.get('global_fee_pct', 0.10), step=0.01,
+                    format="%.3f", help="0.10% = 한국 증권사 해외 ETF 기준 (수수료 0.07% + 슬리피지)", key='global_fee_pct')
+                st.session_state.global_fee_rate = fee_pct / 100.0
+            else:
+                st.session_state.global_fee_rate = 0.0
+
+            st.sidebar.subheader("📦 주식 수량 설정")
+            st.sidebar.toggle("정수 주식 수량 적용", value=st.session_state.get('global_integer_shares', True), key='global_integer_shares',
+                help="활성화 시 소수점 주식 없이 정수 단위로만 매매 (잔여금은 현금으로 보존)")
 
             st.sidebar.divider()
             st.sidebar.subheader("📅 분석 기간 설정")
@@ -320,37 +336,11 @@ class GoldenStrategyApp:
             st.session_state.trigger_preview = False
                 
         # 메뉴별 렌더링
-        if menu == "📊 실시간 백테스트":
-            if 'QQQ' in data_dict:
-                # [자동화] 날짜 및 파라미터 변경 감지 해시
-                current_state_hash = hash(str(start_d) + str(end_d) + str(cp) + str(smart_params) + str(st.session_state.current_bond_params))
-                last_state_hash = st.session_state.get('last_bt_state_hash')
-                
-                # 변경되었거나 결과가 없는 경우 자동 실행
-                should_auto_recalc = (current_state_hash != last_state_hash) or ('last_bt_result' not in st.session_state)
-
-                if should_auto_recalc:
-                    with st.spinner('실시간 백테스팅 계산 중...'):
-                        bench_tickers = ['QQQ', 'QLD', 'TQQQ']
-                        bh_histories = {t: StrategyEngine.run_benchmark(data_dict, t, start_d, end_d) for t in bench_tickers}
-                        golden_history, closed_trades, _ = StrategyEngine.run_golden_strategy(
-                            data_dict, fg_df, vxn_df, news_df, cp['leverage_asset'], cp['base_asset'], 
-                            cash_ratio, start_d, end_d, cp, cp['trade_at'], smart_params=smart_params
-                        )
-                        
-                        # [수정] 덮어쓰지 않고 부분 업데이트
-                        curr_res = st.session_state.get('last_bt_result', {})
-                        curr_res['equity'] = {'history': golden_history, 'closed_trades': closed_trades, 'benchmarks': bh_histories}
-                        st.session_state.last_bt_result = curr_res
-                        st.session_state.last_bt_state_hash = current_state_hash
-                
-                res = st.session_state.get('last_bt_result', {}).get('equity')
-                if res:
-                    BacktestView.render_results(res['history'], res['benchmarks'], res['closed_trades'], cp['base_asset'], cp['leverage_asset'], smart_params=smart_params)
-                else:
-                    st.info("시뮬레이션 데이터를 준비 중입니다...")
-            else:
-                st.error("데이터 로드 실패")
+        if menu == "🛰️ 실시간 모니터링":
+            st.title("🛰️ 실시간 포트폴리오 모니터링")
+            PortfolioView.render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df,
+                                              start_d or data_dict['QQQ'].index.min().date(),
+                                              datetime.date.today())
         elif menu == "🔬 퀀트 분석 연구실":
             QuantLabView.render(
                 data_dict, fg_df, vxn_df, news_df, 
@@ -447,10 +437,12 @@ class GoldenStrategyApp:
                 # [수정] 성과 변경 감지 및 자동 계산 로직 (trigger_recalc_bond 또는 해시 변경 시)
                 # [수정] 레버리지(lev_params) 설정 변경도 감지 대상에 추가
                 current_bond_hash = hash(
-                    str(start_b) + str(end_b) + 
-                    str(st.session_state.current_bond_params) + 
+                    str(start_b) + str(end_b) +
+                    str(st.session_state.current_bond_params) +
                     str(st.session_state.get('current_bond_lev_params')) +
-                    str(len(macro_df))
+                    str(len(macro_df)) +
+                    str(st.session_state.get('global_fee_rate', 0.0)) +
+                    str(st.session_state.get('global_integer_shares', False))
                 )
                 should_calc_bond = st.session_state.get('trigger_recalc_bond', False) or (st.session_state.get('last_bond_hash') != current_bond_hash)
                 
@@ -463,6 +455,8 @@ class GoldenStrategyApp:
                             data_dict, macro_df, start_b, end_b,
                             params=st.session_state.current_bond_params,
                             lev_params=st.session_state.get('current_bond_lev_params'),
+                            fee_rate=st.session_state.get('global_fee_rate', 0.0),
+                            integer_shares=st.session_state.get('global_integer_shares', False)
                         )
                         
                         # [수정] 부분 업데이트
@@ -484,6 +478,13 @@ class GoldenStrategyApp:
                     
                     st.divider()
                     HistoryLabView.render_yearly_table(res['history'], bh_bond, empty_df, empty_df, b_names=("TLT", "", ""))
+ 
+                    # [신규 추가] 채권 전략 상세 분석 로그 (주식 전략과 동일한 구성)
+                    BacktestView.render_closed_sets(res['closed_trades'])
+                    BacktestView.render_execution_log(res['history'], 'TLT')
+                    
+                    st.divider()
+                    BacktestView.render_daily_log(res['history'], res['benchmarks'], 'TLT')
 
                     st.divider()
                     # 상세 분석 결과 렌더링 (차트 및 로그) - 채권 전용 필터 적용

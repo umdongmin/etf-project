@@ -332,8 +332,21 @@ class DataAnalysisView:
                     with st.expander("💰 완료된 한 세트 거래 내역 (Closed Trades Journal)", expanded=False):
                         journal_df['Entry_Date'] = journal_df['Entry_Date'].dt.date
                         journal_df['Exit_Date'] = journal_df['Exit_Date'].dt.date
-                        j_formats = {'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}', 'Return': '{:.2f}%', 'MDD': '{:.2f}%'}
-                        st.dataframe(journal_df.style.format(j_formats).apply(lambda x: ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x] if x.name == 'Return' else ['']*len(x), axis=0), width='stretch', height=400)
+                        j_col_order = ['Entry_Date', 'Exit_Date', 'Asset', 'Shares', 'Buy_Price', 'Sell_Price',
+                                       'Total_Cost', 'Total_Revenue', 'Fee_Cost', 'Net_Gain', 'Return', 'MDD', 'Status']
+                        j_display_cols = [c for c in j_col_order if c in journal_df.columns]
+                        j_formats = {
+                            'Buy_Price': '${:,.2f}', 'Sell_Price': '${:,.2f}',
+                            'Total_Cost': '${:,.2f}', 'Total_Revenue': '${:,.2f}',
+                            'Fee_Cost': '${:,.4f}', 'Net_Gain': '${:,.2f}',
+                            'Shares': '{:,.4f}', 'Return': '{:.2f}%', 'MDD': '{:.2f}%'
+                        }
+                        j_formats = {k: v for k, v in j_formats.items() if k in journal_df.columns}
+                        def _color_jrn(x):
+                            if x.name in ('Return', 'Net_Gain'):
+                                return ['color: #e74c3c; font-weight: bold' if v > 0 else 'color: #3498db; font-weight: bold' for v in x]
+                            return ['']*len(x)
+                        st.dataframe(journal_df[j_display_cols].style.format(j_formats).apply(_color_jrn, axis=0), width='stretch', height=400)
 
             # 5-3. 📝 실시간 거래 체결 내역
             with st.expander("📝 실시간 거래 체결 내역 (Actual Execution Log)", expanded=False):

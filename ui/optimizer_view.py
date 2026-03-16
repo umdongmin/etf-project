@@ -101,10 +101,8 @@ class OptimizerView:
             with col1:
                 n_iter = st.slider("탐색 횟수 (N)", 50, 1000, 200, step=50, help="탐색 횟수가 많을수록 더 정교한 결과를 얻지만 시간이 오래 걸립니다.")
             
+            trade_at = '종가'  # 익일 시가 기능 제거
             with col2:
-                trade_at = st.selectbox("최적화용 매매 시점", ["종가", "익일 시가"], index=0 if current_params.get('trade_at') == '종가' else 1)
-
-            with col3:
                 # 병렬 처리를 위한 코어 수 설정 (기본값 4)
                 n_jobs = st.slider("병렬 탐색 코어 수", 1, min(os.cpu_count(), 8), 2, help="높을수록 빠르지만 UI가 느려질 수 있습니다. (2개 권장)")
             st.caption("💡 **팁**: 쾌적한 화면 전환을 위해 코어 수를 1~2개로 설정하는 것을 추천합니다.")

@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 from core.storage import StrategyStorage
 from core.engine import StrategyEngine
 from ui.tester_view import TesterView
+from ui.backtest_view import BacktestView
+from utils.metrics import calculate_metrics
 
 # [신규] 시뮬레이션 캐싱 래퍼 (성능 최적화 및 안정성 확보)
 def deep_tuple(obj):
@@ -17,7 +19,7 @@ def deep_tuple(obj):
     return obj
 
 @st.cache_data
-def get_cached_strategy_result(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt):
+def get_cached_strategy_result(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, params_tuple, t_at, smart_tuple, salt, fee_rate=0.0, integer_shares=False):
     # 튜플을 다시 딕셔너리로 복구하여 엔진 실행 (재귀적으로 처리)
     def to_dict(tup):
         if not isinstance(tup, tuple): return tup
@@ -29,8 +31,7 @@ def get_cached_strategy_result(_data_dict, _fg_df, _vxn_df, _news_df, lev, base,
 
     _p = to_dict(params_tuple)
     _s = to_dict(smart_tuple)
-    # [수정] 엔진이 3개(history, closed_trades, sell4_events)의 값을 반환하므로 전체 반환
-    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt)
+    return StrategyEngine.run_golden_strategy(_data_dict, _fg_df, _vxn_df, _news_df, lev, base, cash, s_d, e_d, _p, t_at, smart_params=_s, salt=salt, fee_rate=fee_rate, integer_shares=integer_shares)
 
 class HistoryLabView:
     """역사적 마켓 랩 화면 UI 구성 클래스"""
@@ -350,20 +351,21 @@ class HistoryLabView:
         st.divider()
         
         # [수정] 파라미터 변경 감지 해시 계산
-        current_hash = hash(str(current_params) + str(smart_params))
+        current_hash = hash(str(current_params) + str(smart_params) + str(st.session_state.get('global_fee_rate', 0.0)) + str(st.session_state.get('global_integer_shares', False)))
         last_hash = st.session_state.get('last_run_hash_history')
         
-        if last_hash and current_hash != last_hash:
-            st.warning("⚠️ 전략 설정이 변경되었습니다. 정확한 분석을 위해 [주식 전략 설정] 탭 하단의 [재시뮬레이션 실행] 버튼을 눌러주세요.")
-
         # [수정] 모든 탭에서 공용으로 사용할 데이터 초기화 및 로드
         res = st.session_state.get('last_history_result')
         golden_history = res['history'] if res else pd.DataFrame()
         closed_trades = res['closed_trades'] if res else pd.DataFrame()
         all_signal_events = res['events'] if res else []
-        
-        # [신규] 재시뮬레이션 필요 여부 판단 (결과가 없거나 요청 시)
-        should_run = st.session_state.get('trigger_recalc_history', False) or golden_history.empty
+
+        # [수정] 재시뮬레이션 필요 여부 판단 (결과 없음 / 수동 요청 / 파라미터·수수료 변경)
+        should_run = (
+            st.session_state.get('trigger_recalc_history', False)
+            or golden_history.empty
+            or (last_hash is not None and current_hash != last_hash)
+        )
         
         if should_run:
             with st.spinner('전 기간 역사적 데이터 시뮬레이션 중...'):
@@ -372,8 +374,10 @@ class HistoryLabView:
                 
                 # [수정] get_cached_strategy_result 호출 (cash_ratio_pct 처리 포함)
                 new_gh, new_ct, new_se = get_cached_strategy_result(
-                    data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, current_params['cash_ratio_pct']/100.0, 
-                    start_date, end_date, params_tuple, trade_at, smart_tuple, salt
+                    data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, current_params['cash_ratio_pct']/100.0,
+                    start_date, end_date, params_tuple, trade_at, smart_tuple, salt,
+                    fee_rate=st.session_state.get('global_fee_rate', 0.0),
+                    integer_shares=st.session_state.get('global_integer_shares', False)
                 )
                 
                 st.session_state.last_history_result = {
@@ -416,81 +420,42 @@ class HistoryLabView:
         if active_tab == tab_list[0]:
 
             if golden_history.empty:
-                st.info("시뮬레이션 결과가 없습니다. [주식 전략 설정] 탭에서 [재시뮬레이션 실행]을 눌러주세요.")
-                return
-
-            st.session_state.last_golden_result = {
-                'history': golden_history.copy(),
-                'closed_trades': closed_trades,
-                'benchmarks': {b1: bh_1, b2: bh_2, b3: bh_3},
-                'base': leverage_asset,
-                'lev': leverage_asset
-            }
-
-            if golden_history.empty:
                 st.warning("분석할 데이터가 충분하지 않습니다.")
             else:
+                # [이동 통합] BacktestView의 상세 분석 항목들을 여기에 배치
+                # 1. 메트릭 계산
+                metrics = {}
+                bh_histories = {b1: bh_1, b2: bh_2, b3: bh_3}
+                for k, v in bh_histories.items():
+                    if not v.empty:
+                        temp_df = v.copy()
+                        if 'Value' in temp_df.columns: temp_df.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+                        metrics[k] = calculate_metrics(temp_df)
+                
+                temp_strat = golden_history.copy()
+                if 'Value' in temp_strat.columns: temp_strat.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
+                metrics['Strategy'] = calculate_metrics(temp_strat)
+
                 st.subheader("📊 전체 기간 요약")
                 HistoryLabView.render_overall_summary(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3))
                 
                 st.divider()
+                # [추가] BacktestView에서 이동된 메트릭 요약
+                BacktestView.render_metrics_summary(metrics)
+                
+                st.divider()
+                # [추가] BacktestView에서 이동된 전략 성과 요약 테이블
+                BacktestView.render_summary_table(metrics)
+
                 HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
 
-                # [신규] 하락장 매수 지연 해제 작동 기록
-                st.divider()
-                st.subheader("🛡️ 하락장 매수 지연 해제 기록")
-                if all_signal_events:
-                    panic_buy_list = [e for e in all_signal_events if str(e.get('type')).startswith('하락장매수해제')]
-                    if panic_buy_list:
-                        pb_df = pd.DataFrame(panic_buy_list)
-                        pb_df = pb_df[['date', 'type', 'reason', 'price']].copy()
-                        pb_df['date'] = pb_df['date'].dt.strftime('%Y-%m-%d')
-                        pb_df.columns = ['발생일', '해제 단계', '충족 조건 (이유)', '기준가(종가)']
-                        st.dataframe(pb_df.set_index('발생일'), width='stretch')
-                    else:
-                        st.info("시뮬레이션 기간 내 하락장 매수 지연 해제 기록이 없습니다.")
-                
-                # [신규] 손절매(Stop-Loss) 작동 기록
-                st.divider()
-                st.subheader("🛑 손절매(Stop-Loss) 작동 기록")
-                if all_signal_events:
-                    sl_events = [e for e in all_signal_events if '손절' in str(e.get('type'))]
-                    if sl_events:
-                        sl_df = pd.DataFrame(sl_events)
-                        sl_df = sl_df[['date', 'type', 'reason', 'price', 'executed']].copy()
-                        sl_df['date'] = sl_df['date'].dt.strftime('%Y-%m-%d')
-                        sl_df['executed'] = sl_df['executed'].map({True: "✅ 체결(손절)", False: "🛡️ 차단(보호)"})
-                        sl_df.columns = ['발생일', '항목', '상세 사유', '당시 가격', '처리 상태']
-                        st.dataframe(sl_df.set_index('발생일'), width='stretch')
-                    else:
-                        st.info("시뮬레이션 기간 내 손절매 작동 기록이 없습니다.")
+                # [추가] BacktestView에서 이동된 세트 거래 및 매매 체결 내역
+                BacktestView.render_closed_sets(closed_trades)
+                BacktestView.render_execution_log(golden_history, base_asset)
 
-                # [수정] S3 보호 설정 및 매도 기록 통합 진단 로그
                 st.divider()
-                st.subheader("⚠️ S3 보호 및 긴급 매도 진단 로그 (분석용)")
-                col_diag1, col_diag2 = st.columns(2)
-                with col_diag1:
-                    with st.expander("🚩 S3 보호(Emergency) 작동 기록", expanded=False):
-                        if 'S3_Detail' in golden_history.columns:
-                            s3_emerg = golden_history[golden_history['S3_Detail'] != ""].copy()
-                            if not s3_emerg.empty:
-                                s3_emerg_display = s3_emerg[['S3_Detail', 'Asset', 'RSI', 'VXN']].copy()
-                                s3_emerg_display.index = s3_emerg_display.index.strftime('%Y-%m-%d')
-                                s3_emerg_display.columns = ['작동 상세 원인', '보유자산', 'RSI', 'VXN']
-                                st.dataframe(s3_emerg_display, width='stretch')
-                            else:
-                                st.info("기록된 S3 보호 작동 내역이 없습니다.")
-                with col_diag2:
-                    with st.expander("🚩 S3 + 매도신호3(MACD데드+매도우세) 기록", expanded=False):
-                        if 'S3_Sell3_Event' in golden_history.columns:
-                            sell3_days = golden_history[golden_history['S3_Sell3_Event'] == 1].copy()
-                            if not sell3_days.empty:
-                                s3_sell3_display = sell3_days[['RSI', 'MACD', 'VXN', 'ADX', 'DMP', 'DMN', 'Asset']].copy()
-                                s3_sell3_display.index = s3_sell3_display.index.strftime('%Y-%m-%d')
-                                s3_sell3_display.columns = ['RSI', 'MACD', 'VXN', 'ADX', 'DI+', 'DI-', '보유자산']
-                                st.dataframe(s3_sell3_display, width='stretch')
-                            else:
-                                st.info("S3 + 매도신호3 작동 기록이 없습니다.")
+                # [추가] BacktestView에서 이동된 일별 상세 로그
+                BacktestView.render_daily_log(golden_history, bh_histories, base_asset)
 
         elif active_tab == tab_list[1]:
             # [신규] 실시간 성과 요약 대시보드 표시

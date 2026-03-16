@@ -3,15 +3,16 @@ import numpy as np
 import pandas_ta as ta
 import streamlit as st
 import datetime
+import math
 
 class StrategyEngine:
     """백테스팅 및 벤치마크 계산을 담당하는 클래스"""
     @st.cache_data(ttl=3600, show_spinner=False)
     @staticmethod
-    def run_golden_strategy(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0):
+    def run_golden_strategy(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0, fee_rate=0.0, integer_shares=False):
         gen = StrategyEngine._run_generator(
-            data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, cash_ratio, 
-            start_date, end_date, params, trade_at, smart_params, salt, fast_mode, allocated_capital
+            data_dict, fg_df, vxn_df, news_df, leverage_asset, base_asset, cash_ratio,
+            start_date, end_date, params, trade_at, smart_params, salt, fast_mode, allocated_capital, fee_rate, integer_shares
         )
         try:
             state = next(gen)
@@ -21,7 +22,7 @@ class StrategyEngine:
             return e.value
 
     @staticmethod
-    def _run_generator(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0):
+    def _run_generator(data_dict, fg_df, vxn_df, news_df=None, leverage_asset='QLD', base_asset='QQQ', cash_ratio=0.0, start_date=None, end_date=None, params=None, trade_at="종가", smart_params=None, salt=None, fast_mode=False, allocated_capital=10000.0, fee_rate=0.0, integer_shares=False):
         if base_asset not in data_dict: return pd.DataFrame(), pd.DataFrame(), []
         
         # [신규] 파라미터 정규화 (JSON 로드 시 중첩된 params/smart_params 제거 및 최상위 병합)
@@ -220,11 +221,54 @@ class StrategyEngine:
             valid_closes = base_df['Close'].dropna()
             initial_price = valid_closes.iloc[0] if not valid_closes.empty else 1.0
             
-        holdings[base_asset] = (portfolio_value * (1 - cash_ratio)) / initial_price if initial_price > 0 else 0
+        _raw_shares = (portfolio_value * (1 - cash_ratio)) / initial_price if initial_price > 0 else 0
+        if integer_shares and initial_price > 0:
+            _int_shares = math.floor(_raw_shares)
+            cash += (_raw_shares - _int_shares) * initial_price  # 잔여 현금 보존
+            holdings[base_asset] = _int_shares
+        else:
+            holdings[base_asset] = _raw_shares
         
         def get_v_level(planned, stage):
             # Stage는 이제 항상 레버리지 노출 수준(0-3)을 의미합니다.
             return stage
+
+        def apply_shares(new_h_vals, trade_px, cash_val):
+            """new_h_vals(금액 기준) → holdings(수량 기준) 변환. integer_shares=True면 정수 주식 처리.
+            Greedy Fill: 잔여 현금으로 목표 자산 추가 매수 (현금 최소화).
+            우선순위: 레버리지 자산(비싼 것) 먼저 → 그 다음 기초 자산 순으로 매수.
+            """
+            new_holdings = {}
+            residual = 0.0
+            for t, val in new_h_vals.items():
+                px = trade_px.get(t, 0)
+                if px <= 0:
+                    new_holdings[t] = 0.0
+                    continue
+                raw = val / px
+                if integer_shares:
+                    floored = math.floor(raw)
+                    residual += (raw - floored) * px  # 잔여 현금
+                    new_holdings[t] = float(floored)
+                else:
+                    new_holdings[t] = raw
+            # Greedy Fill: 잔여 현금으로 추가 매수 (현금 최소화)
+            if integer_shares and residual > 0:
+                buyable = [(t, trade_px[t]) for t in new_h_vals
+                           if trade_px.get(t, 0) > 0 and new_holdings.get(t, 0) >= 0]
+                # 가격 내림차순 정렬: 레버리지(고가) → 기초자산(저가) 순
+                buyable.sort(key=lambda x: x[1], reverse=True)
+                changed = True
+                while changed and residual > 0:
+                    changed = False
+                    for t, px in buyable:
+                        if residual >= px:
+                            extra = math.floor(residual / px)
+                            if extra > 0:
+                                new_holdings[t] = new_holdings.get(t, 0.0) + float(extra)
+                                residual -= extra * px
+                                changed = True
+            return new_holdings, cash_val + residual
 
         history = []
         trade_slots = [] # list of {'buy_price': val, 'date': date}
@@ -236,9 +280,6 @@ class StrategyEngine:
         buy_wait_flags = {i: False for i in range(1, 5)}
         sell_wait_flags = {i: False for i in range(1, 5)}
         panic_buy_wait_flags = {i: False for i in range(1, 4)}
-        
-        # [추가] 지연 실행용 상태 변수
-        pending_rebalance = None # {'target_lev_pct': val, 'rebalance_stage': val, 'planned': asset}
         
         # [수정] 자산 그룹 결정 (나스닥 전용으로 단일화)
         target_group = ['QQQ', 'QLD', 'TQQQ']
@@ -255,16 +296,11 @@ class StrategyEngine:
         base_targets = list(set([base_asset, leverage_asset] + target_group))
         
         price_arrays = {}
-        open_price_arrays = {}
         for t in base_targets:
             if t in data_dict:
                 # [수정] 데이터 유실 방지: 전체 인덱스에서 ffill을 먼저 수행한 뒤 dates 구간만 추출
                 filled_df = data_dict[t].reindex(combined.index).ffill().loc[dates]
                 price_arrays[t] = filled_df['Close'].values
-                if 'Open' in filled_df.columns:
-                    open_price_arrays[t] = filled_df['Open'].values
-                else:
-                    open_price_arrays[t] = filled_df['Close'].values
 
         prev_dmp_idx = col_idx.get('Prev_DMP', -1)
         prev_dmn_idx = col_idx.get('Prev_DMN', -1)
@@ -402,8 +438,10 @@ class StrategyEngine:
                     }
                     injected = yield state_dict
                     if injected and isinstance(injected, dict) and 'cash_delta' in injected:
-                        portfolio_value += injected['cash_delta']
-                        cash += injected['cash_delta']
+                        delta = injected['cash_delta']
+                        fee_rb = abs(delta) * fee_rate
+                        portfolio_value += delta - fee_rb
+                        cash += delta - fee_rb
                     continue
             except Exception as e:
                 pass
@@ -412,135 +450,6 @@ class StrategyEngine:
             # 재밸런싱 신호가 없더라도 매일 시장 가격 변동을 반영해야 함
             portfolio_value = cash + sum(holdings[t] * prices.get(t, 0) for t in holdings if prices.get(t, 0) > 0)
             current_total_val = portfolio_value # 동기화
-            
-            # [수정] 익일 시가 매매 처리: 전날 신호가 있었다면 오늘 시가로 먼저 체결
-            if trade_at == "익일 시가" and pending_rebalance is not None:
-                # 오늘 시가(Open)로 체결 (데이터가 없는 경우 종가로 대체, 그것도 없으면 건너뜀)
-                try:
-                    trade_prices = {}
-                    for t in check_targets:
-                        if t in open_price_arrays:
-                            trade_prices[t] = open_price_arrays[t][i]
-                        else:
-                            trade_prices[t] = prices[t]
-                    
-                    required = currently_holding + [pending_rebalance['planned']]
-                    if any(t not in trade_prices or pd.isna(trade_prices[t]) for t in required):
-                        # 동기화 유지하며 건너뜀
-                        state_dict = {
-                            'date': date, 'cash': cash, 'portfolio_value': portfolio_value,
-                            'stage': int(rebalance_stage), 'history_row': None, 'holdings': dict(holdings)
-                        }
-                        yield state_dict
-                        continue
-                except:
-                    state_dict = {
-                        'date': date, 'cash': cash, 'portfolio_value': portfolio_value,
-                        'stage': int(rebalance_stage), 'history_row': None, 'holdings': dict(holdings)
-                    }
-                    yield state_dict
-                    continue
-                
-                # 거래 시점의 자산 가치 재계산
-                current_total_val = cash + sum(holdings[t] * trade_prices[t] for t in holdings if t in trade_prices)
-                cash = current_total_val * cash_ratio
-                etf_funds = current_total_val * (1 - cash_ratio)
-                
-                t_lev_asset, t_lev_pct = pending_rebalance['planned'], pending_rebalance['target_lev_pct']
-                rebalance_stage = pending_rebalance['rebalance_stage']
-                
-                # [수정] 순차적 포트폴리오 관리 (상시 활성화)
-                # 1. 현재 자산 평가 (trade_prices 기준)
-                h_vals = {t: holdings[t] * trade_prices[t] for t in holdings if t in trade_prices}
-                curr_total_lev_val = sum(h_vals.get(t, 0) for t in target_group[1:]) # 현재 합산 레버리지
-                
-                # 2. 목표 레버리지 총액 및 업그레이드 Cap 계산 (30/70/100)
-                normalized_pct = t_lev_pct / 100.0 if t_lev_pct > 1 else t_lev_pct
-                target_lev_val = etf_funds * normalized_pct
-                
-                tqqq_cap = target_lev_val
-                if target_lev_val > etf_funds * 0.9 and t_lev_asset == target_group[2]:
-                    # 100% 레버리지 구간에서의 터보 업그레이드 단계 적용
-                    if rebalance_stage == 1: tqqq_cap = 0.30 * target_lev_val
-                    elif rebalance_stage == 2: tqqq_cap = 0.70 * target_lev_val
-
-                new_h_vals = {t: 0.0 for t in holdings}
-                
-                if curr_total_lev_val > target_lev_val + 0.01:
-                    # 감축(Sell) 상황: QLD부터 채우고 남은 자리를 TQQQ로 채움 (TQQQ 우선 매도)
-                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
-                    rem = target_lev_val - new_h_vals[target_group[1]]
-                    new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
-                else:
-                    # 증액(Buy) 상황: 기존 레버리지 자산들을 유지하며 부족분만 현재 타겟으로 충전
-                    # 1. TQQQ 보존 및 업그레이드 (Cap 한도 내)
-                    if t_lev_asset == target_group[2]:
-                        # 가속 모드: QLD를 팔아서라도 tqqq_cap까지 채움 (업그레이드)
-                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
-                    else:
-                        # 일반 모드: 기존 TQQQ만 유지
-                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
-                    
-                    # 2. QLD 보전 및 충전 (남은 비중 한도 내)
-                    rem = target_lev_val - new_h_vals[target_group[2]]
-                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
-                    
-                    # 3. 최종 부족분 충전 (현재 시장 타겟 자산으로)
-                    rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
-                    if rem > 0:
-                        new_h_vals[t_lev_asset] += rem
-
-                # 3. 나머지는 Base 자산
-                allocated_lev = sum(new_h_vals.values())
-                new_h_vals[base_asset] = max(0, etf_funds - allocated_lev)
-                
-                # 수량 업데이트
-                for t in check_targets:
-                    holdings[t] = new_h_vals.get(t, 0) / trade_prices[t] if t in trade_prices and trade_prices[t] > 0 else 0
-                
-                # [신규] FIFO 기반 가상 장부 업데이트 (익일 시가 체결 버전)
-                new_stage_open = pending_rebalance['rebalance_stage']
-                old_v = get_v_level(current_planned_asset, rebalance_stage)
-                new_v = get_v_level(t_lev_asset, new_stage_open)
-
-                if new_v > old_v:
-                    # 비중 확대
-                    for _ in range(new_v - old_v):
-                        # 실제 매매된 가속 자산 가격 사용
-                        trade_slots.append({'buy_price': trade_prices[t_lev_asset], 'date': date, 'asset': t_lev_asset})
-                elif new_v < old_v:
-                    # 비중 축소: 정산
-                    diff = old_v - new_v
-                    rets = []
-                    entry_dates = []
-                    for _ in range(diff):
-                        if trade_slots:
-                            slot = trade_slots.pop(0)
-                            asset_sold = slot.get('asset', t_lev_asset)
-                            sell_p = trade_prices[asset_sold]
-                            r = (sell_p / slot['buy_price'] - 1) * 100
-                            rets.append(r)
-                            entry_dates.append(slot['date'])
-                            closed_trades.append({
-                                'Entry_Date': slot['date'], 'Exit_Date': date, 'Asset': asset_sold,
-                                'Buy_Price': slot['buy_price'], 'Sell_Price': sell_p,
-                                'Return': r, 'Status': "익절" if r > 0 else "손절"
-                            })
-                    if rets and history:
-                        # 익일 시가는 어제 행에 기록 (대표 수익률은 평균값)
-                        history[-1]['Trade_Ret'] = np.mean(rets)
-                        history[-1]['Trade_Status'] = "익절" if history[-1]['Trade_Ret'] > 0 else "손절"
-                        history[-1]['Trade_Entry_Date'] = ", ".join([d.strftime('%Y-%m-%d') for d in entry_dates])
-
-                current_planned_asset = t_lev_asset
-                rebalance_stage = new_stage_open
-                last_entry_price = trade_prices[base_asset]
-                
-                # [추가] 예약된 매매가 실행되었으므로 해당 시그널 플래그 켜기
-                if 'signal_ref' in pending_rebalance and pending_rebalance['signal_ref']:
-                    pending_rebalance['signal_ref']['executed'] = True
-                    
-                pending_rebalance = None # 처리 완료
             
             rsi = row_arr[col_idx['RSI']]
             fg = row_arr[col_idx['FG']]
@@ -1004,14 +913,21 @@ class StrategyEngine:
                                 sl_hit_count += 1
                             
                             # 완료된 거래(closed_trades) 기록
+                            sh_sl = slot.get('shares', 0.0)
+                            sell_p_sl = prices[asset_to_check]
+                            total_cost_sl = sh_sl * slot['buy_price']
+                            total_rev_sl  = sh_sl * sell_p_sl
                             closed_trades.append({
                                 'Entry_Date': slot['date'],
                                 'Exit_Date': date,
                                 'Asset': asset_to_check,
                                 'Buy_Price': slot['buy_price'],
-                                'Sell_Price': prices[asset_to_check],
+                                'Sell_Price': sell_p_sl,
+                                'Shares': sh_sl, 'Total_Cost': total_cost_sl, 'Total_Revenue': total_rev_sl,
+                                'Fee_Cost': (total_cost_sl + total_rev_sl) * fee_rate,
+                                'Net_Gain': total_rev_sl - total_cost_sl - (total_cost_sl + total_rev_sl) * fee_rate,
                                 'Return': slot_ret,
-                                'MDD': slot.get('worst_ret', slot_ret), # 보유 기간 중 최저 수익률
+                                'MDD': slot.get('worst_ret', slot_ret),
                                 'Status': '개별손절'
                             })
                             
@@ -1397,103 +1313,115 @@ class StrategyEngine:
                                     })
 
             if rebalance_needed:
-                # [추가] 당일 체결 방식이므로 곧바로 실행 여부 업데이트
                 if current_signal_ref:
                     current_signal_ref['executed'] = True
-                    
-                if trade_at == "종가":
-                    h_vals = {t: holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates}
-                    curr_total_lev_val = sum(h_vals.values())
-                    target_lev_val = etf_funds * target_lev_pct
-                    new_h_vals = {t: 0.0 for t in holdings}
 
-                    if curr_total_lev_val > target_lev_val + 0.01:
-                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
-                        rem = target_lev_val - new_h_vals[target_group[1]]
-                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
-                    else:
-                        tqqq_cap = target_lev_val
-                        if target_lev_val > etf_funds * 0.9 and effective_lev_asset == target_group[2]:
-                            if new_stage == 1: tqqq_cap = 0.30 * target_lev_val
-                            elif new_stage == 2: tqqq_cap = 0.70 * target_lev_val
+                h_vals = {t: holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates}
+                curr_total_lev_val = sum(h_vals.values())
 
-                        is_upgrade_move = (target_lev_val > etf_funds * 0.9 and new_stage in [1, 2])
-                        if effective_lev_asset == target_group[2] and is_upgrade_move:
-                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
-                        else:
-                            new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
-                        
-                        rem = target_lev_val - new_h_vals[target_group[2]]
-                        new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
-                        
-                        rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
-                        if rem > 0:
-                            new_h_vals[effective_lev_asset] += rem
-                    
-                    new_h_vals[base_asset] = max(0, etf_funds - sum(new_h_vals.values()))
-                    
-                    # [신규] 물량 추가량 추적을 위한 이전 잔고 캡처
-                    prev_h_counts = {t: holdings.get(t, 0) for t in check_targets}
-                    
-                    for t in check_targets:
-                        holdings[t] = new_h_vals.get(t, 0) / prices[t] if t in prices and prices[t] > 0 else 0
-                    
-                    # [신규] 이번 매매로 실제 추가된 수량
-                    inc_h_counts = {t: max(0.0, holdings.get(t, 0) - prev_h_counts.get(t, 0)) for t in check_targets}
-                    
-                    old_v = get_v_level(current_planned_asset, rebalance_stage)
-                    new_v = get_v_level(new_planned, new_stage)
-
-                    if new_v > old_v:
-                        num_new = new_v - old_v
-                        # 해당 자산의 증가분을 슬롯 수만큼 나눔 (평균치 할당)
-                        shares_per_slot = inc_h_counts.get(new_planned, 0) / num_new if num_new > 0 else 0
-                        
-                        for _ in range(num_new):
-                            trade_slots.append({
-                                'buy_price': prices[new_planned], 
-                                'date': date, 
-                                'asset': new_planned,
-                                'shares': shares_per_slot,
-                                'worst_ret': 0.0 # [신규] 최저 수익률 초기화
-                            })
-                    elif new_v < old_v:
-                        diff = old_v - new_v
-                        rets = []
-                        entry_dates = []
-                        for _ in range(diff):
-                            if trade_slots:
-                                slot = trade_slots.pop(0)
-                                asset_sold = slot.get('asset', leverage_asset)
-                                sell_p = prices[asset_sold]
-                                r = (sell_p / slot['buy_price'] - 1) * 100
-                                rets.append(r)
-                                entry_dates.append(slot['date'])
-                                closed_trades.append({
-                                    'Entry_Date': slot['date'], 'Exit_Date': date, 'Asset': asset_sold,
-                                    'Buy_Price': slot['buy_price'], 'Sell_Price': sell_p,
-                                    'Return': r, 
-                                    'MDD': slot.get('worst_ret', min(0.0, r)),
-                                    'Status': "익절" if r > 0 else "손절"
-                                })
-                        if rets:
-                            trade_ret_val = np.mean(rets)
-                            trade_status_val = "익절" if trade_ret_val > 0 else "손절"
-                            trade_entry_date_val = ", ".join([d.strftime('%Y-%m-%d') for d in entry_dates])
-
-                    current_planned_asset = new_planned
-                    rebalance_stage = new_stage
-                    last_entry_price = prices[base_asset]
-                    peak_price = prices[base_asset] # 리밸런싱 시 고점 초기화
-
-                    # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
+                # [수수료] 거래 발생 시 포트폴리오 총액에서 수수료 선차감
+                if fee_rate > 0:
+                    next_lev_val = etf_funds * target_lev_pct
+                    trade_val = abs(next_lev_val - curr_total_lev_val)
+                    fee_deduct = trade_val * fee_rate
+                    current_total_val = max(0, current_total_val - fee_deduct)
                     cash = current_total_val * eff_cash_ratio
-                    current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
+                    etf_funds = current_total_val * (1 - eff_cash_ratio)
+
+                target_lev_val = etf_funds * target_lev_pct
+                new_h_vals = {t: 0.0 for t in holdings}
+
+                if curr_total_lev_val > target_lev_val + 0.01:
+                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), target_lev_val)
+                    rem = target_lev_val - new_h_vals[target_group[1]]
+                    new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), rem)
                 else:
-                    pending_rebalance = {'target_lev_pct': target_lev_pct, 'rebalance_stage': new_stage, 'planned': new_planned, 'signal_ref': current_signal_ref}
-                    # [신규] '익일 시가' 매매 시에도 기준가격 계산의 베이스는 '신호 발생일 종가'로 고속
-                    last_entry_price = prices[base_asset]
-                    peak_price = prices[base_asset]
+                    tqqq_cap = target_lev_val
+                    if target_lev_val > etf_funds * 0.9 and effective_lev_asset == target_group[2]:
+                        if new_stage == 1: tqqq_cap = 0.30 * target_lev_val
+                        elif new_stage == 2: tqqq_cap = 0.70 * target_lev_val
+
+                    is_upgrade_move = (target_lev_val > etf_funds * 0.9 and new_stage in [1, 2])
+                    if effective_lev_asset == target_group[2] and is_upgrade_move:
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0) + h_vals.get(target_group[1], 0), tqqq_cap)
+                    else:
+                        new_h_vals[target_group[2]] = min(h_vals.get(target_group[2], 0), tqqq_cap)
+
+                    rem = target_lev_val - new_h_vals[target_group[2]]
+                    new_h_vals[target_group[1]] = min(h_vals.get(target_group[1], 0), rem)
+
+                    rem = target_lev_val - (new_h_vals[target_group[1]] + new_h_vals[target_group[2]])
+                    if rem > 0:
+                        new_h_vals[effective_lev_asset] += rem
+
+                new_h_vals[base_asset] = max(0, etf_funds - sum(new_h_vals.values()))
+
+                # [신규] 물량 추가량 추적을 위한 이전 잔고 캡처
+                prev_h_counts = {t: holdings.get(t, 0) for t in check_targets}
+
+                # 수량 업데이트 (정수 주식 처리 포함)
+                updated, cash = apply_shares(
+                    {t: new_h_vals.get(t, 0) for t in check_targets},
+                    prices, cash
+                )
+                for t in check_targets:
+                    holdings[t] = updated.get(t, 0.0)
+
+                # [신규] 이번 매매로 실제 추가된 수량
+                inc_h_counts = {t: max(0.0, holdings.get(t, 0) - prev_h_counts.get(t, 0)) for t in check_targets}
+
+                old_v = get_v_level(current_planned_asset, rebalance_stage)
+                new_v = get_v_level(new_planned, new_stage)
+
+                if new_v > old_v:
+                    num_new = new_v - old_v
+                    shares_per_slot = inc_h_counts.get(new_planned, 0) / num_new if num_new > 0 else 0
+                    for _ in range(num_new):
+                        trade_slots.append({
+                            'buy_price': prices[new_planned],
+                            'date': date,
+                            'asset': new_planned,
+                            'shares': shares_per_slot,
+                            'worst_ret': 0.0
+                        })
+                elif new_v < old_v:
+                    diff = old_v - new_v
+                    rets = []
+                    entry_dates = []
+                    for _ in range(diff):
+                        if trade_slots:
+                            slot = trade_slots.pop(0)
+                            asset_sold = slot.get('asset', leverage_asset)
+                            sell_p = prices[asset_sold]
+                            r = (sell_p / slot['buy_price'] - 1) * 100
+                            rets.append(r)
+                            entry_dates.append(slot['date'])
+                            sh = slot.get('shares', 0.0)
+                            total_cost = sh * slot['buy_price']
+                            total_rev  = sh * sell_p
+                            closed_trades.append({
+                                'Entry_Date': slot['date'], 'Exit_Date': date, 'Asset': asset_sold,
+                                'Buy_Price': slot['buy_price'], 'Sell_Price': sell_p,
+                                'Shares': sh, 'Total_Cost': total_cost, 'Total_Revenue': total_rev,
+                                'Fee_Cost': (total_cost + total_rev) * fee_rate,
+                                'Net_Gain': total_rev - total_cost - (total_cost + total_rev) * fee_rate,
+                                'Return': r,
+                                'MDD': slot.get('worst_ret', min(0.0, r)),
+                                'Status': "익절" if r > 0 else "손절"
+                            })
+                    if rets:
+                        trade_ret_val = np.mean(rets)
+                        trade_status_val = "익절" if trade_ret_val > 0 else "손절"
+                        trade_entry_date_val = ", ".join([d.strftime('%Y-%m-%d') for d in entry_dates])
+
+                current_planned_asset = new_planned
+                rebalance_stage = new_stage
+                last_entry_price = prices[base_asset]
+                peak_price = prices[base_asset]
+
+                # [추가] 매매 후 현금 및 레버리지 자산 총액 재계산 (로그용)
+                cash = current_total_val * eff_cash_ratio
+                current_lev_funds = sum(holdings.get(t, 0) * prices.get(t, 0) for t in lev_candidates if t in prices)
 
             if not fast_mode:
                 # 시각적 가독성을 위해 trade_label 설정
@@ -1681,9 +1609,9 @@ class StrategyEngine:
         return pd.DataFrame(history).set_index('Date'), pd.DataFrame(closed_trades), signal_events
 
     @staticmethod
-    def run_bond_strategy(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None, **kwargs):
+    def run_bond_strategy(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None, fee_rate=0.0, integer_shares=False, **kwargs):
         """Bond Strategy V7 구현 (TLT/TBF/BIL) - generator 기반 통합 호출"""
-        gen = StrategyEngine._run_bond_generator(data_dict, macro_df, start_date, end_date, params, allocated_capital, lev_params=lev_params)
+        gen = StrategyEngine._run_bond_generator(data_dict, macro_df, start_date, end_date, params, allocated_capital, lev_params=lev_params, fee_rate=fee_rate, integer_shares=integer_shares)
         try:
             state = next(gen)
             while True:
@@ -1693,8 +1621,7 @@ class StrategyEngine:
             return e.value
 
     @staticmethod
-    @staticmethod
-    def _run_bond_generator(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None):
+    def _run_bond_generator(data_dict, macro_df, start_date=None, end_date=None, params=None, allocated_capital=10000.0, lev_params=None, fee_rate=0.0, integer_shares=False):
         """Bond Strategy V7+V8 구현 (Generator 버전)
 
         Layer 1 (V7): 매크로 신호로 기초자산 결정 (TLT / TBF / BIL)
@@ -1803,11 +1730,13 @@ class StrategyEngine:
         dates = combined.index
 
         # ── V8 레버리지 파라미터 ──
-        _use_lev = lev_params is not None
-        _reb_up   = abs(lev_params.get('buy_reb_up',    0.02)) if _use_lev else 0.02
-        _reb_dn   = abs(lev_params.get('buy_reb_down',  0.02)) if _use_lev else 0.02
-        _buy_sigs = lev_params.get('buy_signals', [])          if _use_lev else []
-        _sell_sigs= lev_params.get('sell_signals', [])         if _use_lev else []
+        _use_lev   = lev_params is not None
+        _reb_up    = abs(lev_params.get('buy_reb_up',    0.02)) if _use_lev else 0.02
+        _reb_dn    = abs(lev_params.get('buy_reb_down',  0.02)) if _use_lev else 0.02
+        _buy_sigs  = lev_params.get('buy_signals', [])          if _use_lev else []
+        _sell_sigs = lev_params.get('sell_signals', [])         if _use_lev else []
+        # sell_mode: 'instant'(기본) / 'step'(단계적) / 'floor_s1'(S1 후퇴 절충)
+        _sell_mode = lev_params.get('sell_mode', 'instant')     if _use_lev else 'instant'
 
         # ── 헬퍼: buy_signals / sell_signals 평가 (기초자산 기준) ──
         def _check_buy(pfx, row, prev_row):
@@ -1866,14 +1795,87 @@ class StrategyEngine:
 
         # ── 시뮬레이션 상태 변수 ──
         results = []
-        portfolio_value = allocated_capital
-        current_asset   = 'BIL'
+        portfolio_value  = allocated_capital
+        current_asset    = 'BIL'
+        current_lev_frac = 0.0   # lev_frac 변경 감지용
+        bond_holdings    = {'TLT': 0.0, 'TMF': 0.0, 'TBF': 0.0, 'TMV': 0.0, 'BIL': 0.0}
+        bond_cash        = allocated_capital  # 초기엔 전액 현금 (BIL 상태)
+        # 정수 주식 모드: 실제 투자분(시장 수익 적용)과 잔여 현금(수익 없음) 분리 추적
+        bond_invest      = allocated_capital  # 시장 수익률이 적용되는 투자 원금
+        bond_cash_reserve = 0.0              # 정수화 후 남은 잔여 현금 (수익률 없음)
+
+        def _bond_rebalance(budget, target_asset, lev_fraction, lev_key, row_prices):
+            """budget을 target_asset + lev_key 비율로 나눠 수량 재계산. (holdings, cash) 반환.
+            Greedy Fill: integer_shares=True 시 잔여 현금으로 레버리지 자산 추가 매수 (현금 최소화).
+            """
+            new_h = {'TLT': 0.0, 'TMF': 0.0, 'TBF': 0.0, 'TMV': 0.0, 'BIL': 0.0}
+            residual = 0.0
+            active_assets = []  # Greedy Fill 대상 자산 (가격 내림차순)
+            if target_asset == 'BIL':
+                px = row_prices.get('BIL', np.nan)
+                if not np.isnan(px) and px > 0:
+                    raw = budget / px
+                    sh = math.floor(raw) if integer_shares else raw
+                    new_h['BIL'] = sh
+                    residual = budget - sh * px
+                    active_assets = [('BIL', px)]
+                else:
+                    residual = budget
+            elif lev_key and lev_fraction > 0:
+                base_key = 'TLT' if lev_key == 'TMF' else 'TBF'
+                lev_budget  = budget * lev_fraction
+                base_budget = budget * (1 - lev_fraction)
+                px_lev  = row_prices.get(lev_key, np.nan)
+                px_base = row_prices.get(base_key, np.nan)
+                if not np.isnan(px_lev) and px_lev > 0:
+                    raw_lev = lev_budget / px_lev
+                    sh_lev = math.floor(raw_lev) if integer_shares else raw_lev
+                    new_h[lev_key] = sh_lev
+                    residual += lev_budget - sh_lev * px_lev
+                    active_assets.append((lev_key, px_lev))
+                else:
+                    residual += lev_budget
+                if not np.isnan(px_base) and px_base > 0:
+                    raw_base = base_budget / px_base
+                    sh_base = math.floor(raw_base) if integer_shares else raw_base
+                    new_h[base_key] = sh_base
+                    residual += base_budget - sh_base * px_base
+                    active_assets.append((base_key, px_base))
+                else:
+                    residual += base_budget
+            else:
+                px = row_prices.get(target_asset, np.nan)
+                if not np.isnan(px) and px > 0:
+                    raw = budget / px
+                    sh = math.floor(raw) if integer_shares else raw
+                    new_h[target_asset] = sh
+                    residual = budget - sh * px
+                    active_assets = [(target_asset, px)]
+                else:
+                    residual = budget
+            # Greedy Fill: 잔여 현금으로 추가 매수 (레버리지→기초자산 가격 내림차순)
+            if integer_shares and residual > 0 and active_assets:
+                active_assets.sort(key=lambda x: x[1], reverse=True)
+                changed = True
+                while changed and residual > 0:
+                    changed = False
+                    for t, px in active_assets:
+                        if residual >= px:
+                            extra = math.floor(residual / px)
+                            if extra > 0:
+                                new_h[t] += float(extra)
+                                residual -= extra * px
+                                changed = True
+            return new_h, residual
 
         # Layer 2 스테이지 상태 (TLT/TBF 각각 독립)
         tlt_stage      = 0   # 0=없음 / 1=S1(30%) / 2=S2(70%) / 3=S3(100%)
         tbf_stage      = 0
         tlt_in_signal  = False  # True=신호 발생 후 가격 모드
         tbf_in_signal  = False
+        # floor_s1 모드: 첫 번째 sell로 S1에 도달한 상태 추적 (다음 sell에서 S0)
+        tlt_floor_hit  = False  # True = sell 후 S1 대기 중 → 다음 sell시 S0
+        tbf_floor_hit  = False
 
         for i in range(len(dates)):
             date     = dates[i]
@@ -1925,25 +1927,44 @@ class StrategyEngine:
                     sell_hit = _check_sell('tlt', row, prev_row)
 
                     if sell_hit:
-                        # 매도 신호: 즉시 S0 (신호 우선)
-                        tlt_stage     = 0
-                        tlt_in_signal = False
+                        if _sell_mode == 'instant':
+                            # 즉시 S0 (기존 동작)
+                            tlt_stage     = 0
+                            tlt_in_signal = False
+                            tlt_floor_hit = False
+                        elif _sell_mode == 'step':
+                            # 단계적 청산: stage -= 1
+                            tlt_stage = max(0, tlt_stage - 1)
+                            if tlt_stage == 0:
+                                tlt_in_signal = False
+                        elif _sell_mode == 'floor_s1':
+                            # S1 후퇴 절충: sell -> S1, S1 대기 중 추가 sell -> S0
+                            if tlt_floor_hit or tlt_stage <= 1:
+                                tlt_stage     = 0
+                                tlt_in_signal = False
+                                tlt_floor_hit = False
+                            else:
+                                tlt_stage     = 1
+                                tlt_floor_hit = True
                     elif not tlt_in_signal:
                         # 신호 모드: buy_signal → S1 진입
                         if buy_hit and tlt_stage < 3:
-                            tlt_stage    += 1
-                            tlt_in_signal = True
+                            tlt_stage     += 1
+                            tlt_in_signal  = True
+                            tlt_floor_hit  = False  # buy 진입 시 floor 상태 해제
                     else:
                         # 가격 모드: reb_up → 스테이지 업 / reb_down → 스테이지 다운
                         if tlt_chg >= 1.0 + _reb_up and tlt_stage < 3:
-                            tlt_stage += 1
+                            tlt_stage     += 1
+                            tlt_floor_hit  = False  # 가격 상승 시 floor 상태 해제
                         elif tlt_chg <= 1.0 - _reb_dn and tlt_stage > 0:
                             tlt_stage -= 1
                             if tlt_stage == 0:
                                 tlt_in_signal = False
+                                tlt_floor_hit = False
 
                     lev_stage = tlt_stage
-                    tbf_stage = 0; tbf_in_signal = False  # TLT 구간에서는 TBF 스테이지 초기화
+                    tbf_stage = 0; tbf_in_signal = False; tbf_floor_hit = False  # TLT 구간에서는 TBF 스테이지 초기화
 
                 # TBF → TMV 스테이지 머신
                 elif target == 'TBF':
@@ -1955,36 +1976,53 @@ class StrategyEngine:
                     sell_hit = _check_sell('tbf', row, prev_row)
 
                     if sell_hit:
-                        tbf_stage     = 0
-                        tbf_in_signal = False
+                        if _sell_mode == 'instant':
+                            tbf_stage     = 0
+                            tbf_in_signal = False
+                            tbf_floor_hit = False
+                        elif _sell_mode == 'step':
+                            tbf_stage = max(0, tbf_stage - 1)
+                            if tbf_stage == 0:
+                                tbf_in_signal = False
+                        elif _sell_mode == 'floor_s1':
+                            if tbf_floor_hit or tbf_stage <= 1:
+                                tbf_stage     = 0
+                                tbf_in_signal = False
+                                tbf_floor_hit = False
+                            else:
+                                tbf_stage     = 1
+                                tbf_floor_hit = True
                     elif not tbf_in_signal:
                         if buy_hit and tbf_stage < 3:
-                            tbf_stage    += 1
-                            tbf_in_signal = True
+                            tbf_stage     += 1
+                            tbf_in_signal  = True
+                            tbf_floor_hit  = False
                     else:
                         if tbf_chg >= 1.0 + _reb_up and tbf_stage < 3:
-                            tbf_stage += 1
+                            tbf_stage     += 1
+                            tbf_floor_hit  = False
                         elif tbf_chg <= 1.0 - _reb_dn and tbf_stage > 0:
                             tbf_stage -= 1
                             if tbf_stage == 0:
                                 tbf_in_signal = False
+                                tbf_floor_hit = False
 
                     lev_stage = tbf_stage
-                    tlt_stage = 0; tlt_in_signal = False  # TBF 구간에서는 TLT 스테이지 초기화
+                    tlt_stage = 0; tlt_in_signal = False; tlt_floor_hit = False  # TBF 구간에서는 TLT 스테이지 초기화
 
                 else:
                     # BIL 구간: 모든 스테이지 초기화
-                    tlt_stage = 0; tlt_in_signal = False
-                    tbf_stage = 0; tbf_in_signal = False
+                    tlt_stage = 0; tlt_in_signal = False; tlt_floor_hit = False
+                    tbf_stage = 0; tbf_in_signal = False; tbf_floor_hit = False
                     lev_stage = 0
 
                 lev_frac = {1: 0.30, 2: 0.70, 3: 1.0}.get(lev_stage, 0.0)
                 if lev_frac > 0:
                     lev_asset_key = 'TMF' if target == 'TLT' else ('TMV' if target == 'TBF' else None)
 
-            # ── 수익률 계산 ──
+            # ── 일별 수익률 계산 ──
+            row_px = {a: row.get(a, np.nan) for a in bond_holdings}
             if i > 0:
-                prev_date = dates[i - 1]
                 if lev_asset_key and lev_frac > 0:
                     base_key  = 'TLT' if lev_asset_key == 'TMF' else 'TBF'
                     px_lev_c  = row.get(lev_asset_key, np.nan)
@@ -2001,22 +2039,68 @@ class StrategyEngine:
                     px_c = row.get(asset_key, np.nan)
                     px_p = prev_row.get(asset_key, np.nan)
                     daily_ret = (px_c / px_p if not np.isnan(px_c) and not np.isnan(px_p) and px_p > 0 else 1.0)
-                portfolio_value *= daily_ret
+                if integer_shares:
+                    # 정수 주식: 투자분에만 수익률 적용, 잔여 현금은 고정
+                    bond_invest *= daily_ret
+                    portfolio_value = bond_invest + bond_cash_reserve
+                else:
+                    portfolio_value *= daily_ret
+
+            # ── 리밸런싱 이벤트: 자산 변경 OR lev_frac 변경 시 수수료 + 정수 주식 처리 ──
+            need_rebalance = (target != current_asset) or (abs(lev_frac - current_lev_frac) > 1e-6)
+            if need_rebalance:
+                # 수수료: 실제 매매된 비중(traded_fraction)에만 적용
+                if fee_rate > 0:
+                    if target != current_asset:
+                        traded_frac = 1.0
+                    else:
+                        traded_frac = abs(lev_frac - current_lev_frac)
+                    portfolio_value *= (1 - traded_frac * fee_rate * 2)
+                # 수량 추적 업데이트 (Greedy Fill 포함)
+                bond_holdings, bond_cash = _bond_rebalance(
+                    portfolio_value, target, lev_frac, lev_asset_key, row_px
+                )
+                if integer_shares:
+                    # 투자분/잔여 현금 분리: bond_invest = 실제 매수한 가치, bond_cash_reserve = 잔여
+                    bond_invest = portfolio_value - bond_cash  # = floor_shares × price (Greedy Fill 후)
+                    bond_cash_reserve = bond_cash
+                    portfolio_value = bond_invest + bond_cash_reserve  # 명시적 동기화
+                current_lev_frac = lev_frac
 
             summary_parts = [f"상태:{state}"]
             if not np.isnan(gap_val): summary_parts.append(f"FFV:{gap_val:+.2f}")
             if yc_val < params['yc_inv']: summary_parts.append("YC역전")
             elif (ycm > params['yc_steep'] and yc_val < 1.0): summary_parts.append("YC스티프닝")
 
+            # ── 로그 및 결과 기록 ──
+            prefix = "유지"
+            if target != current_asset:
+                prefix = "매수" if target != 'BIL' else "매도"
+            elif _use_lev and abs(lev_frac - current_lev_frac) > 1e-6:
+                prefix = "매수" if lev_frac > current_lev_frac else "매도"
+            
+            trade_label = f"{prefix}(S{lev_stage}): {target}"
+            if target == current_asset and abs(lev_frac - current_lev_frac) <= 1e-6:
+                trade_label = f"진행중(S{lev_stage}): {target}"
+
+            # 비중 계산
+            log_lev_weight = (sum(bond_holdings[t] * row.get(t, 0) for t in ['TMF', 'TMV'] if t in bond_holdings) / portfolio_value) if portfolio_value > 0 else 0
+            log_base_weight = (sum(bond_holdings[t] * row.get(t, 0) for t in ['TLT', 'TBF', 'BIL'] if t in bond_holdings) / portfolio_value) if portfolio_value > 0 else 0
+
             history_row = {
                 'Date': date, 'Value': portfolio_value, 'Asset': target,
-                'Trade_Label': f"{target} 진입" if target != current_asset else f"{target} 유지",
+                'Trade_Label': trade_label,
                 'Summary': " | ".join(summary_parts), 'f_state': state, 'gap': gap_val,
                 't10y2y': yc_val, 'yc_mom': ycm, 'tlt_rsi': rsi,
                 'ff_rate': row.get('ff_rate', 0), 'core_cpi': row.get('core_cpi', 0),
-                'Stage': lev_stage, 'lev_frac': lev_frac,
+                'Stage': lev_stage, 'Lev_Weight': log_lev_weight, 'Base_Weight': log_base_weight,
+                'lev_frac': lev_frac,
                 'lev_asset': lev_asset_key if lev_asset_key else target,
             }
+            # 자산별 개별 비중 추가
+            for t in bond_holdings:
+                history_row[f'{t}_Weight'] = (bond_holdings[t] * row.get(t, 0) / portfolio_value) if portfolio_value > 0 else 0
+
             results.append(history_row)
 
             state_dict = {
@@ -2027,7 +2111,19 @@ class StrategyEngine:
             }
             injected = yield state_dict
             if injected and isinstance(injected, dict) and 'cash_delta' in injected:
-                portfolio_value += injected['cash_delta']
+                delta = injected['cash_delta']
+                net_delta = delta - abs(delta) * fee_rate
+                portfolio_value += net_delta
+                # PM 자금 수혈/환수 후 현재 자산 비율로 재편입
+                if portfolio_value > 0:
+                    bond_holdings, bond_cash = _bond_rebalance(
+                        portfolio_value, target, lev_frac, lev_asset_key,
+                        {a: row.get(a, np.nan) for a in bond_holdings}
+                    )
+                    if integer_shares:
+                        bond_invest = portfolio_value - bond_cash
+                        bond_cash_reserve = bond_cash
+                        portfolio_value = bond_invest + bond_cash_reserve
 
             current_asset = target
 

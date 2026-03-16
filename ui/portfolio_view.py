@@ -8,6 +8,7 @@ from core.portfolio_manager import PortfolioManager
 from core.storage import StrategyStorage
 from ui.tester_view import TesterView
 from ui.history_view import HistoryLabView
+from ui.portfolio_realtime_view import PortfolioRealtimeView
 from utils.metrics import calculate_metrics
 
 class PortfolioView:
@@ -23,7 +24,7 @@ class PortfolioView:
         st.caption(f"📅 분석 기간 (적용됨): **{local_start} ~ {local_end}**")
 
         # 세션 상태 초기화: 포트폴리오 전략 목록
-        _portfolio_init_ver = 'v4'
+        _portfolio_init_ver = 'v6'
         _needs_portfolio_init = (
             'portfolio_configs' not in st.session_state
             or st.session_state.get('portfolio_init_ver') != _portfolio_init_ver
@@ -44,8 +45,8 @@ class PortfolioView:
                               or (_bond_strats[0] if _bond_strats else '전략 B (TLT/TBF 채권)')
             _default_bond_loaded = StrategyStorage.load_strategy(_default_bond_name) if _bond_strats else None
             st.session_state.portfolio_configs = [
-                {'name': _default_eq_name, 'weight': 0.4, 'type': 'equity', 'params': copy.deepcopy(_default_eq_params)},
-                {'name': _default_bond_name, 'weight': 0.6, 'type': 'bond',
+                {'name': _default_eq_name, 'weight': 0.78, 'type': 'equity', 'params': copy.deepcopy(_default_eq_params)},
+                {'name': _default_bond_name, 'weight': 0.22, 'type': 'bond',
                  'params': copy.deepcopy(_default_bond_loaded or st.session_state.get('current_bond_params', _default_bond_params)),
                  'lev_params': _default_bond_lev_params},
             ]
@@ -55,7 +56,7 @@ class PortfolioView:
         if 'portfolio_total_capital' not in st.session_state:
             st.session_state.portfolio_total_capital = 10000.0
 
-        tab1, tab2, tab3 = st.tabs(["📊 통합 대시보드", "🧩 전략 구성 및 비중", "⚙️ 전략별 세부 설정"])
+        tab1, tab2 = st.tabs(["📊 통합 대시보드", "🧩 전략 구성 및 비중"])
 
         with tab2:
             st.subheader("💾 포트폴리오 관리 (DB)")
@@ -134,6 +135,7 @@ class PortfolioView:
             total_cap = col_cap.number_input("총 투자 자산 ($)", min_value=100.0, value=st.session_state.portfolio_total_capital, step=100.0)
             st.session_state.portfolio_total_capital = total_cap
 
+
             PRESET_LABELS = {
                 'none':        '🚫 리밸런싱 없음',
                 'annual':      '📅 연간 (1년)',
@@ -142,9 +144,11 @@ class PortfolioView:
                 'band_5pct':   '📊 밴드 ±5%',
                 'band_10pct':  '📊 밴드 ±10%',
                 'asymmetric':  '⚖️ 비대칭 (상 15% / 하 5%)',
+                'hybrid':      '🔀 Hybrid (분기+밴드7%)',
+                'trend':       '📈 Trend-Filtered (MA200)',
             }
             preset_keys = list(PRESET_LABELS.keys())
-            current_preset = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
+            current_preset = st.session_state.get('portfolio_rebalance_preset', 'hybrid')
             preset_idx = preset_keys.index(current_preset) if current_preset in preset_keys else 1
             selected_preset = col_rb.selectbox(
                 "🔄 리밸런싱 전략",
@@ -222,7 +226,7 @@ class PortfolioView:
                             st.rerun()
 
                     # (4) 비중 표시 (실시간 반영)
-                    configs[i]['weight'] = col_w.number_input(f"비중 (0~1.0) #{i+1}", value=config['weight'], min_value=0.0, max_value=1.0, step=0.05, key=f"p_weight_{i}")
+                    configs[i]['weight'] = col_w.number_input(f"비중 (0~1.0) #{i+1}", value=config['weight'], min_value=0.0, max_value=1.0, step=0.05, key=f"p_weight_{i}_{p_v}")
                     total_weight += configs[i]['weight']
                     
                     st.write(f"할당 자산: `${total_cap * configs[i]['weight']:,.2f}`")
@@ -246,88 +250,14 @@ class PortfolioView:
                 else:
                     PortfolioView.run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, local_start, local_end)
 
-        with tab3:
-            st.subheader("⚙️ 전략별 세부 파라미터 설정")
-            configs = st.session_state.portfolio_configs
-            
-            if not configs:
-                st.info("먼저 '전략 구성' 탭에서 전략을 추가해 주세요.")
-            else:
-                # [개선] 가로형 라디오 버튼으로 선택 (이름 정제)
-                def config_label(i):
-                    c = configs[i]
-                    return f"{'📈 주식' if c.get('type')=='equity' else '💰 채권'} ({c['name']})"
-                
-                # 사용자가 단순 '주식', '채권'으로 원하므로 label만 변경하되 중복 방지 위해 인덱스 활용
-                selected_idx = st.radio(
-                    "🔧 튜닝할 전략 선택", 
-                    range(len(configs)), 
-                    horizontal=True, 
-                    format_func=lambda i: f"{'📈 주식' if configs[i].get('type')=='equity' else '💰 채권'}",
-                    key="p_strat_tune_sel_idx"
-                )
-                
-                config = configs[selected_idx]
-                idx = selected_idx
-                
-                # [추가] 글로벌 전략에서 다시 불러오기 (교체 기능)
-                current_type = config.get('type', 'equity')
-                global_strats = StrategyStorage.list_strategies(category=current_type)
-                
-                if global_strats:
-                    # 현재 선택된 전략이 목록의 어디에 있는지 확인
-                    try:
-                        g_sel_idx = global_strats.index(config['name'])
-                    except ValueError:
-                        g_sel_idx = 0
-                    
-                    new_global_name = st.selectbox(
-                        "🔄 글로벌 전략에서 다른 전략으로 교체", 
-                        global_strats, 
-                        index=g_sel_idx,
-                        key=f"p_strat_swap_{idx}"
-                    )
-                    
-                    # 전략 교체 시 파라미터 로드 및 갱신
-                    if new_global_name != config['name']:
-                        loaded = StrategyStorage.load_strategy(new_global_name)
-                        if loaded:
-                            configs[idx]['name'] = new_global_name
-                            configs[idx]['params'] = copy.deepcopy(loaded)
-                            st.rerun()
-
-                # 선택된 전략에 대한 설정 화면 렌더링
-                st.write("---")
-                st.markdown(f"#### 🛠️ {config['name']} 파라미터 튜닝")
-                prefix = f"strat_detail_{idx}_"
-                
-                st.info(f"💡 현재 설정은 글로벌 전략 **'{config['name']}'**에서 로드되었습니다. 아래에서 이 포트폴리오에 맞게 세부 조정이 가능합니다.")
-                
-                final_type = config.get('type', 'equity')
-                
-                if final_type == 'bond':
-                    with st.form(f"{prefix}bond_form"):
-                        new_params, new_lev_params = TesterView.render_bond_settings(
-                            config.get('params', {}),
-                            current_lev_params=config.get('lev_params'),
-                            key_prefix=prefix,
-                        )
-                        if st.form_submit_button("⚙️ 채권 설정 업데이트 (Update)"):
-                            config['params'] = new_params
-                            config['lev_params'] = new_lev_params
-                            st.success(f"✅ {config['name']}의 채권 설정이 반영되었습니다.")
-                            st.rerun()
-                else:
-                    st.markdown("##### 📥 매매 시그널 및 필터")
-                    # 주식 전략은 실시간 동기화 방식 유지
-                    new_params_top = TesterView.render_top_part(config.get('params', {}), key_prefix=prefix)
-                    new_params_bottom = TesterView.render_bottom_part(config.get('params', {}), key_prefix=prefix)
-                    
-                    config['params'].update(new_params_top)
-                    config['params'].update(new_params_bottom)
-                    st.caption(f"💡 {config['name']}의 주식 설정은 수정 즉시 반영됩니다.")
-
         with tab1:
+            # 수수료 설정 변경 시 재실행 안내
+            if 'portfolio_result' in st.session_state:
+                saved_fee = st.session_state.portfolio_result.get('fee_rate', 0.0)
+                current_fee = st.session_state.get('global_fee_rate', 0.0)
+                if abs(saved_fee - current_fee) > 1e-8:
+                    st.warning(f"⚠️ 수수료 설정이 변경되었습니다 (적용됨: {saved_fee*100:.3f}% → 현재: {current_fee*100:.3f}%). '시뮬레이션 실행' 버튼을 눌러 재계산하세요.")
+
             # 결과 없으면 자동 시뮬레이션 실행
             if 'portfolio_result' not in st.session_state:
                 configs_ok = (
@@ -338,6 +268,178 @@ class PortfolioView:
                     PortfolioView.run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, local_start, local_end)
                     st.rerun()
             PortfolioView.render_dashboard()
+
+    @staticmethod
+    def render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df, start_date, end_date=None):
+        """실시간 모니터링 탭: 현재 portfolio_configs 기반으로 PortfolioManager를 빌드하고 신호를 표시.
+
+        Parameters:
+        - end_date: None이면 자동으로 현재 날짜로 설정
+        """
+        import copy as _copy
+        import datetime as _dt
+
+        # end_date가 None이거나 미래일 경우 현재 시간으로 설정
+        if end_date is None or (hasattr(end_date, 'date') and end_date.date() > _dt.date.today()) or (isinstance(end_date, _dt.date) and end_date > _dt.date.today()):
+            end_date = _dt.date.today()
+
+        # ── 전략 A/B/C/D 선택 드롭다운 (Supabase 기준) ────────────────────────
+        st.markdown("#### 📊 포트폴리오 전략 선택")
+
+        # Supabase portfolios 테이블에서 포트폴리오 목록 불러오기
+        portfolio_names = StrategyStorage.list_portfolios()
+
+        if not portfolio_names:
+            st.error("⚠️ Supabase에서 포트폴리오를 불러올 수 없습니다. 포트폴리오 데이터를 확인하세요.")
+            return
+
+        if 'portfolio_selected_name' not in st.session_state:
+            # "A" 포트폴리오 찾기, 없으면 첫 번째 사용
+            default_portfolio = next((n for n in portfolio_names if 'A' in n), portfolio_names[0] if portfolio_names else None)
+            st.session_state.portfolio_selected_name = default_portfolio
+
+        def on_portfolio_change():
+            """포트폴리오 변경 시 portfolio_realtime_result 초기화 (신호 재계산 트리거)"""
+            st.session_state.portfolio_realtime_result = None
+
+        selected_portfolio_name = st.selectbox(
+            "다음 중 하나 선택:",
+            portfolio_names,
+            index=portfolio_names.index(st.session_state.portfolio_selected_name) if st.session_state.portfolio_selected_name in portfolio_names else 0,
+            key='portfolio_selector',
+            on_change=on_portfolio_change
+        )
+        st.session_state.portfolio_selected_name = selected_portfolio_name
+
+        # ── 선택된 포트폴리오 로드 ──────────────────────────────────────────────
+        portfolio_data = StrategyStorage.load_portfolio(selected_portfolio_name)
+        if not portfolio_data:
+            st.error(f"⚠️ 포트폴리오 '{selected_portfolio_name}'을 불러올 수 없습니다.")
+            return
+
+        _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
+        _default_bond_lev    = _copy.deepcopy(st.session_state.get('current_bond_lev_params')) or None
+
+        # 포트폴리오 configs에서 자산별 정보 추출
+        _configs = portfolio_data.get('configs', [])
+        _eq_config = next((c for c in _configs if c['type'] == 'equity'), None)
+        _bond_config = next((c for c in _configs if c['type'] == 'bond'), None)
+
+        _eq_name = _eq_config['name'] if _eq_config else 'TQQQ Strategy'
+        _bond_name = _bond_config['name'] if _bond_config else 'Bond V8'
+        _eq_params = _eq_config['params'] if _eq_config else _copy.deepcopy(st.session_state.get('current_params', {}))
+        _bond_loaded = _bond_config['params'] if _bond_config else None
+
+        _tqqq_w = _eq_config['weight'] if _eq_config else 0.78
+        _bond_w = _bond_config['weight'] if _bond_config else 0.22
+        _preset = portfolio_data.get('rebalance_preset', 'hybrid')
+
+        # trend_defense는 portfolio_items에는 저장되지 않으므로, preset에 따라 결정
+        _trend_def = None
+        if _preset == 'trend':
+            _trend_def = {'tqqq_strategy': 0.50, 'Bond_V7_Custom': 0.50}
+
+        st.session_state.portfolio_configs = [
+            {'name': _eq_name,   'weight': _tqqq_w, 'type': 'equity', 'params': _copy.deepcopy(_eq_params)},
+            {'name': _bond_name, 'weight': _bond_w, 'type': 'bond',
+             'params': _copy.deepcopy(_bond_loaded or st.session_state.get('current_bond_params', _default_bond_params)),
+             'lev_params': _default_bond_lev},
+        ]
+        st.session_state.portfolio_total_capital   = st.session_state.get('portfolio_total_capital', 10000.0)
+        st.session_state.portfolio_rebalance_preset = _preset
+        st.session_state.portfolio_trend_defense_weights = _trend_def  # 전략 B의 trend 방어 비중
+
+        configs   = st.session_state.get('portfolio_configs', [])
+        total_cap = st.session_state.get('portfolio_total_capital', 10000.0)
+        preset    = st.session_state.get('portfolio_rebalance_preset', 'hybrid')
+
+        # ── PortfolioManager 빌드 ────────────────────────────────────────────
+        # custom_preset_cfg가 필요한 preset (hybrid, trend, 밴드 등)을 처리
+        _PRESET_TO_CFG = {
+            'hybrid':     {'method': 'hybrid', 'interval_days': 63, 'upper_band': 0.07, 'lower_band': 0.07, 'min_interval_days': 5},
+            'trend':      {'method': 'trend',  'upper_band': 0.07, 'lower_band': 0.07, 'min_interval_days': 5},
+            'band_5pct':  {'method': 'threshold', 'upper_band': 0.05, 'lower_band': 0.05, 'min_interval_days': 21},
+            'band_10pct': {'method': 'threshold', 'upper_band': 0.10, 'lower_band': 0.10, 'min_interval_days': 21},
+            'asymmetric': {'method': 'threshold', 'upper_band': 0.15, 'lower_band': 0.05, 'min_interval_days': 21},
+        }
+        custom_cfg = _PRESET_TO_CFG.get(preset, None)
+        std_preset = preset if preset not in _PRESET_TO_CFG else 'none'
+
+        fee_rate       = st.session_state.get('global_fee_rate', 0.001)
+        integer_shares = st.session_state.get('global_integer_shares', True)
+
+        # ── 전략 B(trend) 전용: QQQ MA200 계산 ────────────────────────────────
+        trend_data = None
+        if preset == 'trend' and 'QQQ' in data_dict:
+            try:
+                qqq_close = data_dict['QQQ']['close']
+                ma200 = qqq_close.rolling(window=200).mean()
+                trend_data = qqq_close > ma200  # True=상승(공격), False=하강(방어)
+            except Exception:
+                trend_data = None
+
+        trend_def_weights = st.session_state.get('portfolio_trend_defense_weights', None)
+
+        pm = PortfolioManager(
+            total_capital=total_cap,
+            rebalance_preset=std_preset,
+            custom_preset_cfg=custom_cfg,
+            fee_rate=fee_rate,
+            integer_shares=integer_shares,
+            trend_data=trend_data,
+            trend_defense_weights=trend_def_weights,
+        )
+
+        # 전략 등록
+        for cfg in configs:
+            name     = cfg['name']
+            weight   = cfg['weight']
+            stype    = cfg.get('type', 'equity')
+            params   = cfg.get('params', {})
+            lev_p    = cfg.get('lev_params', None)
+
+            if stype == 'equity':
+                smart_p = {
+                    'use_panic': params.get('use_panic', True),
+                    'panic_ma': params.get('panic_ma', 200),
+                    'panic_buy_signals': params.get('panic_buy_signals', []),
+                    'panic_rsi_s1': params.get('panic_rsi_s1', 27),
+                    'panic_rsi_s2': params.get('panic_rsi_s2', 28),
+                    'panic_rsi_s3': params.get('panic_rsi_s3', 30),
+                    'use_vxn_safety': params.get('use_vxn_safety', False),
+                    'vxn_exit': params.get('vxn_exit', 31.0),
+                    'use_rsi_turbo': params.get('use_rsi_turbo', False),
+                    'rsi_turbo': params.get('rsi_turbo', 31.0),
+                    'use_sl_control': params.get('use_sl_control', False),
+                    'sl_control_limit': params.get('sl_control_limit', -15.0),
+                    'use_set_sl': params.get('use_set_sl', False),
+                    'set_sl_limit': params.get('set_sl_limit', -15.0),
+                    'dynamic_cash': params.get('dynamic_cash', {'use': False}),
+                }
+                pm.register_strategy(name, weight, dict(
+                    data_dict=data_dict, fg_df=fg_df, vxn_df=vxn_df, news_df=news_df,
+                    leverage_asset=params.get('leverage_asset', 'TQQQ'),
+                    base_asset=params.get('base_asset', 'QQQ'),
+                    cash_ratio=params.get('cash_ratio_pct', 0.0),
+                    start_date=start_date, end_date=end_date,
+                    params=params, trade_at=params.get('trade_at', '종가'),
+                    smart_params=smart_p, fast_mode=True,
+                ), strat_type='equity')
+            else:
+                bond_params = params if params else {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.40, 'tlt_rsi_max': 60}
+                pm.register_strategy(name, weight, dict(
+                    data_dict=data_dict, macro_df=macro_df,
+                    start_date=start_date, end_date=end_date,
+                    params=bond_params, lev_params=lev_p,
+                ), strat_type='bond')
+
+        PortfolioRealtimeView.render(
+            portfolio_manager=pm,
+            data_dict=data_dict, fg_df=fg_df, vxn_df=vxn_df,
+            macro_df=macro_df, news_df=news_df,
+            start_date=start_date,
+            rebalance_preset=preset,
+        )
 
     @staticmethod
     def run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, start_date, end_date):
@@ -352,7 +454,9 @@ class PortfolioView:
         
         # Portfolio Manager 초기화
         rebalance_preset = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
-        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=rebalance_preset)
+        fee_rate = st.session_state.get('global_fee_rate', 0.0)
+        integer_shares = st.session_state.get('global_integer_shares', False)
+        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=rebalance_preset, fee_rate=fee_rate, integer_shares=integer_shares)
         
         # 채권 전략 기본 파라미터 (V7)
         DEFAULT_BOND_PARAMS = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
@@ -442,8 +546,9 @@ class PortfolioView:
                 st.session_state.portfolio_result = {
                     'combined': combined_equity,
                     'individuals': individual_results,
-                    'standalone': standalone_results,  # 독립 결과 추가
-                    'qqq_df': qqq_df
+                    'standalone': standalone_results,
+                    'qqq_df': qqq_df,
+                    'fee_rate': st.session_state.get('global_fee_rate', 0.0)
                 }
                 st.toast("✅ 통합 시뮬레이션 완료!", icon="📈")
             except Exception as e:
