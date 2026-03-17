@@ -98,6 +98,7 @@ class PortfolioRealtimeView:
 
     @staticmethod
     def render(portfolio_manager: PortfolioManager,
+               portfolio_name: str,
                data_dict: dict, fg_df, vxn_df, macro_df, news_df,
                start_date: datetime.date,
                rebalance_preset: str = 'hybrid'):
@@ -107,6 +108,7 @@ class PortfolioRealtimeView:
         Parameters
         ----------
         portfolio_manager : 전략이 register_strategy()로 등록된 PortfolioManager 인스턴스
+        portfolio_name : 포트폴리오 이름 (UI 표시 용도)
         data_dict / fg_df / vxn_df / macro_df / news_df : DataService.load_all_data() 결과
         start_date : 백테스트 시작일 (신호 계산 기준)
         rebalance_preset : 현재 선택된 리밸런싱 프리셋 키
@@ -125,7 +127,7 @@ class PortfolioRealtimeView:
                     border-radius:8px; font-size:13px; color:#444; margin-bottom:12px;">
             🇺🇸 미국 정규장: <b style="color:{dst_color}">{dst_label}</b>
             &nbsp;|&nbsp; 분석 기준일: <b style="color:#d35400">{now.strftime('%Y-%m-%d')}</b>
-            &nbsp;|&nbsp; 포트폴리오: <b>{portfolio_manager.portfolio_label if hasattr(portfolio_manager, 'portfolio_label') else ''}</b>
+            &nbsp;|&nbsp; 포트폴리오: <b>{portfolio_name}</b>
         </div>
         """, unsafe_allow_html=True)
 

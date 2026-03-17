@@ -435,6 +435,7 @@ class PortfolioView:
 
         PortfolioRealtimeView.render(
             portfolio_manager=pm,
+            portfolio_name=selected_portfolio_name,
             data_dict=data_dict, fg_df=fg_df, vxn_df=vxn_df,
             macro_df=macro_df, news_df=news_df,
             start_date=start_date,
