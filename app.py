@@ -19,6 +19,7 @@ from ui.quant_lab_view import QuantLabView
 from ui.intelligence_view import IntelligenceView
 from ui.portfolio_view import PortfolioView
 from ui.portfolio_realtime_view import PortfolioRealtimeView
+from ui.asset_view import AssetView
 from ui.tester_view import TesterView
 from utils.metrics import calculate_metrics
 
@@ -35,6 +36,7 @@ class GoldenStrategyApp:
         st.sidebar.title("🚀 Golden Strategy v3.0")
         menu = st.sidebar.radio("메인 메뉴", [
             "🛰️ 실시간 모니터링",
+            "💼 자산 관리",
             "📈 포트폴리오 매니저",
             "🔬 퀀트 분석 연구실",
             "📜 주식 전략 설정",
@@ -220,11 +222,11 @@ class GoldenStrategyApp:
             st.session_state.comparison_list = []
             
         cp = st.session_state.current_params
-        
+
         # 데이터 로딩 (st.cache_data 활용, TTL 1시간)
         with st.spinner('실시간 데이터를 가져오는 중...'):
             data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time = DataService.load_all_data()
-        
+
         if not data_dict:
             st.error("데이터 로드 실패")
             st.stop()
@@ -336,7 +338,9 @@ class GoldenStrategyApp:
             st.session_state.trigger_preview = False
                 
         # 메뉴별 렌더링
-        if menu == "🛰️ 실시간 모니터링":
+        if menu == "💼 자산 관리":
+            AssetView().render()
+        elif menu == "🛰️ 실시간 모니터링":
             st.title("🛰️ 실시간 포트폴리오 모니터링")
             PortfolioView.render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df,
                                               start_d or data_dict['QQQ'].index.min().date(),

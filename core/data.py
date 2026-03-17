@@ -14,27 +14,41 @@ class DataService:
     @staticmethod
     def _yf_download_with_retry(*args, max_retries=3, **kwargs):
         """yf.download를 Rate Limit 오류 시 exponential backoff으로 재시도"""
-        delays = [5, 15, 30]
+        # [수정] 대기 시간 대폭 연장 (배포 환경의 엄격한 제한 대응)
+        delays = [30, 90, 180] 
+        ticker_str = str(args[0]) if args else "Unknown"
+        
         for attempt in range(max_retries):
             try:
                 result = yf.download(*args, **kwargs)
                 if result is not None and not result.empty:
                     return result
-                # 빈 결과도 재시도
+                
+                # 빈 결과일 경우 티커 존재 여부나 네트워크 일시 오류 가능성
                 if attempt < max_retries - 1:
+                    print(f"[yfinance] 빈 데이터 반환 ({ticker_str}) — {delays[attempt]}초 후 재시도...")
                     time.sleep(delays[attempt])
             except Exception as e:
                 err_str = str(e).lower()
-                if 'ratelimit' in err_str or 'too many requests' in err_str or '429' in err_str:
+                # yfinance의 내부 Rate Limit 예외명들 체크
+                is_rate_limit = any(x in err_str for x in ['ratelimit', 'too many requests', '429', 'rate limited'])
+                
+                if is_rate_limit:
                     if attempt < max_retries - 1:
                         wait = delays[attempt]
-                        print(f"[yfinance] Rate limit 감지 — {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
+                        print(f"[yfinance] Rate limit 감지 ({ticker_str}) — {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
                         time.sleep(wait)
                     else:
-                        print(f"[yfinance] Rate limit 재시도 초과: {e}")
-                        raise
+                        print(f"[yfinance] Rate limit 재시도 초과 ({ticker_str}): {e}")
+                        # 에러를 던지지 않고 빈 DF 반환하여 엔진에서 대체 로직(Approximation)이 돌게 함
+                        return pd.DataFrame()
                 else:
-                    raise
+                    # 기타 치명적 에러 (네트워크 끊김 등)
+                    print(f"[yfinance] 예외 발생 ({ticker_str}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(delays[attempt])
+                    else:
+                        return pd.DataFrame()
         return pd.DataFrame()
 
     @staticmethod
@@ -214,21 +228,43 @@ class DataService:
             full_data = cls._yf_download_with_retry(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
             print("메인 데이터 다운로드 완료. 처리 중...")
             for ticker in tickers:
-                if ticker in full_data and not full_data[ticker].empty:
-                    df = full_data[ticker].copy()
-                    
-                    # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
-                    if df.index[-1].date() >= today_est:
-                        if not is_market_closed:
-                            # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
-                            df = df[df.index.date < today_est]
+                # yfinance 1.0: MultiIndex(Price, Ticker) 또는 group_by='ticker'로 MultiIndex(Ticker, Price) 반환
+                # 두 형식 모두 안전하게 처리
+                try:
+                    if isinstance(full_data.columns, pd.MultiIndex):
+                        if ticker in full_data.columns.get_level_values(0):
+                            df_raw = full_data[ticker]
+                        elif ticker in full_data.columns.get_level_values(1):
+                            df_raw = full_data.xs(ticker, level=1, axis=1)
                         else:
-                            # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
-                            pass
-                        
-                    df = df.ffill().bfill() 
-                    df = cls.calculate_indicators(df)
-                    data_dict[ticker] = df
+                            continue
+                    elif ticker in full_data:
+                        df_raw = full_data[ticker]
+                    else:
+                        continue
+                    if df_raw.empty:
+                        continue
+                    if isinstance(df_raw, pd.Series):
+                        df_raw = df_raw.to_frame(name='Close')
+                    # 단일 티커 추출 후 MultiIndex 제거
+                    if isinstance(df_raw.columns, pd.MultiIndex):
+                        df_raw.columns = df_raw.columns.get_level_values(0)
+                except Exception as e:
+                    print(f"  [{ticker}] 데이터 추출 실패: {e}")
+                    continue
+                df = df_raw.copy()
+                # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
+                if df.index[-1].date() >= today_est:
+                    if not is_market_closed:
+                        # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
+                        df = df[df.index.date < today_est]
+                    else:
+                        # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
+                        pass
+
+                df = df.ffill().bfill()
+                df = cls.calculate_indicators(df)
+                data_dict[ticker] = df
             print(f"티커별 지표 계산 완료 ({len(data_dict)}개 티커)")
 
             # 핵심 티커 누락 시 개별 재시도

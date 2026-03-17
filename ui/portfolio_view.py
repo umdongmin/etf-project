@@ -757,3 +757,32 @@ class PortfolioView:
 
         st.dataframe(style_metrics(df_final), use_container_width=True)
 
+    # ══════════════════════════════════════════════════════════════════
+    # 공유 유틸: 포트폴리오 신호 계산 (asset_view 등 외부에서도 사용)
+    # ══════════════════════════════════════════════════════════════════
+    @staticmethod
+    def compute_portfolio_signals(portfolio_name, data_dict, fg_df, vxn_df, macro_df, news_df, start_date,
+                                   cur_prices=None):
+        """사이드바 설정을 반영한 신호 계산.
+
+        cur_prices 있음 → inject_virtual_close 후 실시간 신호
+        cur_prices 없음 → 마지막 종가 기준 신호
+
+        Returns:
+            dict | None  — predict_portfolio_today() 결과, 실패 시 None
+        """
+        from core.signal_service import compute_signals
+
+        fee_rate       = st.session_state.get('global_fee_rate', 0.001) or 0.001
+        integer_shares = st.session_state.get('global_integer_shares', True)
+        sidebar_start  = st.session_state.get('start_input', None)
+        if sidebar_start:
+            start_date = sidebar_start
+
+        return compute_signals(
+            portfolio_name, data_dict, fg_df, vxn_df, macro_df, news_df, start_date,
+            cur_prices=cur_prices,
+            fee_rate=fee_rate,
+            integer_shares=integer_shares,
+        )
+

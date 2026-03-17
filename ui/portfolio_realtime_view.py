@@ -134,14 +134,24 @@ class PortfolioRealtimeView:
 
         # 신호가 없거나 새로운 페이지 진입이면 자동 계산
         if result is None:
-            with st.spinner("포트폴리오 신호 계산 중..."):
+            with st.spinner("포트폴리오 신호 계산 중... (현재가 조회 포함)"):
                 try:
-                    result = portfolio_manager.predict_portfolio_today(
-                        data_dict, fg_df, vxn_df, macro_df, news_df,
-                        start_date=start_date,
+                    from core.data import DataService
+                    from ui.portfolio_view import PortfolioView
+
+                    # 현재가 조회 → compute_portfolio_signals에서 inject_virtual_close 처리
+                    _all_tickers = list(data_dict.keys()) + ['^VIX', '^VXN']
+                    _cur_prices  = DataService.fetch_current_prices(_all_tickers)
+
+                    result = PortfolioView.compute_portfolio_signals(
+                        portfolio_name, data_dict, fg_df, vxn_df, macro_df, news_df,
+                        start_date, cur_prices=_cur_prices,
                     )
-                    result['_calc_time'] = datetime.datetime.now().strftime('%H:%M:%S')
-                    st.session_state["portfolio_realtime_result"] = result
+                    if result:
+                        result['_calc_time'] = datetime.datetime.now().strftime('%H:%M:%S')
+                        st.session_state["portfolio_realtime_result"] = result
+                    else:
+                        raise ValueError("신호 계산 결과 없음")
                 except Exception as e:
                     st.error(f"신호 계산 오류: {e}")
                     import traceback; traceback.print_exc()

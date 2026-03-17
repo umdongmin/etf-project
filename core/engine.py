@@ -39,7 +39,13 @@ class StrategyEngine:
                 params.update(inner_s)
         
         base_df = data_dict[base_asset]
-        combined = base_df[['Close', 'RSI']].copy()
+        # 필요한 컬럼만 선택 (존재하지 않으면 스킵)
+        cols_to_use = [col for col in ['Close', 'RSI'] if col in base_df.columns]
+        if not cols_to_use:
+            # 기본값으로 모든 컬럼 사용
+            combined = base_df.copy()
+        else:
+            combined = base_df[cols_to_use].copy()
         
         # [신규] 전역 날짜 동기화 - 데이터가 없는 기간은 초기 자본보존을 위해 Reindex
         if start_date or end_date:
@@ -61,7 +67,7 @@ class StrategyEngine:
         # [추가] 시가 데이터 확보
         if 'Open' in base_df.columns:
             combined['Open'] = base_df['Open']
-        else:
+        elif 'Close' in combined.columns:
             combined['Open'] = combined['Close'] # 시가 없으면 종가 대체
         
         fg_clean = fg_df[~fg_df.index.duplicated(keep='first')]
@@ -1639,12 +1645,22 @@ class StrategyEngine:
         tmf_df = data_dict.get('TMF', pd.DataFrame())
         tmv_df = data_dict.get('TMV', pd.DataFrame())
 
-        # 가격 데이터 병합
-        combined = tlt_df[['Close']].copy().rename(columns={'Close': 'TLT'})
-        if not tbf_df.empty: combined['TBF'] = tbf_df['Close']
-        if not bil_df.empty: combined['BIL'] = bil_df['Close']
-        if not tmf_df.empty: combined['TMF'] = tmf_df['Close']
-        if not tmv_df.empty: combined['TMV'] = tmv_df['Close']
+        # 가격 데이터 병합 (Close 컬럼 존재 여부 확인)
+        close_col = 'Close' if 'Close' in tlt_df.columns else tlt_df.columns[0] if len(tlt_df.columns) > 0 else 'Close'
+        combined = tlt_df[[close_col]].copy().rename(columns={close_col: 'TLT'})
+
+        if not tbf_df.empty:
+            tbf_close = 'Close' if 'Close' in tbf_df.columns else tbf_df.columns[0] if len(tbf_df.columns) > 0 else 'Close'
+            combined['TBF'] = tbf_df[tbf_close]
+        if not bil_df.empty:
+            bil_close = 'Close' if 'Close' in bil_df.columns else bil_df.columns[0] if len(bil_df.columns) > 0 else 'Close'
+            combined['BIL'] = bil_df[bil_close]
+        if not tmf_df.empty:
+            tmf_close = 'Close' if 'Close' in tmf_df.columns else tmf_df.columns[0] if len(tmf_df.columns) > 0 else 'Close'
+            combined['TMF'] = tmf_df[tmf_close]
+        if not tmv_df.empty:
+            tmv_close = 'Close' if 'Close' in tmv_df.columns else tmv_df.columns[0] if len(tmv_df.columns) > 0 else 'Close'
+            combined['TMV'] = tmv_df[tmv_close]
         combined = combined.join(macro_df, how='left').ffill()
 
         # ── Layer 1 지표 (V7용) ──
