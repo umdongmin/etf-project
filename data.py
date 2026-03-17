@@ -14,27 +14,41 @@ class DataService:
     @staticmethod
     def _yf_download_with_retry(*args, max_retries=3, **kwargs):
         """yf.download를 Rate Limit 오류 시 exponential backoff으로 재시도"""
-        delays = [5, 15, 30]
+        # [수정] 대기 시간 대폭 연장 (배포 환경의 엄격한 제한 대응)
+        delays = [30, 90, 180] 
+        ticker_str = str(args[0]) if args else "Unknown"
+        
         for attempt in range(max_retries):
             try:
                 result = yf.download(*args, **kwargs)
                 if result is not None and not result.empty:
                     return result
-                # 빈 결과도 재시도
+                
+                # 빈 결과일 경우 티커 존재 여부나 네트워크 일시 오류 가능성
                 if attempt < max_retries - 1:
+                    print(f"[yfinance] 빈 데이터 반환 ({ticker_str}) — {delays[attempt]}초 후 재시도...")
                     time.sleep(delays[attempt])
             except Exception as e:
                 err_str = str(e).lower()
-                if 'ratelimit' in err_str or 'too many requests' in err_str or '429' in err_str:
+                # yfinance의 내부 Rate Limit 예외명들 체크
+                is_rate_limit = any(x in err_str for x in ['ratelimit', 'too many requests', '429', 'rate limited'])
+                
+                if is_rate_limit:
                     if attempt < max_retries - 1:
                         wait = delays[attempt]
-                        print(f"[yfinance] Rate limit 감지 — {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
+                        print(f"[yfinance] Rate limit 감지 ({ticker_str}) — {wait}초 후 재시도 ({attempt+1}/{max_retries})...")
                         time.sleep(wait)
                     else:
-                        print(f"[yfinance] Rate limit 재시도 초과: {e}")
-                        raise
+                        print(f"[yfinance] Rate limit 재시도 초과 ({ticker_str}): {e}")
+                        # 에러를 던지지 않고 빈 DF 반환하여 엔진에서 대체 로직(Approximation)이 돌게 함
+                        return pd.DataFrame()
                 else:
-                    raise
+                    # 기타 치명적 에러 (네트워크 끊김 등)
+                    print(f"[yfinance] 예외 발생 ({ticker_str}): {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(delays[attempt])
+                    else:
+                        return pd.DataFrame()
         return pd.DataFrame()
 
     @staticmethod
@@ -214,21 +228,43 @@ class DataService:
             full_data = cls._yf_download_with_retry(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
             print("메인 데이터 다운로드 완료. 처리 중...")
             for ticker in tickers:
-                if ticker in full_data and not full_data[ticker].empty:
-                    df = full_data[ticker].copy()
-                    
-                    # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
-                    if df.index[-1].date() >= today_est:
-                        if not is_market_closed:
-                            # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
-                            df = df[df.index.date < today_est]
+                # yfinance 1.0: MultiIndex(Price, Ticker) 또는 group_by='ticker'로 MultiIndex(Ticker, Price) 반환
+                # 두 형식 모두 안전하게 처리
+                try:
+                    if isinstance(full_data.columns, pd.MultiIndex):
+                        if ticker in full_data.columns.get_level_values(0):
+                            df_raw = full_data[ticker]
+                        elif ticker in full_data.columns.get_level_values(1):
+                            df_raw = full_data.xs(ticker, level=1, axis=1)
                         else:
-                            # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
-                            pass
-                        
-                    df = df.ffill().bfill() 
-                    df = cls.calculate_indicators(df)
-                    data_dict[ticker] = df
+                            continue
+                    elif ticker in full_data:
+                        df_raw = full_data[ticker]
+                    else:
+                        continue
+                    if df_raw.empty:
+                        continue
+                    if isinstance(df_raw, pd.Series):
+                        df_raw = df_raw.to_frame(name='Close')
+                    # 단일 티커 추출 후 MultiIndex 제거
+                    if isinstance(df_raw.columns, pd.MultiIndex):
+                        df_raw.columns = df_raw.columns.get_level_values(0)
+                except Exception as e:
+                    print(f"  [{ticker}] 데이터 추출 실패: {e}")
+                    continue
+                df = df_raw.copy()
+                # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
+                if df.index[-1].date() >= today_est:
+                    if not is_market_closed:
+                        # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
+                        df = df[df.index.date < today_est]
+                    else:
+                        # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
+                        pass
+
+                df = df.ffill().bfill()
+                df = cls.calculate_indicators(df)
+                data_dict[ticker] = df
             print(f"티커별 지표 계산 완료 ({len(data_dict)}개 티커)")
 
             # 핵심 티커 누락 시 개별 재시도
@@ -389,30 +425,59 @@ class DataService:
         return data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time
 
     @classmethod
-    def fetch_current_prices(cls, tickers):
-        """핵심 티커들의 현재가를 실시간으로 수집하여 반환 (장중 프리뷰용)"""
+    def fetch_current_prices(cls, tickers, use_cache=True):
+        """핵심 티커들의 현재가를 실시간으로 수집하여 반환 (장중 프리뷰용)
+
+        Parameters:
+        - tickers: 티커 리스트
+        - use_cache: True면 Streamlit session_state 캐싱 활용 (5분 유지)
+        """
+        import streamlit as st
+
         prices = {}
+        cache_key = f"current_prices_cache_{datetime.datetime.now().strftime('%H:%M')[:4]}0"
+
+        # Streamlit 캐싱 확인
+        if use_cache and hasattr(st, 'session_state'):
+            if cache_key in st.session_state:
+                return st.session_state[cache_key]
+
         try:
-            # period='1d'로 가장 최근 1분봉 또는 마지막가를 가져옴
-            data = cls._yf_download_with_retry(tickers, period='1d', interval='1m', progress=False)
-            if not data.empty:
-                # pandas_ta 등으로 가공하지 않고 원본 종가만 취함
-                if len(tickers) > 1:
-                    close_data = data['Close']
-                    for ticker in tickers:
-                        if ticker in close_data.columns:
-                            prices[ticker] = close_data[ticker].dropna().iloc[-1]
-                else:
-                    prices[tickers[0]] = data['Close'].dropna().iloc[-1]
-            else:
-                # download 실패 시 t.fast_info 시도
-                for ticker in tickers:
+            # 1. 종가 다운로드 시도 (1분 간격 제거 → 5분 간격으로 변경하여 레이트 제한 완화)
+            try:
+                data = cls._yf_download_with_retry(
+                    tickers, period='1d', interval='5m', progress=False,
+                    max_retries=2  # 재시도 횟수 축소
+                )
+                if not data.empty:
+                    if len(tickers) > 1:
+                        close_data = data['Close']
+                        for ticker in tickers:
+                            if ticker in close_data.columns:
+                                prices[ticker] = close_data[ticker].dropna().iloc[-1]
+                    else:
+                        prices[tickers[0]] = data['Close'].dropna().iloc[-1]
+            except Exception as e1:
+                print(f"⚠️ 1분/5분봉 다운로드 실패: {e1}")
+                pass
+
+            # 2. 여전히 부족한 데이터는 fast_info로 채움 (레이트 제한에 더 강함)
+            for ticker in tickers:
+                if ticker not in prices:
                     try:
                         t = yf.Ticker(ticker)
                         prices[ticker] = t.fast_info['last_price']
-                    except: pass
+                        print(f"✓ {ticker} fast_info에서 조회")
+                    except Exception as e2:
+                        print(f"⚠️ {ticker} 현재가 조회 실패: {e2}")
+                        prices[ticker] = None
         except Exception as e:
-            print(f"현재가 수집 오류: {e}")
+            print(f"❌ 현재가 수집 오류: {e}")
+
+        # 캐싱 저장
+        if use_cache and hasattr(st, 'session_state'):
+            st.session_state[cache_key] = prices
+
         return prices
 
     @classmethod
