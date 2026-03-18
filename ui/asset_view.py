@@ -3,6 +3,9 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, date
 from core.storage import AssetStorage
+from core.constants import STAGE_RATIOS, STAGE_LABELS, STAGE_ICONS
+from core.session_keys import SK
+from ui.sync_view import SyncView
 
 
 class AssetView:
@@ -21,7 +24,7 @@ class AssetView:
         selected_account = next((a for a in accounts if a['name'] == selected_account_name), None)
         account_id = selected_account['id']
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 포트폴리오 현황", "🔔 신호 이벤트", "📋 거래 내역", "⚙️ 계좌 설정"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 포트폴리오 현황", "🔔 신호 이벤트", "📋 거래 내역", "🔀 자산 동기화", "⚙️ 계좌 설정"])
 
         with tab1:
             self._render_portfolio_status(account_id)
@@ -30,6 +33,8 @@ class AssetView:
         with tab3:
             self._render_transactions(account_id)
         with tab4:
+            SyncView().render(account_id=account_id)
+        with tab5:
             self._render_account_setup(account_id)
 
     # ══════════════════════════════════════════════════════
@@ -62,29 +67,32 @@ class AssetView:
         configs = portfolio.get('configs', [])
 
         # ── 현재 전략 신호 조회 ──────────────────────────────────────
-        cached_portfolio = st.session_state.get('current_signals_portfolio')
-        cached_signals = st.session_state.get('current_signals', {})
+        cached_portfolio = st.session_state.get(SK.CURRENT_SIGNALS_PORTFOLIO)
+        cached_signals = st.session_state.get(SK.CURRENT_SIGNALS, {})
         portfolio_changed = cached_portfolio != portfolio_name
 
         if refresh:
-            # 신호 갱신 버튼: compute_portfolio_signals 직접 호출 (실시간 모니터링과 동일 경로)
+            # 신호 갱신 버튼: signal 캐시 무효화 후 재계산
+            for mode in ('closing', 'realtime'):
+                st.session_state.pop(SK.sig_cache(portfolio_name, mode), None)
+                st.session_state.pop(SK.sig_cache_ts(portfolio_name, mode), None)
             with st.spinner("신호 계산 중..."):
                 signals = self._fetch_current_signals(portfolio_name, configs)
-            st.session_state['current_signals'] = signals
-            st.session_state['current_signals_portfolio'] = portfolio_name
+            st.session_state[SK.CURRENT_SIGNALS] = signals
+            st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
         elif portfolio_changed or not cached_signals:
             # 포트폴리오 변경 또는 캐시 없음: 실시간 모니터링 캐시 재사용 시도
-            rt_result = st.session_state.get('portfolio_realtime_result')
-            rt_portfolio = st.session_state.get('portfolio_selected_name')
+            rt_result = st.session_state.get(SK.PORTFOLIO_REALTIME_RESULT)
+            rt_portfolio = st.session_state.get(SK.PORTFOLIO_SELECTED_NAME)
             if rt_result and rt_portfolio == portfolio_name:
                 signals = self._extract_signals(rt_result, configs)
-                st.session_state['current_signals'] = signals
-                st.session_state['current_signals_portfolio'] = portfolio_name
+                st.session_state[SK.CURRENT_SIGNALS] = signals
+                st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
             else:
                 # 캐시 없음 → 신호 갱신 안내
                 signals = {}
-                st.session_state['current_signals'] = {}
-                st.session_state['current_signals_portfolio'] = portfolio_name
+                st.session_state[SK.CURRENT_SIGNALS] = {}
+                st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
         else:
             signals = cached_signals
 
@@ -111,16 +119,13 @@ class AssetView:
         # ── 현재 신호 요약 ───────────────────────────────────────────
         if signals:
             st.subheader("📡 현재 전략 신호")
-            STAGE_LABELS = {0: "S0 (Base 100%)", 1: "S1 (Base 70% + Lev 30%)",
-                           2: "S2 (Base 30% + Lev 70%)", 3: "S3 (Lev 100%)"}
             sig_cols = st.columns(len(signals))
             for i, (name, sig) in enumerate(signals.items()):
                 with sig_cols[i]:
                     s = sig['stage']
-                    color = {0: "🔵", 1: "🟡", 2: "🟠", 3: "🔴"}.get(s, "⚪")
                     st.metric(
                         label=name,
-                        value=f"{color} {STAGE_LABELS.get(s, f'S{s}')}",
+                        value=f"{STAGE_ICONS.get(s, '⚪')} {STAGE_LABELS.get(s, f'S{s}')}",
                         delta=f"{sig['base_asset']} → {sig.get('lev_asset','')}" if sig.get('lev_asset') else sig['base_asset']
                     )
 
@@ -242,103 +247,9 @@ class AssetView:
 
                 if success > 0:
                     st.success(f"✅ {success}개 거래 기록 완료!")
-                    st.session_state.pop('current_signals', None)
+                    st.session_state.pop(SK.CURRENT_SIGNALS, None)
 
-        # ── 초기 설정 expander (보유자산 있어도 접근 가능) ──────────
-        with st.expander("📊 포트폴리오 초기 설정 (재설정)", expanded=False):
-            self._render_portfolio_init(account_id, portfolio_name, configs, signals)
-
-    # ══════════════════════════════════════════════════════
-    # 포트폴리오 초기 설정
-    # ══════════════════════════════════════════════════════
-    def _render_portfolio_init(self, account_id, portfolio_name, configs, signals):
-        """포트폴리오 시작일 + 투자금액 → 자동 배분"""
-        # 사이드바 기간 설정과 동일한 날짜 사용 (start_input)
-        sidebar_start = st.session_state.get('start_input', date.today())
-        st.info(f"📅 매수 기준일: **{sidebar_start}** (사이드바 '분석 기간 설정 > 시작일' 기준)")
-
-        total_amount = st.number_input("투자금액 (USD)", min_value=0.0, step=1000.0, key="init_total_amount")
-
-        # 현재 신호 기반 배분 미리보기
-        target_alloc = self._compute_target_allocation(configs, signals)
-
-        preview_rows = []
-        for item in target_alloc:
-            preview_rows.append({
-                '전략': item['label'],
-                'ETF': item['ticker'],
-                '비중': f"{item['weight'] * 100:.1f}%",
-                '배분금액': f"${total_amount * item['weight']:,.0f}" if total_amount > 0 else "—"
-            })
-        st.dataframe(pd.DataFrame(preview_rows), use_container_width=True, hide_index=True)
-
-        if st.button("📊 수량 계산 및 저장", key="btn_init_calc", type="primary"):
-            if total_amount <= 0:
-                st.error("투자금액을 입력해주세요")
-                return
-
-            errors, preview = [], []
-            for item in target_alloc:
-                ticker = item['ticker']
-                weight = item['weight']
-                target_value = total_amount * weight
-                price = self._get_current_price(ticker, ticker)
-                if not price:
-                    price = self._get_historical_price(ticker, sidebar_start)
-                if not price:
-                    errors.append(f"{ticker} 가격 조회 실패")
-                    continue
-                qty = target_value / price
-                preview.append({**item, 'target_value': target_value, 'price': price, 'qty': qty})
-
-            for err in errors:
-                st.warning(f"⚠️ {err}")
-
-            if preview:
-                result_rows = [{
-                    'ETF': p['ticker'], '비중': f"{p['weight']*100:.1f}%",
-                    '배분금액': f"${p['target_value']:,.0f}",
-                    '기준가': f"${p['price']:,.2f}",
-                    '수량(소수)': f"{p['qty']:,.4f}",
-                    '수량(정수)': f"{int(p['qty'])}주"
-                } for p in preview]
-                st.dataframe(pd.DataFrame(result_rows), use_container_width=True, hide_index=True)
-                st.session_state['init_preview'] = preview
-                st.session_state['init_date'] = sidebar_start
-                st.session_state['init_portfolio'] = portfolio_name
-
-        if st.session_state.get('init_preview') and st.session_state.get('init_portfolio') == portfolio_name:
-            preview = st.session_state['init_preview']
-            init_date = st.session_state.get('init_date', date.today())
-            use_integer = st.checkbox("정수 수량 적용", value=True, key="init_integer")
-
-            if st.button("✅ 거래 내역에 저장", key="btn_init_save", type="primary"):
-                success = 0
-                for p in preview:
-                    qty = int(p['qty']) if use_integer else p['qty']
-                    if qty <= 0:
-                        continue
-                    AssetStorage.save_asset(p['ticker'], p['ticker'], 'etf', 'USD', p['ticker'], 'yfinance')
-                    result = AssetStorage.save_transaction(
-                        account_id, p['ticker'], 'buy',
-                        qty * p['price'],
-                        quantity=float(qty), price=p['price'],
-                        tx_date=init_date,
-                        notes=f"포트폴리오 초기 설정: {portfolio_name}"
-                    )
-                    if result:
-                        success += 1
-
-                # 초기 신호 이벤트 기록
-                if signals:
-                    total_v = sum(p['target_value'] for p in preview)
-                    self._record_signal_events(account_id, portfolio_name, signals, {}, total_v, init_date)
-
-                if success == len(preview):
-                    st.success(f"✅ {success}개 자산 저장 완료!")
-                    st.session_state.pop('init_preview', None)
-                else:
-                    st.warning(f"⚠️ {success}/{len(preview)} 저장됨")
+        st.info("💡 보유 수량 초기 설정은 **🔀 자산 동기화** 메뉴를 이용해주세요.", icon="🔀")
 
     # ══════════════════════════════════════════════════════
     # Tab 2: 신호 이벤트
@@ -501,7 +412,7 @@ class AssetView:
     @staticmethod
     def _compute_target_allocation(configs, signals):
         """신호 기반 목표 배분 계산 → [{ticker, weight, label}]"""
-        STAGE_RATIOS = {0: (1.0, 0.0), 1: (0.7, 0.3), 2: (0.3, 0.7), 3: (0.0, 1.0)}
+        # STAGE_RATIOS imported from core.constants
 
         result = []
         for config in configs:
@@ -567,11 +478,8 @@ class AssetView:
 
             # 신규 자산의 경우 현재가 조회
             if not current_price and t:
-                try:
-                    tk = yf.Ticker(t['ticker'])
-                    current_price = getattr(tk.fast_info, 'last_price', None) or 0
-                except Exception:
-                    current_price = 0
+                from core.data import DataService
+                current_price = DataService.get_price(t['ticker']) or 0
 
             order_amount = target_val - current_val
             suggested_qty = order_amount / current_price if current_price > 0 else 0
@@ -645,28 +553,9 @@ class AssetView:
 
     @staticmethod
     def _extract_signals(result, configs):
-        """predict_portfolio_today() 결과 → {strategy_name: signal_dict}"""
-        signals = {}
-        for name, sig in result.get('strategies', {}).items():
-            if not sig:
-                continue
-            cfg = next((c for c in configs if c['name'] == name), {})
-            stype = sig.get('strat_type', 'equity')
-            if stype == 'equity':
-                signals[name] = {
-                    'strat_type': 'equity',
-                    'stage': int(sig.get('stage', 1)),
-                    'base_asset': cfg.get('params', {}).get('base_asset', 'QQQ'),
-                    'lev_asset': cfg.get('params', {}).get('leverage_asset', 'TQQQ'),
-                }
-            else:
-                signals[name] = {
-                    'strat_type': 'bond',
-                    'stage': int(sig.get('lev_stage', 0)),
-                    'base_asset': sig.get('asset', 'TLT'),
-                    'lev_asset': sig.get('lev_asset', None),
-                }
-        return signals
+        """signal_service.extract_signals() 위임 래퍼"""
+        from core.signal_service import extract_signals
+        return extract_signals(result, configs)
 
     @staticmethod
     def _fetch_current_signals(portfolio_name, configs):
@@ -693,8 +582,8 @@ class AssetView:
                 start_date, cur_prices=_cur_prices,
             )
             if result:
-                st.session_state['portfolio_realtime_result'] = result
-                st.session_state['portfolio_selected_name'] = portfolio_name
+                st.session_state[SK.PORTFOLIO_REALTIME_RESULT] = result
+                st.session_state[SK.PORTFOLIO_SELECTED_NAME] = portfolio_name
                 return AssetView._extract_signals(result, configs)
 
         except Exception as e:
@@ -704,24 +593,15 @@ class AssetView:
 
     @staticmethod
     def _get_current_price(asset_id, asset_name):
-        def _fetch(sym):
-            try:
-                t = yf.Ticker(sym)
-                price = getattr(t.fast_info, 'last_price', None) or getattr(t.fast_info, 'regularMarketPrice', None)
-                if not price:
-                    hist = t.history(period='2d')
-                    if not hist.empty and 'Close' in hist.columns:
-                        price = float(hist['Close'].iloc[-1])
-                return float(price) if price else None
-            except Exception:
-                return None
-
-        price = _fetch(asset_id)
+        """DataService.get_price() 래퍼 — asset_name 파싱 fallback 포함"""
+        from core.data import DataService
+        price = DataService.get_price(asset_id)
         if price:
             return price
+        # asset_name에서 대문자 토큰 추출하여 추가 시도
         for token in str(asset_name).split():
             if token.isupper() and 2 <= len(token) <= 6:
-                price = _fetch(token)
+                price = DataService.get_price(token)
                 if price:
                     return price
         return None

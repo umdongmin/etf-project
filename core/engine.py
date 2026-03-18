@@ -1689,7 +1689,12 @@ class StrategyEngine:
                 combined['_tbf_macd_h']   = _tbf_macd_df['MACDh_12_26_9'] if _tbf_macd_df is not None else 0
 
         # 파라미터 로드
-        _bond_defaults = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
+        _bond_defaults = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60,
+                          'dot_hi': None, 'dot_lo': None,   # None = 비활성 (기존 동작 유지)
+                          'cycle_use': False,                # F1v2 금리 사이클 감지 활성화
+                          'cycle_cut_depth': -0.50,         # 6개월 누적 인하폭 기준 (%)
+                          'cycle_hike_depth':  0.50,        # 6개월 누적 인상폭 기준 (%)
+                          'cycle_streak':       60}         # 인하/인상 지속 최소 일수
         if params is None or 'ffv_lo' not in params:
             params = {**_bond_defaults, **(params or {})}
 
@@ -1706,6 +1711,25 @@ class StrategyEngine:
             elif current_f1 == 'RISING' and days_frozen >= 21: current_f1 = 'NEUTRAL'
             f1_states.append(current_f1)
         combined['f1_state'] = f1_states
+
+        # ─ F1v2: 금리 인하/인상 사이클 감지 (cycle_use=True 일 때 f1_state 강화) ─
+        # 판정 기준: ff_rate(현재) vs ff_rate(streak일 전) 비교
+        #   현재 금리 < streak일 전 금리 + cut_thr  → 인하 사이클 확인 → FALLING
+        #   현재 금리 > streak일 전 금리 + hike_thr → 인상 사이클 확인 → RISING
+        # FOMC는 월 1~2회만 변경하므로 "전일 대비" streak가 아닌 "N일 전 대비" 방식 사용
+        if params.get('cycle_use', False):
+            _cut_thr   = params.get('cycle_cut_depth',  -0.50)
+            _hike_thr  = params.get('cycle_hike_depth',  0.50)
+            _streak_th = int(params.get('cycle_streak',  60))
+            ff         = combined['ff_rate']
+            ff_past    = ff.shift(_streak_th)          # streak일 전 금리
+            ff_delta   = ff - ff_past                  # 현재 - N일 전
+            falling_mask = ff_delta < _cut_thr         # 인하 사이클
+            rising_mask  = ff_delta > _hike_thr        # 인상 사이클
+            f1v2 = combined['f1_state'].copy()
+            f1v2[falling_mask] = 'FALLING'
+            f1v2[rising_mask]  = 'RISING'
+            combined['f1_state'] = f1v2
 
         # ─ F2: 인플레이션 ─
         combined['cpi_yoy'] = combined['core_cpi'].pct_change(252).ffill()
@@ -1724,6 +1748,15 @@ class StrategyEngine:
         # ─ 최종 상태 투표 ─
         def vote_state(row):
             votes = [row['f1_state'], row['f2_state'], row['f3_state']]
+            # F4: 점도표 Dot Score (dot_hi/dot_lo 파라미터가 설정된 경우에만 활성)
+            _dot_hi = params.get('dot_hi')
+            _dot_lo = params.get('dot_lo')
+            if _dot_hi is not None and _dot_lo is not None:
+                ds = row.get('dot_score', np.nan)
+                if not (ds != ds):  # not NaN
+                    if ds > _dot_hi:   votes.append('RISING')
+                    elif ds < _dot_lo: votes.append('FALLING')
+                    else:              votes.append('NEUTRAL')
             from collections import Counter
             c = Counter(votes); top = c.most_common(1)[0]
             return top[0] if top[1] >= 2 else 'NEUTRAL'

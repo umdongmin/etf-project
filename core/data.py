@@ -392,8 +392,8 @@ class DataService:
                     # [수정] 인덱스 정규화 및 리인덱싱으로 빈 날짜 채움
                     if not macro_df.empty:
                         # UTC+9 기준 오늘 날짜까지 확장
-                        now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-                        full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst.normalize(), freq='D')
+                        now_kst = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Seoul').normalize().tz_localize(None)
+                        full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst, freq='D')
                         macro_df = macro_df.reindex(full_idx).ffill().bfill()
                     fred_status = 'Success'
                     fetch_status['FRED'] = 'Success'
@@ -425,31 +425,155 @@ class DataService:
         return data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time
 
     @classmethod
-    def fetch_current_prices(cls, tickers):
-        """핵심 티커들의 현재가를 실시간으로 수집하여 반환 (장중 프리뷰용)"""
+    def fetch_current_prices(cls, tickers, use_cache=True):
+        """핵심 티커들의 현재가를 실시간으로 수집하여 반환 (장중 프리뷰용)
+
+        Parameters:
+        - tickers: 티커 리스트
+        - use_cache: True면 session_state 5분 TTL 캐싱 활용
+        """
+        import streamlit as st
+
         prices = {}
+        from core.session_keys import SK
+        now = datetime.datetime.now()
+        bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+        tickers_key = ','.join(sorted(tickers))
+        bucket_str  = bucket.strftime('%H%M')
+        cache_key   = SK.cur_prices_cache(tickers_key, bucket_str)
+        time_key    = SK.cur_prices_cache_ts(tickers_key, bucket_str)
+
+        # session_state TTL 캐시 확인 (5분)
+        if use_cache and hasattr(st, 'session_state'):
+            cached    = st.session_state.get(cache_key)
+            cached_ts = st.session_state.get(time_key)
+            if cached is not None and cached_ts and (now - cached_ts).total_seconds() < 300:
+                return cached
+
         try:
-            # period='1d'로 가장 최근 1분봉 또는 마지막가를 가져옴
-            data = cls._yf_download_with_retry(tickers, period='1d', interval='1m', progress=False)
-            if not data.empty:
-                # pandas_ta 등으로 가공하지 않고 원본 종가만 취함
-                if len(tickers) > 1:
-                    close_data = data['Close']
-                    for ticker in tickers:
-                        if ticker in close_data.columns:
-                            prices[ticker] = close_data[ticker].dropna().iloc[-1]
-                else:
-                    prices[tickers[0]] = data['Close'].dropna().iloc[-1]
-            else:
-                # download 실패 시 t.fast_info 시도
-                for ticker in tickers:
+            # 1. 종가 다운로드 시도 (1분 간격 제거 → 5분 간격으로 변경하여 레이트 제한 완화)
+            try:
+                data = cls._yf_download_with_retry(
+                    tickers, period='1d', interval='5m', progress=False,
+                    max_retries=2  # 재시도 횟수 축소
+                )
+                if not data.empty:
+                    if len(tickers) > 1:
+                        close_data = data['Close']
+                        for ticker in tickers:
+                            if ticker in close_data.columns:
+                                prices[ticker] = close_data[ticker].dropna().iloc[-1]
+                    else:
+                        prices[tickers[0]] = data['Close'].dropna().iloc[-1]
+            except Exception as e1:
+                print(f"⚠️ 1분/5분봉 다운로드 실패: {e1}")
+                pass
+
+            # 2. 여전히 부족한 데이터는 fast_info로 채움 (레이트 제한에 더 강함)
+            for ticker in tickers:
+                if ticker not in prices:
                     try:
                         t = yf.Ticker(ticker)
                         prices[ticker] = t.fast_info['last_price']
-                    except: pass
+                        print(f"✓ {ticker} fast_info에서 조회")
+                    except Exception as e2:
+                        print(f"⚠️ {ticker} 현재가 조회 실패: {e2}")
+                        prices[ticker] = None
         except Exception as e:
-            print(f"현재가 수집 오류: {e}")
+            print(f"❌ 현재가 수집 오류: {e}")
+
+        # session_state 캐싱 저장
+        if use_cache and hasattr(st, 'session_state'):
+            st.session_state[cache_key] = prices
+            st.session_state[time_key]  = now
+
         return prices
+
+    @staticmethod
+    def get_price(ticker, price_map=None):
+        """단일 티커 현재가 조회 — 전역 공용 함수.
+
+        1순위: price_map dict에서 조회 (대소문자 무관)
+        2순위: yfinance fast_info
+        3순위: yfinance history 최근 종가
+
+        Parameters
+        ----------
+        ticker    : str   — 티커 심볼 (예: 'QQQ', 'TQQQ')
+        price_map : dict | None  — 미리 조회된 가격 dict (fetch_current_prices 결과 등)
+
+        Returns
+        -------
+        float — 가격, 조회 실패 시 0.0
+        """
+        if price_map:
+            p = price_map.get(ticker) or price_map.get(ticker.upper()) or price_map.get(ticker.lower())
+            if p:
+                return float(p)
+        try:
+            t = yf.Ticker(ticker)
+            price = (getattr(t.fast_info, 'last_price', None)
+                     or getattr(t.fast_info, 'regularMarketPrice', None))
+            if price:
+                return float(price)
+            hist = t.history(period='2d')
+            if not hist.empty and 'Close' in hist.columns:
+                return float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+        return 0.0
+
+    @staticmethod
+    def get_prices(tickers, price_map=None):
+        """복수 티커 현재가 배치 조회 — 전역 공용 함수.
+
+        1순위: price_map에서 이미 있는 것 재사용
+        2순위: 누락된 티커만 yf.download 배치 조회
+        3순위: 여전히 없는 티커는 fast_info 개별 fallback
+
+        Parameters
+        ----------
+        tickers   : list[str]
+        price_map : dict | None  — 부분적으로 채워진 가격 dict (업데이트 후 반환)
+
+        Returns
+        -------
+        dict[str, float]  — {TICKER: price}
+        """
+        result = {}
+        if price_map:
+            for t in tickers:
+                p = price_map.get(t) or price_map.get(t.upper())
+                if p:
+                    result[t.upper()] = float(p)
+
+        missing = [t for t in tickers if t.upper() not in result]
+        if not missing:
+            return result
+
+        # 배치 다운로드
+        try:
+            data = yf.download(missing, period='1d', auto_adjust=True, progress=False)
+            if not data.empty and 'Close' in data.columns:
+                close = data['Close']
+                if hasattr(close, 'columns'):
+                    for t in missing:
+                        if t in close.columns and not close[t].dropna().empty:
+                            result[t.upper()] = float(close[t].dropna().iloc[-1])
+                else:
+                    if not close.dropna().empty:
+                        result[missing[0].upper()] = float(close.dropna().iloc[-1])
+        except Exception:
+            pass
+
+        # 여전히 없는 티커 → fast_info 개별 fallback
+        still_missing = [t for t in missing if t.upper() not in result]
+        for t in still_missing:
+            price = DataService.get_price(t)
+            if price:
+                result[t.upper()] = price
+
+        return result
 
     @classmethod
     def inject_virtual_close(cls, data_dict, current_prices, vxn_df, fg_df=None):

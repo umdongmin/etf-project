@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from core.portfolio_manager import PortfolioManager
+from core.session_keys import SK
 
 
 # ── 색상/스타일 헬퍼 ─────────────────────────────────────────────────────────
@@ -132,7 +133,7 @@ class PortfolioRealtimeView:
         """, unsafe_allow_html=True)
 
         # ── 자동 신호 계산 (페이지 로드 시) ────────────────────────────────
-        result = st.session_state.get("portfolio_realtime_result")
+        result = st.session_state.get(SK.PORTFOLIO_REALTIME_RESULT)
 
         # 신호가 없거나 새로운 페이지 진입이면 자동 계산
         if result is None:
@@ -151,7 +152,7 @@ class PortfolioRealtimeView:
                     )
                     if result:
                         result['_calc_time'] = datetime.datetime.now().strftime('%H:%M:%S')
-                        st.session_state["portfolio_realtime_result"] = result
+                        st.session_state[SK.PORTFOLIO_REALTIME_RESULT] = result
                     else:
                         raise ValueError("신호 계산 결과 없음")
                 except Exception as e:
@@ -163,7 +164,7 @@ class PortfolioRealtimeView:
         col_btn, col_status = st.columns([2, 5])
         with col_btn:
             if st.button("🔄 새로고침", use_container_width=True):
-                st.session_state.pop("portfolio_realtime_result", None)
+                st.session_state.pop(SK.PORTFOLIO_REALTIME_RESULT, None)
                 st.rerun()
 
         with col_status:

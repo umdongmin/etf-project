@@ -772,7 +772,7 @@ class PortfolioView:
         Returns:
             dict | None  — predict_portfolio_today() 결과, 실패 시 None
         """
-        from core.signal_service import compute_signals
+        from core.signal_service import get_cached_signals
 
         fee_rate       = st.session_state.get('global_fee_rate', 0.001) or 0.001
         integer_shares = st.session_state.get('global_integer_shares', True)
@@ -780,10 +780,8 @@ class PortfolioView:
         if sidebar_start:
             start_date = sidebar_start
 
-        return compute_signals(
+        return get_cached_signals(
             portfolio_name, data_dict, fg_df, vxn_df, macro_df, news_df, start_date,
             cur_prices=cur_prices,
-            fee_rate=fee_rate,
-            integer_shares=integer_shares,
         )
 

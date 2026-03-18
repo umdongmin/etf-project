@@ -15,7 +15,6 @@ from core.storage import StrategyStorage
 from core.engine import StrategyEngine
 from ui.backtest_view import BacktestView
 from ui.history_view import HistoryLabView
-from ui.quant_lab_view import QuantLabView
 from ui.intelligence_view import IntelligenceView
 from ui.portfolio_view import PortfolioView
 from ui.portfolio_realtime_view import PortfolioRealtimeView
@@ -38,7 +37,6 @@ class GoldenStrategyApp:
             "🛰️ 실시간 모니터링",
             "💼 자산 관리",
             "📈 포트폴리오 매니저",
-            "🔬 퀀트 분석 연구실",
             "📜 주식 전략 설정",
             "📉 채권 전략 설정",
             "🧠 AI 뉴스 분석 리포트"
@@ -345,12 +343,6 @@ class GoldenStrategyApp:
             PortfolioView.render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df,
                                               start_d or data_dict['QQQ'].index.min().date(),
                                               datetime.date.today())
-        elif menu == "🔬 퀀트 분석 연구실":
-            QuantLabView.render(
-                data_dict, fg_df, vxn_df, news_df, 
-                cp['leverage_asset'], cp['base_asset'], cp['trade_at'], 
-                cp, smart_params=smart_params, start_d=start_d, end_d=end_d
-            )
         elif menu == "📈 포트폴리오 매니저":
             PortfolioView.render(data_dict, fg_df, vxn_df, macro_df, news_df, start_d, end_d)
         elif menu == "📜 주식 전략 설정":

@@ -437,6 +437,19 @@ class AssetStorage:
                 )
             ''')
 
+            # [6] account_sync_config 테이블 (동기화 기준 총자본 저장)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS account_sync_config (
+                    id               SERIAL PRIMARY KEY,
+                    account_id       INT NOT NULL REFERENCES accounts(id) UNIQUE,
+                    total_capital    DECIMAL(18,2) NOT NULL DEFAULT 0,
+                    capital_currency TEXT DEFAULT 'USD',
+                    last_synced_at   TIMESTAMPTZ DEFAULT NOW(),
+                    notes            TEXT,
+                    updated_at       TIMESTAMPTZ DEFAULT NOW()
+                )
+            ''')
+
             # 인덱스 생성
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_holdings_account ON holdings(account_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON transactions(account_id, tx_date DESC)')
@@ -963,4 +976,81 @@ class AssetStorage:
             return True
         except Exception as e:
             print(f"Mark Signal Events Executed Error: {e}")
+            return False
+
+    # --- Sync Config Methods ---
+
+    @classmethod
+    def save_sync_config(cls, account_id, total_capital, currency='USD', notes=None):
+        """계좌 총자본 동기화 설정 저장 (upsert)"""
+        cls._init_asset_db()
+        try:
+            conn = cls._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO account_sync_config (account_id, total_capital, capital_currency, notes, last_synced_at, updated_at)
+                VALUES (%s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (account_id) DO UPDATE SET
+                    total_capital    = EXCLUDED.total_capital,
+                    capital_currency = EXCLUDED.capital_currency,
+                    notes            = EXCLUDED.notes,
+                    last_synced_at   = NOW(),
+                    updated_at       = NOW()
+            ''', (account_id, total_capital, currency, notes))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Save Sync Config Error: {e}")
+            return False
+
+    @classmethod
+    def load_sync_config(cls, account_id):
+        """계좌 총자본 동기화 설정 조회"""
+        cls._init_asset_db()
+        try:
+            conn = cls._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT total_capital, capital_currency, last_synced_at, notes
+                FROM account_sync_config
+                WHERE account_id = %s
+            ''', (account_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return {
+                    'total_capital': float(row[0]),
+                    'currency': row[1],
+                    'last_synced_at': row[2],
+                    'notes': row[3]
+                }
+            return None
+        except Exception as e:
+            print(f"Load Sync Config Error: {e}")
+            return None
+
+    @classmethod
+    def upsert_holding_qty(cls, account_id, asset_id, quantity):
+        """holdings 수량만 직접 upsert (동기화 전용 — avg_cost/total_cost 재계산 없음)"""
+        cls._init_asset_db()
+        try:
+            conn = cls._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO holdings (account_id, asset_id, quantity, last_updated)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (account_id, asset_id) DO UPDATE SET
+                    quantity     = EXCLUDED.quantity,
+                    last_updated = NOW()
+            ''', (account_id, asset_id, quantity))
+            conn.commit()
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Upsert Holding Qty Error: {e}")
             return False
