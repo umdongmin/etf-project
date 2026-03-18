@@ -271,8 +271,10 @@ def get_cached_signals(
     from core.session_keys import SK
 
     mode      = 'realtime' if cur_prices else 'closing'
-    cache_key = SK.sig_cache(portfolio_name, mode)
-    time_key  = SK.sig_cache_ts(portfolio_name, mode)
+    # start_date를 캐시 키에 포함 → 날짜 변경 시 자동 재계산
+    date_str  = str(start_date) if start_date else 'all'
+    cache_key = SK.sig_cache(portfolio_name, f"{mode}_{date_str}")
+    time_key  = SK.sig_cache_ts(portfolio_name, f"{mode}_{date_str}")
 
     now = datetime.datetime.now()
     cached    = st.session_state.get(cache_key)

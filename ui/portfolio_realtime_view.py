@@ -135,6 +135,11 @@ class PortfolioRealtimeView:
         # ── 자동 신호 계산 (페이지 로드 시) ────────────────────────────────
         result = st.session_state.get(SK.PORTFOLIO_REALTIME_RESULT)
 
+        # 날짜/포트폴리오 변경 시 캐시 무효화
+        _current_cache_key = f"{portfolio_name}|{start_date}"
+        if result is not None and result.get('_cache_key') != _current_cache_key:
+            result = None
+
         # 신호가 없거나 새로운 페이지 진입이면 자동 계산
         if result is None:
             with st.spinner("포트폴리오 신호 계산 중... (현재가 조회 포함)"):
@@ -152,6 +157,7 @@ class PortfolioRealtimeView:
                     )
                     if result:
                         result['_calc_time'] = datetime.datetime.now().strftime('%H:%M:%S')
+                        result['_cache_key'] = _current_cache_key
                         st.session_state[SK.PORTFOLIO_REALTIME_RESULT] = result
                     else:
                         raise ValueError("신호 계산 결과 없음")

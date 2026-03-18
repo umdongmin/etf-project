@@ -1,4 +1,6 @@
 import streamlit as st
+from dotenv import load_dotenv
+load_dotenv()  # .env 파일에서 환경변수 로드 (FRED_API_KEY 등)
 
 # [중요] Streamlit 설정은 모든 출력 및 다른 라이브러리 실행보다 먼저 호출되어야 함
 st.set_page_config(page_title="ETF Golden Strategy", page_icon="📈", layout="wide")

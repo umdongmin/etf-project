@@ -1699,6 +1699,9 @@ class StrategyEngine:
             params = {**_bond_defaults, **(params or {})}
 
         # ─ F1: FF금리 상태머신 ─
+        if 'ff_rate' not in combined.columns:
+            print("[Bond] macro_df에 ff_rate 없음 → Bond 전략 스킵 (FRED 데이터 필요)")
+            return pd.DataFrame(), pd.DataFrame(), []
         combined['ff_1m_change'] = combined['ff_rate'].diff(21)
         f1_states = []
         current_f1, days_frozen = 'NEUTRAL', 0

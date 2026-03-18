@@ -5,8 +5,15 @@ import requests
 import datetime
 import time
 import os
+import json
+from pathlib import Path
 import streamlit as st
 from core.news_service import NewsService
+
+CACHE_DIR = Path(__file__).parent.parent / "data" / "cache"
+# 캐시에 저장할 원시 컬럼 (지표 제외)
+_OHLCV_COLS = ['Open', 'High', 'Low', 'Close', 'Volume']
+_VXN_COLS   = ['VIX', 'VXN']
 
 class DataService:
     """데이터 수집 및 전처리를 담당하는 클래스"""
@@ -50,6 +57,85 @@ class DataService:
                     else:
                         return pd.DataFrame()
         return pd.DataFrame()
+
+    # ──────────────────────────────────────────────
+    # Parquet 파일 캐시 (앱 기동 속도 개선 핵심)
+    # ──────────────────────────────────────────────
+
+    @classmethod
+    def _load_price_cache(cls):
+        """parquet 캐시에서 raw OHLCV + VIX/VXN 로드.
+
+        Returns
+        -------
+        raw_dict  : dict[ticker, DataFrame]  — OHLCV only
+        vxn_raw   : DataFrame                — VIX/VXN columns
+        last_date : str | None               — 'YYYY-MM-DD', 없으면 None
+        """
+        meta_path = CACHE_DIR / "cache_meta.json"
+        if not meta_path.exists():
+            return {}, pd.DataFrame(), None
+        try:
+            with open(meta_path, encoding='utf-8') as f:
+                meta = json.load(f)
+            last_date = meta.get('last_date')
+            if not last_date:
+                return {}, pd.DataFrame(), None
+
+            tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TBF', 'BIL', 'TMF', 'TMV', '^TNX']
+            raw_dict = {}
+            for ticker in tickers:
+                safe = ticker.replace('^', '_')
+                path = CACHE_DIR / f"raw_{safe}.parquet"
+                if path.exists():
+                    raw_dict[ticker] = pd.read_parquet(path)
+
+            vxn_raw = pd.DataFrame()
+            vxn_path = CACHE_DIR / "raw_vix_vxn.parquet"
+            if vxn_path.exists():
+                vxn_raw = pd.read_parquet(vxn_path)
+
+            print(f"[Cache] 로드 완료: {len(raw_dict)}개 티커, 마지막 날짜: {last_date}")
+            return raw_dict, vxn_raw, last_date
+        except Exception as e:
+            print(f"[Cache] 로드 실패 (전체 다운로드로 대체): {e}")
+            return {}, pd.DataFrame(), None
+
+    @classmethod
+    def _save_price_cache(cls, raw_dict, vxn_raw, last_date_str):
+        """raw OHLCV + VIX/VXN 를 parquet 캐시로 저장."""
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            for ticker, df in raw_dict.items():
+                safe = ticker.replace('^', '_')
+                cols = [c for c in _OHLCV_COLS if c in df.columns]
+                df[cols].to_parquet(CACHE_DIR / f"raw_{safe}.parquet")
+
+            if not vxn_raw.empty:
+                cols = [c for c in _VXN_COLS if c in vxn_raw.columns]
+                if cols:
+                    vxn_raw[cols].to_parquet(CACHE_DIR / "raw_vix_vxn.parquet")
+
+            meta = {
+                'last_date': last_date_str,
+                'updated_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            with open(CACHE_DIR / "cache_meta.json", 'w', encoding='utf-8') as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+            print(f"[Cache] 저장 완료: {len(raw_dict)}개 티커, 마지막 날짜: {last_date_str}")
+        except Exception as e:
+            print(f"[Cache] 저장 실패 (무시하고 계속): {e}")
+
+    @staticmethod
+    def _merge_raw(cached: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+        """캐시 DataFrame + 신규 DataFrame 병합 (중복 제거, 정렬)."""
+        if cached.empty:
+            return new
+        if new.empty:
+            return cached
+        merged = pd.concat([cached, new])
+        merged = merged[~merged.index.duplicated(keep='last')].sort_index()
+        return merged
 
     @staticmethod
     def calculate_indicators(df):
@@ -207,12 +293,28 @@ class DataService:
 
     @classmethod
     def fetch_live_data(cls, start_date='2010-01-01'):
-        print(f"라이브 데이터 수집 시작 (시작일: {start_date})...")
         # KST(UTC+9) 강제 적용
         now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
-        end_date = now_kst.strftime('%Y-%m-%d')
-        # start_date = '2010-01-01'  # 🌟 파라미터로 대체됨
-        
+        # yfinance end는 exclusive → 내일 날짜를 end로 사용해야 오늘 데이터 포함
+        end_date     = now_kst.strftime('%Y-%m-%d')           # 필터링용 (오늘)
+        end_date_yf  = (now_kst + datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # yfinance 전달용 (내일)
+
+        # ── Parquet 캐시 로드 ──────────────────────────────
+        cache_raw_dict, cache_vxn_raw, cache_last_date = cls._load_price_cache()
+        if cache_last_date:
+            cache_last_dt = pd.to_datetime(cache_last_date)
+            incremental_start = (cache_last_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+            if incremental_start <= end_date_yf:
+                start_date = incremental_start
+                print(f"[Cache] 증분 조회: {start_date} ~ {end_date_yf}")
+            else:
+                # 캐시가 오늘까지 최신 → yfinance 조회 불필요
+                start_date = None
+                print(f"[Cache] 최신 상태 (마지막: {cache_last_date}). yfinance 스킵.")
+        else:
+            print(f"라이브 데이터 수집 시작 (시작일: {start_date})...")
+        # ───────────────────────────────────────────────────
+
         data_dict = {}
         tickers = ['QQQ', 'QLD', 'TQQQ', 'TLT', 'TBF', 'BIL', 'TMF', 'TMV', '^TNX']
         
@@ -223,114 +325,150 @@ class DataService:
         # [신규] 장 마감(16:00) 이후거나 주말인 경우 '오늘' 데이터도 확정으로 간주
         is_market_closed = now_est.hour >= 16 or now_est.weekday() >= 5
 
+        # ── raw OHLCV 수집 (start_date=None 이면 캐시만 사용) ──────────
+        new_raw_dict = {}   # 신규 다운로드분 raw OHLCV
+        new_vxn_raw  = pd.DataFrame()
+        vxn_df       = pd.DataFrame()
+
+        # 증분 구간이 7일 이하면 재시도 1회만 (실패해도 캐시로 충분)
+        incremental_days = (pd.to_datetime(end_date_yf) - pd.to_datetime(start_date)).days if start_date else 0
+        is_short_increment = cache_last_date is not None and incremental_days <= 7
+        yf_max_retries = 1 if is_short_increment else 3
+
         try:
-            print(f"메인 티커 데이터 다운로드 중: {tickers}...")
-            full_data = cls._yf_download_with_retry(tickers, start=start_date, end=end_date, progress=False, group_by='ticker')
-            print("메인 데이터 다운로드 완료. 처리 중...")
-            for ticker in tickers:
-                # yfinance 1.0: MultiIndex(Price, Ticker) 또는 group_by='ticker'로 MultiIndex(Ticker, Price) 반환
-                # 두 형식 모두 안전하게 처리
-                try:
-                    if isinstance(full_data.columns, pd.MultiIndex):
-                        if ticker in full_data.columns.get_level_values(0):
+            if start_date is not None:
+                print(f"메인 티커 데이터 다운로드 중: {tickers}...")
+                full_data = cls._yf_download_with_retry(tickers, start=start_date, end=end_date_yf, progress=False, group_by='ticker', max_retries=yf_max_retries)
+                print("메인 데이터 다운로드 완료. 처리 중...")
+                for ticker in tickers:
+                    try:
+                        if isinstance(full_data.columns, pd.MultiIndex):
+                            if ticker in full_data.columns.get_level_values(0):
+                                df_raw = full_data[ticker]
+                            elif ticker in full_data.columns.get_level_values(1):
+                                df_raw = full_data.xs(ticker, level=1, axis=1)
+                            else:
+                                continue
+                        elif ticker in full_data:
                             df_raw = full_data[ticker]
-                        elif ticker in full_data.columns.get_level_values(1):
-                            df_raw = full_data.xs(ticker, level=1, axis=1)
                         else:
                             continue
-                    elif ticker in full_data:
-                        df_raw = full_data[ticker]
-                    else:
+                        if df_raw.empty:
+                            continue
+                        if isinstance(df_raw, pd.Series):
+                            df_raw = df_raw.to_frame(name='Close')
+                        if isinstance(df_raw.columns, pd.MultiIndex):
+                            df_raw.columns = df_raw.columns.get_level_values(0)
+                    except Exception as e:
+                        print(f"  [{ticker}] 데이터 추출 실패: {e}")
                         continue
-                    if df_raw.empty:
-                        continue
-                    if isinstance(df_raw, pd.Series):
-                        df_raw = df_raw.to_frame(name='Close')
-                    # 단일 티커 추출 후 MultiIndex 제거
-                    if isinstance(df_raw.columns, pd.MultiIndex):
-                        df_raw.columns = df_raw.columns.get_level_values(0)
-                except Exception as e:
-                    print(f"  [{ticker}] 데이터 추출 실패: {e}")
-                    continue
-                df = df_raw.copy()
-                # [신규] 장중 불완전한 데이터 필터링 (로직 고도화)
-                if df.index[-1].date() >= today_est:
-                    if not is_market_closed:
-                        # ⚠️ 장중(16시 이전)일 때는 아직 종가가 확정되지 않았으므로 제외 (프리뷰에서만 활용)
-                        df = df[df.index.date < today_est]
-                    else:
-                        # ✅ 장 마감 이후에는 '오늘' 데이터를 확정 종가로 포함
-                        pass
 
-                df = df.ffill().bfill()
+                    # 장중 불완전 데이터 필터링
+                    if not df_raw.empty and df_raw.index[-1].date() >= today_est:
+                        if not is_market_closed:
+                            df_raw = df_raw[df_raw.index.date < today_est]
+                    new_raw_dict[ticker] = df_raw
+
+            # ── 캐시와 병합 후 지표 계산 ──────────────────────────────
+            merged_raw_dict = {}
+            for ticker in tickers:
+                cached = cache_raw_dict.get(ticker, pd.DataFrame())
+                new    = new_raw_dict.get(ticker, pd.DataFrame())
+                merged = cls._merge_raw(cached, new)
+                if not merged.empty:
+                    merged_raw_dict[ticker] = merged
+
+            for ticker, df_raw in merged_raw_dict.items():
+                df = df_raw.ffill().bfill()
                 df = cls.calculate_indicators(df)
                 data_dict[ticker] = df
             print(f"티커별 지표 계산 완료 ({len(data_dict)}개 티커)")
 
-            # 핵심 티커 누락 시 개별 재시도
-            critical = ['QQQ', 'TQQQ', 'TLT', 'TMF', 'TBF']
-            missing = [t for t in critical if t not in data_dict]
-            if missing:
-                print(f"[경고] 누락 티커 개별 재시도: {missing}")
-                time.sleep(5)
-                for t in missing:
-                    try:
-                        raw = cls._yf_download_with_retry(t, start=start_date, end=end_date, progress=False)
-                        if not raw.empty:
-                            df = raw.copy()
-                            if isinstance(df.columns, pd.MultiIndex):
-                                df.columns = df.columns.get_level_values(0)
-                            df = df.ffill().bfill()
-                            df = cls.calculate_indicators(df)
-                            data_dict[t] = df
-                            print(f"  [{t}] 개별 재시도 성공 ({len(df)}행)")
-                    except Exception as e:
-                        print(f"  [{t}] 개별 재시도 실패: {e}")
+            # 핵심 티커 누락 시 개별 재시도 (신규 다운로드 구간에서만)
+            if start_date is not None:
+                critical = ['QQQ', 'TQQQ', 'TLT', 'TMF', 'TBF']
+                missing = [t for t in critical if t not in data_dict]
+                if missing:
+                    print(f"[경고] 누락 티커 개별 재시도: {missing}")
+                    time.sleep(5)
+                    for t in missing:
+                        try:
+                            raw = cls._yf_download_with_retry(t, start=start_date, end=end_date_yf, progress=False, max_retries=yf_max_retries)
+                            if not raw.empty:
+                                if isinstance(raw.columns, pd.MultiIndex):
+                                    raw.columns = raw.columns.get_level_values(0)
+                                merged = cls._merge_raw(cache_raw_dict.get(t, pd.DataFrame()), raw)
+                                df = merged.ffill().bfill()
+                                df = cls.calculate_indicators(df)
+                                data_dict[t] = df
+                                merged_raw_dict[t] = merged
+                                print(f"  [{t}] 개별 재시도 성공 ({len(df)}행)")
+                        except Exception as e:
+                            print(f"  [{t}] 개별 재시도 실패: {e}")
 
-            # 핵심 티커가 여전히 없으면 캐시 저장 방지 (예외 발생)
+            # 핵심 티커가 여전히 없으면: 캐시가 있으면 경고만, 없으면 예외
             still_missing = [t for t in ['QQQ', 'TLT'] if t not in data_dict]
             if still_missing:
-                raise RuntimeError(f"핵심 티커 로드 실패 (캐시 저장 안함): {still_missing}")
+                if is_short_increment:
+                    print(f"[Cache] 증분 조회 실패 → 캐시 데이터 사용 (누락: {still_missing})")
+                else:
+                    raise RuntimeError(f"핵심 티커 로드 실패 (캐시 저장 안함): {still_missing}")
 
-            # VIX 및 VXN 데이터 별도 수집 (동기화)
-            # VIX 및 VXN 데이터 별도 수집 (동기화)
+            # ── VIX / VXN ─────────────────────────────────────────────
             try:
-                # 개별 다운로드로 MultiIndex 문제 회피 및 안정성 확보
-                v_tickers = {'VIX': '^VIX', 'VXN': '^VXN'}
-                v_data_list = []
-                for name, ticker in v_tickers.items():
-                    print(f"{name} ({ticker}) 다운로드 중...")
-                    raw = cls._yf_download_with_retry(ticker, start=start_date, end=end_date, progress=False)
-                    if not raw.empty:
-                        c_data = raw['Close']
-                        s = c_data.iloc[:, 0].copy() if isinstance(c_data, pd.DataFrame) else c_data.copy()
-                        s.name = name
-                        # 인덱스 정규화 (시간 제거)
-                        try: s.index = s.index.tz_localize(None).normalize()
-                        except: s.index = s.index.normalize()
-                        v_data_list.append(s)
-                
-                vxn_df = pd.DataFrame()
-                if v_data_list:
-                    vxn_df = pd.concat(v_data_list, axis=1)
-                    vxn_df = vxn_df[~vxn_df.index.duplicated(keep='first')]
-                    
-                    # [신규] VIX/VXN 이전치(Prev) 추가 (엔진 호환성)
+                if start_date is not None:
+                    v_tickers = {'VIX': '^VIX', 'VXN': '^VXN'}
+                    v_data_list = []
+                    for name, ticker in v_tickers.items():
+                        print(f"{name} ({ticker}) 다운로드 중...")
+                        raw = cls._yf_download_with_retry(ticker, start=start_date, end=end_date_yf, progress=False, max_retries=yf_max_retries)
+                        if not raw.empty:
+                            c_data = raw['Close']
+                            s = c_data.iloc[:, 0].copy() if isinstance(c_data, pd.DataFrame) else c_data.copy()
+                            s.name = name
+                            try: s.index = s.index.tz_localize(None).normalize()
+                            except: s.index = s.index.normalize()
+                            v_data_list.append(s)
+                    if v_data_list:
+                        new_vxn_raw = pd.concat(v_data_list, axis=1)
+                        new_vxn_raw = new_vxn_raw[~new_vxn_raw.index.duplicated(keep='first')]
+
+                # 캐시와 병합
+                merged_vxn = cls._merge_raw(cache_vxn_raw, new_vxn_raw)
+                if not merged_vxn.empty:
+                    vxn_df = merged_vxn.copy()
+                    # 장중 필터링
+                    if vxn_df.index[-1].date() >= today_est and not is_market_closed:
+                        vxn_df = vxn_df[vxn_df.index.date < today_est]
+                    vxn_df = vxn_df.ffill().bfill()
                     if 'VIX' in vxn_df.columns: vxn_df['Prev_VIX'] = vxn_df['VIX'].shift(1)
                     if 'VXN' in vxn_df.columns: vxn_df['Prev_VXN'] = vxn_df['VXN'].shift(1)
-                    
-                    # [신규] VIX/VXN도 장중 데이터 필터링 (마켓 클로즈 여부 반영)
-                    if not vxn_df.empty and vxn_df.index[-1].date() >= today_est:
-                        if not is_market_closed:
-                            vxn_df = vxn_df[vxn_df.index.date < today_est]
-                        
-                    vxn_df = vxn_df.ffill().bfill()
             except Exception as e:
                 print(f"VIX/VXN Download Error: {e}")
-                vxn_df = pd.DataFrame()
+                vxn_df = cache_vxn_raw.copy() if not cache_vxn_raw.empty else pd.DataFrame()
+
+            # ── parquet 캐시 저장 (신규 데이터가 있을 때만) ────────────
+            if start_date is not None and merged_raw_dict:
+                last_dates = [df.index.max() for df in merged_raw_dict.values() if not df.empty]
+                if last_dates:
+                    last_date_str = max(last_dates).strftime('%Y-%m-%d')
+                    cls._save_price_cache(merged_raw_dict, merged_vxn if not merged_vxn.empty else new_vxn_raw, last_date_str)
+
         except Exception as e:
             print(f"Main Download Error: {e}")
-            vxn_df = pd.DataFrame()
+            # 캐시가 있으면 캐시 데이터로 fallback
+            if cache_raw_dict:
+                print("[Cache] 다운로드 실패 → 캐시 데이터로 fallback")
+                for ticker, df_raw in cache_raw_dict.items():
+                    df = df_raw.ffill().bfill()
+                    df = cls.calculate_indicators(df)
+                    data_dict[ticker] = df
+                if not cache_vxn_raw.empty:
+                    vxn_df = cache_vxn_raw.copy().ffill().bfill()
+                    if 'VIX' in vxn_df.columns: vxn_df['Prev_VIX'] = vxn_df['VIX'].shift(1)
+                    if 'VXN' in vxn_df.columns: vxn_df['Prev_VXN'] = vxn_df['VXN'].shift(1)
+            else:
+                vxn_df = pd.DataFrame()
 
         fg_df = pd.DataFrame()
         try:
@@ -367,11 +505,13 @@ class DataService:
             api_key = os.getenv("FRED_API_KEY")
             
             if api_key:
+                # FRED는 월별/분기별 데이터라 항상 전체 기간 조회 (yfinance 증분 start_date와 무관)
+                fred_start = '2010-01-01'
                 for sid, col, lag in macro_series:
                     try:
                         url = (f"https://api.stlouisfed.org/fred/series/observations"
                                f"?series_id={sid}&api_key={api_key}"
-                               f"&file_type=json&observation_start={start_date}&observation_end={end_date}")
+                               f"&file_type=json&observation_start={fred_start}&observation_end={end_date}")
                         r = requests.get(url, timeout=10)
                         if r.status_code == 200:
                             obs = r.json().get('observations', [])
