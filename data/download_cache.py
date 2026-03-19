@@ -3,15 +3,16 @@ parquet 캐시 전체 다운로드 스크립트
 ────────────────────────────────────────────────────────────────
 사용법 (로컬):
     cd c:\TestCode\rebalance_program
-    python scripts/download_cache.py
+    python data/download_cache.py
 
 기능:
     - 2010-01-01 ~ 오늘까지 yfinance 전체 다운로드
+    - FRED 매크로 7개 시리즈 다운로드 (macro_fred.parquet)
     - data/cache/ 폴더에 parquet 파일로 저장
     - 이후 앱 기동 시 마지막 날짜 이후분만 yfinance 조회 (수십 행)
 
 배포 루틴:
-    1. python scripts/download_cache.py
+    1. python data/download_cache.py
     2. git add data/cache/
     3. git push  →  Streamlit Cloud 자동 재배포
 """
@@ -23,6 +24,13 @@ from pathlib import Path
 # 프로젝트 루트를 sys.path에 추가
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
+
+# .env 파일 로드
+try:
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
 
 import datetime
 import json
@@ -157,6 +165,54 @@ def main():
         print(f"  ✓ cache_meta.json — last_date: {last_date_str}")
     else:
         print("  ✗ 저장된 티커 없음 — meta 저장 스킵")
+
+    # ── 4. FRED 매크로 데이터 ─────────────────────────────────
+    print(f"\n[4/4] FRED 매크로 데이터 다운로드")
+    api_key = os.environ.get("FRED_API_KEY")
+    if not api_key:
+        print("  ✗ FRED_API_KEY 환경변수 없음 — 스킵")
+    else:
+        macro_series = [
+            ('DFEDTARU', 'ff_rate',   0),
+            ('CPILFESL', 'core_cpi', 30),
+            ('PPIACO',   'ppi',      14),
+            ('UNRATE',   'unrate',   30),
+            ('NROU',     'nrou',     45),
+            ('T10YIE',   'exp_inf',   0),
+            ('T10Y2Y',   't10y2y',    0),
+        ]
+        macro_data_list = []
+        for sid, col, lag in macro_series:
+            try:
+                url = (f"https://api.stlouisfed.org/fred/series/observations"
+                       f"?series_id={sid}&api_key={api_key}"
+                       f"&file_type=json&observation_start={START_DATE}&observation_end={end_date}")
+                r = requests.get(url, timeout=15)
+                if r.status_code == 200:
+                    obs = r.json().get('observations', [])
+                    temp = pd.DataFrame(obs)
+                    if not temp.empty:
+                        temp['date'] = pd.to_datetime(temp['date'])
+                        temp['value'] = pd.to_numeric(temp['value'], errors='coerce')
+                        temp = temp.set_index('date')[['value']].rename(columns={'value': col})
+                        if lag > 0:
+                            temp.index = temp.index + datetime.timedelta(days=lag)
+                        macro_data_list.append(temp)
+                        print(f"  ✓ {sid} ({col}): {len(temp)}행")
+                else:
+                    print(f"  ✗ {sid}: HTTP {r.status_code}")
+            except Exception as e:
+                print(f"  ✗ {sid} 실패: {e}")
+
+        if macro_data_list:
+            macro_df = pd.concat(macro_data_list, axis=1)
+            now_kst = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Seoul').normalize().tz_localize(None)
+            full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst, freq='D')
+            macro_df = macro_df.reindex(full_idx).ffill().bfill()
+            macro_df.to_parquet(CACHE_DIR / "macro_fred.parquet")
+            print(f"  → macro_fred.parquet 저장 ({len(macro_df)}행)")
+        else:
+            print("  ✗ FRED 데이터 없음 — 저장 스킵")
 
     print(f"\n완료! 저장 위치: {CACHE_DIR}")
     print(f"저장된 티커: {saved_tickers}")
