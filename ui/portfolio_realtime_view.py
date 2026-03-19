@@ -181,12 +181,17 @@ class PortfolioRealtimeView:
             st.warning("신호 계산 실패. 새로고침 버튼을 누르세요.")
             return
 
+        # 실잔고 기반 드리프트 사전 계산 (섹션 1, 3 공통 사용)
+        rb_enriched = PortfolioRealtimeView._enrich_rb_with_holdings(
+            result.get("rebalance", {}), portfolio_manager
+        )
+
         # ── 섹션 1: 포트폴리오 건강도 요약 (항상 표시) ────────────────────
         st.markdown("---")
         st.markdown("#### 📊 포트폴리오 상태 요약")
 
         with st.container():
-            rb = result.get("rebalance", {})
+            rb = rb_enriched
             trend = result.get("trend_mode")
             strategies = result.get("strategies", {})
 
@@ -269,10 +274,26 @@ class PortfolioRealtimeView:
 
         # ── 섹션 3: 리밸런싱 상태 (항상 표시) ────────────────────────────────────────────
         st.markdown("---")
-        st.markdown("#### 리밸런싱 상태")
 
-        rb = result.get("rebalance", {})
-        PortfolioRealtimeView._render_rebalance_section(rb, rebalance_preset, portfolio_manager)
+        _rb_col1, _rb_col2 = st.columns([3, 2])
+        with _rb_col1:
+            st.markdown("#### 리밸런싱 상태")
+        with _rb_col2:
+            # 계좌 선택 (실제 holdings 기반 드리프트용)
+            try:
+                from core.storage import AssetStorage
+                _accounts = AssetStorage.list_accounts()
+                if _accounts:
+                    _acc_names = ["(선택 안함)"] + [a['name'] for a in _accounts]
+                    _default_idx = next((i + 1 for i, a in enumerate(_accounts) if '엄동민' in a['name']), 0)
+                    _sel = st.selectbox("계좌 (실잔고 드리프트)", _acc_names, index=_default_idx,
+                                        key="realtime_account_sel", label_visibility="collapsed")
+                    _acc = next((a for a in _accounts if a['name'] == _sel), None)
+                    st.session_state['realtime_account_id'] = _acc['id'] if _acc else None
+            except Exception:
+                pass
+
+        PortfolioRealtimeView._render_rebalance_section(rb_enriched, rebalance_preset, portfolio_manager)
 
         # ── 섹션 4: Trend 모드 (항상 표시) ───────────────────────────────────────────────
         trend_mode = result.get("trend_mode")
@@ -431,6 +452,99 @@ class PortfolioRealtimeView:
         </div>
         """, unsafe_allow_html=True)
 
+    # ── Holdings 기반 실제 드리프트 계산 ──────────────────────────────────────
+    @staticmethod
+    def _enrich_rb_with_holdings(rb: dict, pm: PortfolioManager) -> dict:
+        """
+        Supabase holdings + 현재가로 전략별 실제 비중을 계산해 rb를 보강.
+        계좌 선택은 session_state의 realtime_account_id 사용.
+        실패 시 원본 rb 반환.
+        """
+        import copy
+        try:
+            from core.storage import AssetStorage
+            import yfinance as yf
+
+            account_id = st.session_state.get('realtime_account_id')
+            if not account_id:
+                return rb
+
+            holdings = AssetStorage.list_holdings(account_id)
+            if not holdings:
+                return rb
+
+            # asset → strategy 매핑 (pm.strategies에서 추출)
+            asset_to_strategy = {}
+            for strat_name, strat_info in pm.strategies.items():
+                params = strat_info.get('params', {})
+                lev_asset  = (params.get('leverage_asset') or '').upper()
+                base_asset = (params.get('base_asset') or '').upper()
+                strat_type = strat_info.get('strat_type', 'equity')
+                # 전략 타입별 관련 자산 목록
+                if strat_type == 'equity':
+                    related = {lev_asset, base_asset, 'QLD', 'TQQQ', 'QQQ'}
+                else:
+                    related = {lev_asset, base_asset, 'TLT', 'TMF', 'TMV', 'TBF', 'BIL', 'IEF'}
+                for a in related:
+                    if a:
+                        asset_to_strategy[a] = strat_name
+
+            # 현재가 조회 (yfinance 단발)
+            tickers = [h['asset_name'].upper() for h in holdings]
+            prices = {}
+            if tickers:
+                try:
+                    raw = yf.download(tickers, period='2d', progress=False, auto_adjust=True)
+                    close = raw['Close'] if 'Close' in raw else raw
+                    last_prices = close.iloc[-1]
+                    prices = {t: float(last_prices[t]) for t in tickers if t in last_prices and not pd.isna(last_prices[t])}
+                except Exception:
+                    return rb
+
+            # 전략별 평가금액 집계
+            strat_values = {n: 0.0 for n in pm.strategies}
+            for h in holdings:
+                ticker = h['asset_name'].upper()
+                qty = float(h['quantity'])
+                price = prices.get(ticker)
+                if price is None or qty <= 0:
+                    continue
+                strat = asset_to_strategy.get(ticker)
+                if strat and strat in strat_values:
+                    strat_values[strat] += qty * price
+
+            total_value = sum(strat_values.values())
+            if total_value <= 0:
+                return rb
+
+            # actual weights 계산
+            actual_weights = {n: strat_values[n] / total_value for n in pm.strategies}
+
+            # rb 보강
+            rb = copy.deepcopy(rb)
+            rb['current_weights_estimated'] = actual_weights
+            rb['holdings_based'] = True
+
+            targets = rb.get('target_weights', {})
+            preset_cfg = pm.custom_preset_cfg or pm.REBALANCE_PRESETS.get(
+                st.session_state.get('portfolio_rebalance_preset', 'hybrid'), {'method': 'none'}
+            )
+            upper_band = preset_cfg.get('upper_band', 0.07)
+            rb_method  = preset_cfg.get('method', 'none')
+
+            drifts = {n: round(actual_weights.get(n, 0) - targets.get(n, 0), 4) for n in targets}
+            rb['drifts'] = drifts
+
+            if rb_method != 'none':
+                max_drift = max(abs(d) for d in drifts.values()) if drifts else 0
+                rb['needed'] = max_drift > upper_band
+                rb['reason'] = 'drift' if rb['needed'] else 'within_band'
+
+            return rb
+        except Exception as e:
+            print(f"[holdings drift] error: {e}")
+            return rb
+
     # ── 리밸런싱 섹션 ────────────────────────────────────────────────────────
     @staticmethod
     def _render_rebalance_section(rb: dict, rebalance_preset: str, pm: PortfolioManager):
@@ -454,6 +568,8 @@ class PortfolioRealtimeView:
             else:
                 st.success("✅ **리밸런싱 불필요** — 비중 정상 범위 내")
 
+            data_source = "실잔고 기반" if rb.get('holdings_based') else "목표비중 추정"
+            st.caption(f"📌 {data_source}")
             st.markdown(f"**밴드 기준:** ±{upper_band*100:.0f}%")
             st.markdown("**전략별 드리프트 (목표 대비)**")
 

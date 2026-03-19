@@ -1694,7 +1694,10 @@ class StrategyEngine:
                           'cycle_use': False,                # F1v2 금리 사이클 감지 활성화
                           'cycle_cut_depth': -0.50,         # 6개월 누적 인하폭 기준 (%)
                           'cycle_hike_depth':  0.50,        # 6개월 누적 인상폭 기준 (%)
-                          'cycle_streak':       60}         # 인하/인상 지속 최소 일수
+                          'cycle_streak':       60,         # 인하/인상 지속 최소 일수
+                          'fomc_use': True,                  # FOMC 회의록 감성 분석 활성화 (그리드 스캔 검증 완료)
+                          'fomc_hi':  0.5,                  # 매파 임계값: fomc_sentiment > fomc_hi → final_state 강제 RISING
+                          'fomc_lo': -0.3}                  # 비둘기 임계값: fomc_sentiment < fomc_lo → final_state 강제 FALLING (그리드 최적값)
         if params is None or 'ffv_lo' not in params:
             params = {**_bond_defaults, **(params or {})}
 
@@ -1734,6 +1737,13 @@ class StrategyEngine:
             f1v2[rising_mask]  = 'RISING'
             combined['f1_state'] = f1v2
 
+        # ─ F2/F3 필수 컬럼 존재 확인 → 없으면 전략 중단 (잘못된 신호 방지) ─
+        required_macro = ['core_cpi', 'ppi', 'unrate', 'nrou']
+        missing = [c for c in required_macro if c not in combined.columns]
+        if missing:
+            print(f"[Bond] FRED 필수 데이터 누락 {missing} → Bond 전략 스킵 (FRED API 확인 필요)")
+            return pd.DataFrame(), pd.DataFrame(), []
+
         # ─ F2: 인플레이션 ─
         combined['cpi_yoy'] = combined['core_cpi'].pct_change(252).ffill()
         combined['cpi_accel'] = combined['cpi_yoy'].diff(63)
@@ -1764,6 +1774,19 @@ class StrategyEngine:
             c = Counter(votes); top = c.most_common(1)[0]
             return top[0] if top[1] >= 2 else 'NEUTRAL'
         combined['final_state'] = combined.apply(vote_state, axis=1)
+
+        # ─ FOMC 감성 외부 채널 (fomc_use=True 일 때만 활성, 투표 구조 외부 독립 override) ─
+        # fomc_sentiment > fomc_hi  → 매파 확인 → RISING  강제 (채권 회피)
+        # fomc_sentiment < fomc_lo  → 비둘기 확인 → FALLING 강제 (채권 선호)
+        # 그 외 구간 → final_state 유지 (개입 없음)
+        if params.get('fomc_use', False) and 'fomc_sentiment' in combined.columns:
+            _fomc_hi = params.get('fomc_hi',  0.5)
+            _fomc_lo = params.get('fomc_lo', -0.5)
+            _sent = combined['fomc_sentiment'].ffill()
+            hawkish_mask = _sent > _fomc_hi
+            dovish_mask  = _sent < _fomc_lo
+            combined.loc[hawkish_mask, 'final_state'] = 'RISING'
+            combined.loc[dovish_mask,  'final_state'] = 'FALLING'
 
         if 'yc_mom' not in combined.columns and 't10y2y' in combined.columns:
             combined['yc_mom'] = combined['t10y2y'].diff(63)

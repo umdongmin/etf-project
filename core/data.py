@@ -470,90 +470,113 @@ class DataService:
             else:
                 vxn_df = pd.DataFrame()
 
-        fg_df = pd.DataFrame()
-        try:
-            url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            r = requests.get(url, headers=headers, timeout=10)
-            data = r.json()
-            series = data.get('fear_and_greed_historical', {}).get('data', [])
-            fg_df = pd.DataFrame(series)
-            fg_df['x'] = pd.to_datetime(fg_df['x'], unit='ms')
-            fg_df.rename(columns={'x': 'Date', 'y': 'FearGreed'}, inplace=True)
-            fg_df.set_index('Date', inplace=True)
-        except:
-            fg_df = pd.DataFrame(columns=['FearGreed'])
+        fg_df = pd.DataFrame()  # CNN F&G 미사용 — engine.py에서 FG=50 기본값 처리
 
-        # [신규] Bond Strategy를 위한 FRED 데이터 수집
-        fetch_status = {'VXN': 'Pending', 'FearGreed': 'Pending', 'FRED': 'Pending'}
+        # FRED 매크로 데이터 — 캐시 우선 로드, 없거나 오래되면 API 증분 호출
+        fetch_status = {'VXN': 'Pending', 'FRED': 'Pending'}
+        _fred_cache_path = CACHE_DIR / "macro_fred.parquet"
+        _fred_macro_series = [
+            ('DFEDTARU', 'ff_rate',   0),
+            ('CPILFESL', 'core_cpi', 30),
+            ('PPIACO',   'ppi',      14),
+            ('UNRATE',   'unrate',   30),
+            ('NROU',     'nrou',     45),
+            ('T10YIE',   'exp_inf',   0),
+            ('T10Y2Y',   't10y2y',    0),
+        ]
         macro_df = pd.DataFrame()
-        fred_status = 'Pending'
-        try:
-            print("FRED 매크로 데이터 수집 중 (Bond Strategy)...")
-            # macro_backtest.py에서 검증된 7개 시리즈
-            macro_series = [
-                ('DFEDTARU', 'ff_rate', 0),
-                ('CPILFESL', 'core_cpi', 30),
-                ('PPIACO', 'ppi', 14),
-                ('UNRATE', 'unrate', 30),
-                ('NROU', 'nrou', 45),
-                ('T10YIE', 'exp_inf', 0),
-                ('T10Y2Y', 't10y2y', 0)
-            ]
-            
-            macro_data_list = []
-            api_key = os.getenv("FRED_API_KEY")
-            
-            if api_key:
-                # FRED는 월별/분기별 데이터라 항상 전체 기간 조회 (yfinance 증분 start_date와 무관)
-                fred_start = '2010-01-01'
-                for sid, col, lag in macro_series:
-                    try:
-                        url = (f"https://api.stlouisfed.org/fred/series/observations"
-                               f"?series_id={sid}&api_key={api_key}"
-                               f"&file_type=json&observation_start={fred_start}&observation_end={end_date}")
-                        r = requests.get(url, timeout=10)
-                        if r.status_code == 200:
-                            obs = r.json().get('observations', [])
-                            temp = pd.DataFrame(obs)
-                            if not temp.empty:
-                                temp['date'] = pd.to_datetime(temp['date'])
-                                temp['value'] = pd.to_numeric(temp['value'], errors='coerce')
-                                temp = temp.set_index('date')[['value']].rename(columns={'value': col})
-                                if lag > 0:
-                                    temp.index = temp.index + datetime.timedelta(days=lag)
-                                macro_data_list.append(temp)
-                    except Exception as e:
-                        print(f"FRED Fetch Error ({sid}): {e}")
-                
-                if macro_data_list:
-                    # 모든 매크로 데이터 병합 및 일 단위 리인덱싱(오늘까지) 및 ffill
-                    macro_df = pd.concat(macro_data_list, axis=1)
-                    # [수정] 인덱스 정규화 및 리인덱싱으로 빈 날짜 채움
-                    if not macro_df.empty:
-                        # UTC+9 기준 오늘 날짜까지 확장
-                        now_kst = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Seoul').normalize().tz_localize(None)
-                        full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst, freq='D')
-                        macro_df = macro_df.reindex(full_idx).ffill().bfill()
-                    fred_status = 'Success'
-                    fetch_status['FRED'] = 'Success'
-        except Exception as e:
-            print(f"Macro Data Fetch Error: {e}")
-            fred_status = 'Error'
+
+        # 캐시 로드
+        if _fred_cache_path.exists():
+            try:
+                macro_df = pd.read_parquet(_fred_cache_path)
+                print(f"✅ FRED 캐시 로드 (마지막: {macro_df.index[-1].date()})")
+            except Exception as e:
+                print(f"FRED 캐시 로드 실패: {e}")
+
+        # 캐시가 3일 이상 오래됐거나 없으면 API 증분 호출
+        _cache_age = (datetime.date.today() - macro_df.index[-1].date()).days if not macro_df.empty else 999
+        if _cache_age > 3:
+            try:
+                api_key = os.getenv("FRED_API_KEY")
+                if api_key:
+                    fred_start = (macro_df.index[-1].date() - datetime.timedelta(days=7)).strftime('%Y-%m-%d') \
+                        if not macro_df.empty else '2010-01-01'
+                    print(f"FRED API 증분 호출 ({fred_start} 이후)...")
+                    macro_data_list = []
+                    for sid, col, lag in _fred_macro_series:
+                        try:
+                            url = (f"https://api.stlouisfed.org/fred/series/observations"
+                                   f"?series_id={sid}&api_key={api_key}"
+                                   f"&file_type=json&observation_start={fred_start}&observation_end={end_date}")
+                            r = requests.get(url, timeout=10)
+                            if r.status_code == 200:
+                                obs = r.json().get('observations', [])
+                                temp = pd.DataFrame(obs)
+                                if not temp.empty:
+                                    temp['date'] = pd.to_datetime(temp['date'])
+                                    temp['value'] = pd.to_numeric(temp['value'], errors='coerce')
+                                    temp = temp.set_index('date')[['value']].rename(columns={'value': col})
+                                    if lag > 0:
+                                        temp.index = temp.index + datetime.timedelta(days=lag)
+                                    macro_data_list.append(temp)
+                        except Exception as e:
+                            print(f"FRED Fetch Error ({sid}): {e}")
+
+                    if macro_data_list:
+                        new_macro = pd.concat(macro_data_list, axis=1)
+                        if not macro_df.empty:
+                            macro_df = pd.concat([macro_df, new_macro])
+                            macro_df = macro_df[~macro_df.index.duplicated(keep='last')].sort_index()
+                        else:
+                            macro_df = new_macro
+                        if not macro_df.empty:
+                            now_kst = pd.Timestamp.now(tz='UTC').tz_convert('Asia/Seoul').normalize().tz_localize(None)
+                            full_idx = pd.date_range(start=macro_df.index.min(), end=now_kst, freq='D')
+                            macro_df = macro_df.reindex(full_idx).ffill().bfill()
+                        print(f"✅ FRED API 증분 완료 ({len(macro_df)}행)")
+            except Exception as e:
+                print(f"FRED API 호출 실패: {e}")
+
+        if not macro_df.empty:
+            fetch_status['FRED'] = 'Success'
+        else:
+            print("⚠️ FRED 데이터 없음 — Bond 전략 비활성화")
             fetch_status['FRED'] = 'Error'
 
         if not vxn_df.empty and 'VXN' in vxn_df.columns:
             vxn_vals = vxn_df['VXN'].dropna()
             if not vxn_vals.empty:
                 fetch_status['VXN'] = 'Success'
-        if not fg_df.empty: fetch_status['FearGreed'] = 'Success'
 
         # [신규] 채권 데이터에 채권 전용 지표 추가
         if 'TLT' in data_dict:
             # ^TNX를 포함한 전체 종가 데이터를 넘겨 FFV Gap 계산
             prices_all = pd.DataFrame({t: data_dict[t]['Close'] for t in data_dict if 'Close' in data_dict[t].columns})
             macro_df = cls.calculate_bond_indicators(macro_df, prices_all)
-        
+
+        # [신규] FOMC 회의록 감성 점수 주입 (fomc_sentiment: -1.0 ~ +1.0)
+        # fomc_scores.csv → 회의록 발표일 기준 ffill → 일별 시계열로 macro_df에 병합
+        try:
+            fomc_scores_path = Path(__file__).resolve().parent.parent / "data" / "fomc_scores.csv"
+            if fomc_scores_path.exists():
+                fomc_df = pd.read_csv(fomc_scores_path, dtype={"date": str})
+                fomc_df["date"] = pd.to_datetime(fomc_df["date"], format="%Y%m%d")
+                fomc_df = fomc_df.set_index("date")[["score"]].rename(columns={"score": "fomc_sentiment"})
+                fomc_df = fomc_df[~fomc_df.index.duplicated(keep="last")].sort_index()
+
+                if not macro_df.empty:
+                    # macro_df 인덱스 범위에 맞춰 리인덱싱 후 ffill (다음 회의록 전까지 동일 점수 유지)
+                    fomc_df = fomc_df.reindex(macro_df.index).ffill()
+                    macro_df["fomc_sentiment"] = fomc_df["fomc_sentiment"]
+                    print(f"FOMC 감성 점수 주입 완료 ({fomc_df['fomc_sentiment'].notna().sum()}일)")
+                else:
+                    print("macro_df 비어있어 FOMC 감성 점수 스킵")
+            else:
+                print(f"FOMC 감성 점수 파일 없음 (스킵): {fomc_scores_path}")
+        except Exception as e:
+            print(f"FOMC 감성 점수 주입 오류 (무시): {e}")
+
         # [수정] macro_df는 이제 시계열 데이터를 포함함
         # macro_df = pd.DataFrame([macro_data_map])
         fetch_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -562,7 +585,44 @@ class DataService:
         news_df = pd.DataFrame()
 
         print(f"데이터 수집 완료 ({len(data_dict)} 개 티커)")
+
+        # 데이터 검증
+        data_warnings = DataService.validate_data(data_dict)
+        if data_warnings:
+            fetch_status['DataWarnings'] = data_warnings
+            for w in data_warnings:
+                print(f"⚠️ [데이터 검증] {w}")
+        else:
+            fetch_status['DataWarnings'] = []
+
         return data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time
+
+    @classmethod
+    def validate_data(cls, data_dict: dict) -> list:
+        """데이터 유효성 검증 — 최신성 및 필수 컬럼 누락 확인"""
+        warnings = []
+        today = datetime.date.today()
+        # 주말 포함 최대 허용 지연: 3거래일 (금요일 → 수요일까지 허용)
+        max_delay_days = 5
+        required_cols = ['Close', 'RSI', 'MACD']
+
+        for ticker, df in data_dict.items():
+            if df is None or df.empty:
+                warnings.append(f"{ticker}: 데이터 없음")
+                continue
+
+            # ① 최신성 검사
+            last_date = df.index[-1].date()
+            delay = (today - last_date).days
+            if delay > max_delay_days:
+                warnings.append(f"{ticker}: 마지막 데이터 {last_date} ({delay}일 지연)")
+
+            # ③ 필수 컬럼 누락 검사
+            missing = [c for c in required_cols if c not in df.columns or df[c].isna().all()]
+            if missing:
+                warnings.append(f"{ticker}: 컬럼 누락 또는 전체 NaN {missing}")
+
+        return warnings
 
     @classmethod
     def fetch_current_prices(cls, tickers, use_cache=True):

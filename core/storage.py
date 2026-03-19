@@ -879,6 +879,18 @@ class AssetStorage:
                 )
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_signal_events_account ON signal_events(account_id, event_date DESC)')
+            cursor.execute('''
+                DO $$ BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'uq_signal_events_key'
+                    ) THEN
+                        ALTER TABLE signal_events
+                        ADD CONSTRAINT uq_signal_events_key
+                        UNIQUE (account_id, portfolio_name, event_date, strategy_name);
+                    END IF;
+                END $$
+            ''')
             conn.commit()
             conn.close()
         except Exception as e:
@@ -888,7 +900,7 @@ class AssetStorage:
     def save_signal_event(cls, account_id, portfolio_name, strategy_name, strat_type,
                           prev_stage, new_stage, prev_asset, new_asset, action,
                           total_value=None, notes=None, event_date=None):
-        """신호 이벤트 저장"""
+        """신호 이벤트 저장 (같은 날 동일 전략이면 UPDATE, 없으면 INSERT)"""
         cls._init_signal_events_db()
         if event_date is None:
             event_date = datetime.date.today()
@@ -900,6 +912,14 @@ class AssetStorage:
                 (account_id, portfolio_name, event_date, strategy_name, strat_type,
                  prev_stage, new_stage, prev_asset, new_asset, action, total_value, notes)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (account_id, portfolio_name, event_date, strategy_name)
+                DO UPDATE SET
+                    strat_type  = EXCLUDED.strat_type,
+                    new_stage   = EXCLUDED.new_stage,
+                    new_asset   = EXCLUDED.new_asset,
+                    action      = EXCLUDED.action,
+                    total_value = EXCLUDED.total_value,
+                    notes       = EXCLUDED.notes
                 RETURNING id
             ''', (account_id, portfolio_name, event_date, strategy_name, strat_type,
                   prev_stage, new_stage, prev_asset, new_asset, action, total_value, notes))

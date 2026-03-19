@@ -63,6 +63,7 @@ try:
         print("⚠️ Flask 미설치 — dry-run 모드로만 동작합니다.", flush=True)
 
     from core.bot_service import run_tqqq_bot
+    from core.data_updater import run_daily_update
 
     def handle_request():
         import datetime
@@ -98,11 +99,15 @@ try:
         token   = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
+        # 데이터 업데이트 + GitHub push (항상 실행)
+        run_daily_update()
+
+        # Telegram 알림 (신호 있을 때만 발송)
         if token and chat_id:
             run_tqqq_bot(token, chat_id)
-            return "SUCCESS: Daily report sent!", 200
+            return "SUCCESS: Daily update & report done!", 200
         else:
-            return "ERROR: Missing API Keys.", 500
+            return "SUCCESS: Daily update done (Telegram keys missing).", 200
 
     if app:
         app.add_url_rule('/', 'handle_request', handle_request, methods=['GET', 'POST'])

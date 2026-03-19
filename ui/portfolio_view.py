@@ -32,7 +32,8 @@ class PortfolioView:
                        for c in st.session_state.get('portfolio_configs', []))
         )
         if _needs_portfolio_init:
-            _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
+            _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60,
+                                    'fomc_use': True, 'fomc_hi': 0.5, 'fomc_lo': -0.3}
             _default_bond_lev_params = copy.deepcopy(st.session_state.get('current_bond_lev_params')) or None
             # DB에서 TQQQ 전략 이름 자동 탐색 (TQQQ 포함 이름 우선, 없으면 첫 번째)
             _eq_strats = StrategyStorage.list_strategies(category='equity')
@@ -317,7 +318,8 @@ class PortfolioView:
             st.error(f"⚠️ 포트폴리오 '{selected_portfolio_name}'을 불러올 수 없습니다.")
             return
 
-        _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60}
+        _default_bond_params = {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60,
+                                'fomc_use': True, 'fomc_hi': 0.5, 'fomc_lo': -0.3}
         _default_bond_lev    = _copy.deepcopy(st.session_state.get('current_bond_lev_params')) or None
 
         # 포트폴리오 configs에서 자산별 정보 추출
@@ -426,7 +428,8 @@ class PortfolioView:
                     smart_params=smart_p, fast_mode=True,
                 ), strat_type='equity')
             else:
-                bond_params = params if params else {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.40, 'tlt_rsi_max': 60}
+                bond_params = params if params else {'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.40, 'tlt_rsi_max': 60,
+                                                     'fomc_use': True, 'fomc_hi': 0.5, 'fomc_lo': -0.3}
                 pm.register_strategy(name, weight, dict(
                     data_dict=data_dict, macro_df=macro_df,
                     start_date=start_date, end_date=end_date,

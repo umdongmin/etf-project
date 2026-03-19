@@ -20,42 +20,39 @@ class AssetView:
 
         account_names = [a['name'] for a in accounts]
         default_acc_idx = next((i for i, a in enumerate(accounts) if '엄동민' in a['name']), 0)
-        selected_account_name = st.selectbox("계좌 선택", account_names, index=default_acc_idx)
+
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            selected_account_name = st.selectbox("계좌 선택", account_names, index=default_acc_idx, label_visibility="collapsed")
+
         selected_account = next((a for a in accounts if a['name'] == selected_account_name), None)
         account_id = selected_account['id']
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 포트폴리오 현황", "🔔 신호 이벤트", "📋 거래 내역", "🔀 자산 동기화", "⚙️ 계좌 설정"])
+        tab1, tab2, tab3 = st.tabs(["📡 신호 & 주문지시", "📋 거래 내역", "⚙️ 설정"])
 
         with tab1:
-            self._render_portfolio_status(account_id)
+            self._render_signal_orders(account_id)
         with tab2:
-            self._render_signal_events(account_id)
-        with tab3:
             self._render_transactions(account_id)
-        with tab4:
-            SyncView().render(account_id=account_id)
-        with tab5:
-            self._render_account_setup(account_id)
+        with tab3:
+            self._render_settings(account_id)
 
     # ══════════════════════════════════════════════════════
-    # Tab 1: 포트폴리오 현황
+    # Tab 1: 신호 & 주문지시 (핵심)
     # ══════════════════════════════════════════════════════
-    def _render_portfolio_status(self, account_id):
+    def _render_signal_orders(self, account_id):
         from core.storage import StrategyStorage
 
-        st.header("📊 포트폴리오 현황")
-
-        # ── 포트폴리오 선택 ──────────────────────────────────────────
+        # ── 포트폴리오 선택 + 신호 갱신 ─────────────────────────────
         portfolio_names = StrategyStorage.list_portfolios()
         if not portfolio_names:
             st.warning("등록된 포트폴리오가 없습니다.")
             return
 
         default_idx = next((i for i, n in enumerate(portfolio_names) if n.startswith('A')), 0)
-
         col1, col2 = st.columns([3, 1])
         with col1:
-            portfolio_name = st.selectbox("포트폴리오", portfolio_names, index=default_idx, key="status_portfolio")
+            portfolio_name = st.selectbox("포트폴리오", portfolio_names, index=default_idx, key="signal_portfolio")
         with col2:
             st.write("")
             refresh = st.button("🔄 신호 갱신", key="btn_refresh_signal", use_container_width=True)
@@ -66,13 +63,12 @@ class AssetView:
             return
         configs = portfolio.get('configs', [])
 
-        # ── 현재 전략 신호 조회 ──────────────────────────────────────
+        # ── 신호 캐시 관리 ───────────────────────────────────────────
         cached_portfolio = st.session_state.get(SK.CURRENT_SIGNALS_PORTFOLIO)
         cached_signals = st.session_state.get(SK.CURRENT_SIGNALS, {})
         portfolio_changed = cached_portfolio != portfolio_name
 
         if refresh:
-            # 신호 갱신 버튼: signal 캐시 무효화 후 재계산
             for mode in ('closing', 'realtime'):
                 st.session_state.pop(SK.sig_cache(portfolio_name, mode), None)
                 st.session_state.pop(SK.sig_cache_ts(portfolio_name, mode), None)
@@ -81,7 +77,6 @@ class AssetView:
             st.session_state[SK.CURRENT_SIGNALS] = signals
             st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
         elif portfolio_changed or not cached_signals:
-            # 포트폴리오 변경 또는 캐시 없음: 실시간 모니터링 캐시 재사용 시도
             rt_result = st.session_state.get(SK.PORTFOLIO_REALTIME_RESULT)
             rt_portfolio = st.session_state.get(SK.PORTFOLIO_SELECTED_NAME)
             if rt_result and rt_portfolio == portfolio_name:
@@ -89,36 +84,14 @@ class AssetView:
                 st.session_state[SK.CURRENT_SIGNALS] = signals
                 st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
             else:
-                # 캐시 없음 → 신호 갱신 안내
                 signals = {}
                 st.session_state[SK.CURRENT_SIGNALS] = {}
                 st.session_state[SK.CURRENT_SIGNALS_PORTFOLIO] = portfolio_name
         else:
             signals = cached_signals
 
-        # ── 신호 변화 감지 ───────────────────────────────────────────
-        last_snapshot = AssetStorage.get_latest_signal_snapshot(account_id, portfolio_name)
-        changed_strategies = self._detect_signal_changes(signals, last_snapshot)
-
-        if changed_strategies:
-            st.warning(f"⚠️ **신호 변경 감지** — {len(changed_strategies)}개 전략에서 변화가 감지되었습니다.")
-            change_rows = []
-            for name, chg in changed_strategies.items():
-                change_rows.append({
-                    '전략': name,
-                    '이전': f"S{chg['prev_stage']} / {chg['prev_asset']}",
-                    '현재': f"S{chg['new_stage']} / {chg['new_asset']}",
-                    '변화': chg['action']
-                })
-            st.dataframe(pd.DataFrame(change_rows), use_container_width=True, hide_index=True)
-
-        # ── 신호 없을 때 안내 ─────────────────────────────────────────
-        if not signals:
-            st.info("📡 신호 데이터가 없습니다. **[🔄 신호 갱신]** 버튼을 클릭하거나 실시간 모니터링에서 먼저 신호를 계산해주세요.")
-
-        # ── 현재 신호 요약 ───────────────────────────────────────────
+        # ── 현재 신호 카드 ────────────────────────────────────────────
         if signals:
-            st.subheader("📡 현재 전략 신호")
             sig_cols = st.columns(len(signals))
             for i, (name, sig) in enumerate(signals.items()):
                 with sig_cols[i]:
@@ -126,21 +99,37 @@ class AssetView:
                     st.metric(
                         label=name,
                         value=f"{STAGE_ICONS.get(s, '⚪')} {STAGE_LABELS.get(s, f'S{s}')}",
-                        delta=f"{sig['base_asset']} → {sig.get('lev_asset','')}" if sig.get('lev_asset') else sig['base_asset']
+                        delta=f"{sig['base_asset']} → {sig.get('lev_asset', '')}" if sig.get('lev_asset') else sig['base_asset']
                     )
+        else:
+            st.info("📡 신호 없음. **[🔄 신호 갱신]** 버튼을 눌러주세요.")
+
+        # ── 신호 변경 감지 배너 ───────────────────────────────────────
+        last_snapshot = AssetStorage.get_latest_signal_snapshot(account_id, portfolio_name)
+        changed_strategies = self._detect_signal_changes(signals, last_snapshot)
+
+        if changed_strategies:
+            st.warning(f"⚠️ **신호 변경 감지** — {len(changed_strategies)}개 전략에서 변화가 있습니다.")
+            chg_rows = [
+                {
+                    '전략': n,
+                    '이전': f"S{c['prev_stage']} {c['prev_asset']}",
+                    '현재': f"S{c['new_stage']} {c['new_asset']}",
+                    '액션': c['action']
+                }
+                for n, c in changed_strategies.items()
+            ]
+            st.dataframe(pd.DataFrame(chg_rows), use_container_width=True, hide_index=True)
 
         st.divider()
 
-        # ── 보유 현황 vs 목표 비중 ───────────────────────────────────
+        # ── 보유 현황 + 주문지시 ─────────────────────────────────────
         holdings = AssetStorage.list_holdings(account_id)
-
         if not holdings:
-            st.info("보유 자산이 없습니다.")
-            with st.expander("📊 포트폴리오 초기 설정", expanded=True):
-                self._render_portfolio_init(account_id, portfolio_name, configs, signals)
+            st.info("보유 자산이 없습니다. **⚙️ 설정** 탭 → **수량 동기화**에서 초기 수량을 입력하세요.")
             return
 
-        # 현재 보유 현황 계산
+        # 현재가 + 평가액 계산
         holdings_data = []
         total_value = 0
         for h in holdings:
@@ -149,35 +138,60 @@ class AssetView:
             total_value += val
             holdings_data.append({**h, 'current_price': price, 'current_value': val})
 
-        # 신호 기반 목표 비중 계산
         target_alloc = self._compute_target_allocation(configs, signals)
-        # asset_id → target_weight 맵
+        rebal_orders = self._calculate_rebal_orders(holdings_data, target_alloc, total_value)
         target_map = {item['ticker'].upper(): item['weight'] for item in target_alloc}
 
-        # 비중 분석표
-        st.subheader("💼 보유 현황 vs 목표")
+        # ── 통합 현황 + 주문지시 테이블 ─────────────────────────────
+        st.subheader("💼 보유 현황 & 주문지시")
         rows = []
         total_cost = 0
+        holdings_keys = {h['asset_id'].upper() for h in holdings_data}
+
         for h in holdings_data:
             key = h['asset_id'].upper()
             target_w = target_map.get(key, 0.0) * 100
             current_w = (h['current_value'] / total_value * 100) if total_value > 0 else 0
-            diff = current_w - target_w
             pnl = h['current_value'] - h['total_cost']
             pnl_pct = pnl / h['total_cost'] * 100 if h['total_cost'] > 0 else 0
             total_cost += h['total_cost']
-            status = "⚠️" if abs(diff) >= 5 else "✅"
+
+            order_info = next((o for o in rebal_orders if o['asset_id'] == key), None)
+            if order_info:
+                raw_qty = abs(order_info['suggested_qty'])
+                qty = int(raw_qty) if raw_qty >= 1 else round(raw_qty, 4)
+                amt = abs(order_info['order_amount'])
+                order_str = f"🟢 매수 {qty}주 (${amt:,.0f})" if order_info['action'] == 'buy' else f"🔴 매도 {qty}주 (${amt:,.0f})"
+            else:
+                order_str = "✅ 유지"
+
             rows.append({
-                '상태': status,
                 '자산': h['asset_name'],
-                '수량': f"{h['quantity']:,.4f}",
+                '보유수량': f"{int(h['quantity']):,}",
                 '현재가': f"${h['current_price']:,.2f}" if h['current_price'] else "—",
                 '평가액': f"${h['current_value']:,.0f}",
                 '현재비중': f"{current_w:.1f}%",
                 '목표비중': f"{target_w:.1f}%",
-                '편차': f"{diff:+.1f}%",
-                '손익': f"${pnl:+,.0f} ({pnl_pct:+.1f}%)"
+                '📌 주문지시': order_str,
+                '손익': f"{pnl_pct:+.1f}%"
             })
+
+        # 미보유 신규 매수 대상
+        for o in rebal_orders:
+            if o['asset_id'] not in holdings_keys:
+                raw_qty = abs(o['suggested_qty'])
+                qty = int(raw_qty) if raw_qty >= 1 else round(raw_qty, 4)
+                amt = abs(o['order_amount'])
+                rows.append({
+                    '자산': o['asset_id'],
+                    '보유수량': "0",
+                    '현재가': f"${o['current_price']:,.2f}" if o['current_price'] else "—",
+                    '평가액': "$0",
+                    '현재비중': "0.0%",
+                    '목표비중': f"{o['target_weight']:.1f}%",
+                    '📌 주문지시': f"🟢 신규매수 {qty}주 (${amt:,.0f})",
+                    '손익': "—"
+                })
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -192,144 +206,204 @@ class AssetView:
 
         st.divider()
 
-        # ── 리밸런싱 실행 영역 ───────────────────────────────────────
-        if changed_strategies:
-            st.subheader("🔄 리밸런싱 — ⚠️ 포지션 변경 반영 필요")
-        else:
-            st.subheader("🔄 리밸런싱")
-
-        rebal_orders = self._calculate_rebal_orders(holdings_data, target_alloc, total_value)
-
+        # ── 거래 저장 영역 ────────────────────────────────────────────
         if not rebal_orders:
-            st.success("✅ 현재 모든 자산이 목표 비중 범위 내에 있습니다. (편차 < 5%)")
-        else:
-            order_rows = []
-            for o in rebal_orders:
-                order_rows.append({
-                    '자산': o['asset_id'],
-                    '액션': '🟢 매수' if o['action'] == 'buy' else '🔴 매도',
-                    '현재금액': f"${o['current_value']:,.0f}",
-                    '목표금액': f"${o['target_value']:,.0f}",
-                    '주문금액': f"${abs(o['order_amount']):,.0f}",
-                    '현재비중': f"{o['current_weight']:.1f}%",
-                    '목표비중': f"{o['target_weight']:.1f}%",
-                    '제안수량': f"{abs(o['suggested_qty']):,.4f}",
-                    '현재가': f"${o['current_price']:,.2f}"
-                })
-            st.dataframe(pd.DataFrame(order_rows), use_container_width=True, hide_index=True)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                exec_date = st.date_input("실행일", value=date.today(), key="rebal_exec_date")
-            with col2:
-                use_integer = st.checkbox("정수 수량 적용", value=True, key="rebal_integer")
-
-            if st.button("✅ 리밸런싱 실행 (거래 기록)", key="btn_execute_rebal", type="primary"):
-                success = 0
-                for o in rebal_orders:
-                    qty = int(o['suggested_qty']) if use_integer else o['suggested_qty']
-                    if qty <= 0:
-                        continue
-                    AssetStorage.save_asset(o['asset_id'], o['asset_id'], 'etf', 'USD', o['asset_id'], 'yfinance')
-                    result = AssetStorage.save_transaction(
-                        account_id, o['asset_id'], o['action'],
-                        qty * o['current_price'],
-                        quantity=float(qty), price=o['current_price'],
-                        tx_date=exec_date,
-                        notes=f"리밸런싱: {portfolio_name}"
-                    )
-                    if result:
-                        success += 1
-
-                # 신호 이벤트 기록
-                if signals:
-                    self._record_signal_events(account_id, portfolio_name, signals, last_snapshot, total_value)
-
-                if success > 0:
-                    st.success(f"✅ {success}개 거래 기록 완료!")
-                    st.session_state.pop(SK.CURRENT_SIGNALS, None)
-
-        st.info("💡 보유 수량 초기 설정은 **🔀 자산 동기화** 메뉴를 이용해주세요.", icon="🔀")
-
-    # ══════════════════════════════════════════════════════
-    # Tab 2: 신호 이벤트
-    # ══════════════════════════════════════════════════════
-    def _render_signal_events(self, account_id):
-        st.header("🔔 신호 이벤트")
-
-        events = AssetStorage.list_signal_events(account_id)
-
-        if not events:
-            st.info("기록된 신호 이벤트가 없습니다.\n\n포트폴리오 현황 탭에서 리밸런싱을 실행하면 신호 이벤트가 자동으로 기록됩니다.")
+            st.success("✅ 모든 자산이 목표 비중 범위 내에 있습니다. (편차 < 5%)")
             return
 
-        st.caption(f"총 {len(events)}개 이벤트")
+        if changed_strategies:
+            st.subheader("🔄 거래 저장 — ⚠️ 포지션 변경 반영 필요")
+        else:
+            st.subheader("🔄 거래 저장")
 
-        rows = []
-        for e in events:
-            stage_change = ""
-            if e['prev_stage'] != e['new_stage']:
-                stage_change = f"S{e['prev_stage']}→S{e['new_stage']}"
-            asset_change = ""
-            if e['prev_asset'] != e['new_asset']:
-                asset_change = f"{e['prev_asset']}→{e['new_asset']}"
-
-            rows.append({
-                '날짜': e['event_date'],
-                '포트폴리오': e['portfolio_name'],
-                '전략': e['strategy_name'],
-                '유형': e['strat_type'].upper(),
-                '스테이지 변화': stage_change or f"S{e['new_stage']}",
-                '자산 변화': asset_change or e['new_asset'] or "—",
-                '액션': e['action'] or "—",
-                '실행': '✅' if e['is_executed'] else '기록됨',
-                '비고': e['notes'] or "—"
-            })
-
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-        # 통계
-        st.divider()
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            st.metric("총 이벤트", len(events))
+            exec_date = st.date_input("실행일", value=date.today(), key="rebal_exec_date")
         with col2:
-            executed = sum(1 for e in events if e['is_executed'])
-            st.metric("실행 완료", executed)
-        with col3:
-            portfolios = len(set(e['portfolio_name'] for e in events))
-            st.metric("포트폴리오 수", portfolios)
+            use_integer = st.checkbox("정수 수량 적용", value=True, key="rebal_integer")
+
+        col_save, col_tg = st.columns(2)
+        with col_save:
+            save_clicked = st.button("✅ 거래 저장", key="btn_execute_rebal", type="primary", use_container_width=True)
+        with col_tg:
+            st.button(
+                "📱 Telegram 승인 요청",
+                key="btn_tg_request",
+                use_container_width=True,
+                disabled=True,
+                help="추후 Telegram 봇 연동 시 활성화됩니다."
+            )
+
+        if save_clicked:
+            success = 0
+            for o in rebal_orders:
+                qty = int(o['suggested_qty']) if use_integer else o['suggested_qty']
+                if qty <= 0:
+                    continue
+                AssetStorage.save_asset(o['asset_id'], o['asset_id'], 'etf', 'USD', o['asset_id'], 'yfinance')
+                result = AssetStorage.save_transaction(
+                    account_id, o['asset_id'], o['action'],
+                    qty * o['current_price'],
+                    quantity=float(qty), price=o['current_price'],
+                    tx_date=exec_date,
+                    notes=f"리밸런싱: {portfolio_name}"
+                )
+                if result:
+                    success += 1
+
+            if signals:
+                event_ids = self._record_signal_events(account_id, portfolio_name, signals, last_snapshot, total_value, exec_date)
+                if success > 0 and event_ids:
+                    AssetStorage.mark_signal_events_executed(event_ids)
+
+            if success > 0:
+                st.success(f"✅ {success}개 거래 저장 완료!")
+                st.session_state.pop(SK.CURRENT_SIGNALS, None)
+                st.rerun()
 
     # ══════════════════════════════════════════════════════
-    # Tab 3: 거래 내역 (조회 전용)
+    # Tab 2: 거래 내역
     # ══════════════════════════════════════════════════════
     def _render_transactions(self, account_id):
-        st.header("📋 거래 내역")
+        tab_tx, tab_event = st.tabs(["거래 기록", "신호 이벤트"])
 
-        transactions = AssetStorage.list_transactions(account_id)
+        with tab_tx:
+            transactions = AssetStorage.list_transactions(account_id)
+            if not transactions:
+                st.info("거래 내역이 없습니다.")
+            else:
+                data = [{
+                    '날짜': tx['tx_date'],
+                    '자산': tx['asset_name'],
+                    '유형': tx['type'].upper(),
+                    '수량': f"{tx['quantity']:,.0f}" if tx['quantity'] else "—",
+                    '단가': f"${tx['price']:,.2f}" if tx['price'] else "—",
+                    '금액': f"${tx['amount']:,.2f}",
+                    '비고': tx['notes'] or "—"
+                } for tx in transactions]
+                st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
+                st.caption(f"총 {len(transactions)}건")
 
-        if not transactions:
-            st.info("거래 내역이 없습니다.")
-            return
+            with st.expander("➕ 수동 거래 추가"):
+                self._render_manual_transaction(account_id)
 
-        data = [{
-            '날짜': tx['tx_date'],
-            '자산': tx['asset_name'],
-            '유형': tx['type'].upper(),
-            '수량': f"{tx['quantity']:,.4f}" if tx['quantity'] else "—",
-            '단가': f"${tx['price']:,.2f}" if tx['price'] else "—",
-            '금액': f"${tx['amount']:,.2f}",
-            '수수료': f"${tx['fee']:,.2f}" if tx['fee'] > 0 else "—",
-            '비고': tx['notes'] or "—"
-        } for tx in transactions]
+        with tab_event:
+            events = AssetStorage.list_signal_events(account_id)
+            if not events:
+                st.info("기록된 신호 이벤트가 없습니다.")
+            else:
+                rows = []
+                for e in events:
+                    stage_str = f"S{e['prev_stage']}→S{e['new_stage']}" if e['prev_stage'] != e['new_stage'] else f"S{e['new_stage']}"
+                    asset_str = f"{e['prev_asset']}→{e['new_asset']}" if e['prev_asset'] != e['new_asset'] else (e['new_asset'] or "—")
+                    rows.append({
+                        '날짜': e['event_date'],
+                        '포트폴리오': e['portfolio_name'],
+                        '전략': e['strategy_name'],
+                        '스테이지': stage_str,
+                        '자산': asset_str,
+                        '액션': e['action'] or "—",
+                        '실행': '✅' if e['is_executed'] else '기록됨'
+                    })
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("총 이벤트", len(events))
+                with col2:
+                    st.metric("실행 완료", sum(1 for e in events if e['is_executed']))
 
-        st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
-        st.caption(f"총 {len(transactions)}건")
+    def _render_manual_transaction(self, account_id):
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            m_date = st.date_input("날짜", value=date.today(), key="m_tx_date")
+        with col2:
+            m_type = st.selectbox("유형", ["buy", "sell", "dividend"],
+                format_func=lambda x: {"buy": "매수", "sell": "매도", "dividend": "배당"}[x],
+                key="m_tx_type")
+        with col3:
+            m_ticker = st.text_input("티커", placeholder="TQQQ", key="m_tx_ticker")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            m_qty = st.number_input("수량", min_value=0.0, step=1.0, key="m_tx_qty")
+        with col2:
+            m_price = st.number_input("단가 ($)", min_value=0.0, step=0.01, key="m_tx_price")
+        with col3:
+            m_notes = st.text_input("비고", key="m_tx_notes")
+
+        if st.button("저장", key="btn_manual_tx"):
+            if not m_ticker or m_qty <= 0 or m_price <= 0:
+                st.error("티커, 수량, 단가를 모두 입력하세요.")
+            else:
+                AssetStorage.save_asset(m_ticker.upper(), m_ticker.upper(), 'etf', 'USD', m_ticker.upper(), 'yfinance')
+                result = AssetStorage.save_transaction(
+                    account_id, m_ticker.upper(), m_type,
+                    m_qty * m_price,
+                    quantity=m_qty, price=m_price,
+                    tx_date=m_date, notes=m_notes or None
+                )
+                st.success("✅ 저장 완료") if result else st.error("저장 실패")
 
     # ══════════════════════════════════════════════════════
-    # Tab 4: 계좌 설정 + 입출금
+    # Tab 3: 설정
     # ══════════════════════════════════════════════════════
+    def _render_settings(self, account_id):
+        tab_sync, tab_deposit, tab_account = st.tabs(["🔀 수량 동기화", "💰 입출금", "🏦 계좌 관리"])
+
+        with tab_sync:
+            SyncView().render(account_id=account_id)
+        with tab_deposit:
+            self._render_deposits(account_id)
+        with tab_account:
+            self._render_account_setup(account_id)
+
+    def _render_deposits(self, account_id):
+        accounts = AssetStorage.list_accounts()
+        dep_account_names = [a['name'] for a in accounts]
+        dep_default_idx = next((i for i, a in enumerate(accounts) if a['id'] == account_id), 0)
+        dep_selected_name = st.selectbox("계좌", dep_account_names, index=dep_default_idx, key="dep_account")
+        dep_account = next((a for a in accounts if a['name'] == dep_selected_name), None)
+        dep_account_id = dep_account['id'] if dep_account else account_id
+
+        deposits = AssetStorage.list_deposits(dep_account_id)
+        if deposits:
+            dep_data = [{
+                '날짜': d['date'],
+                '유형': '입금' if d['type'] == 'deposit' else '출금',
+                '금액': f"{d['currency']} {d['amount']:,.0f}",
+                '비고': d['notes'] or "—"
+            } for d in deposits]
+            st.dataframe(pd.DataFrame(dep_data), use_container_width=True, hide_index=True)
+
+        st.subheader("➕ 입출금 기록")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            dep_date = st.date_input("날짜", value=date.today(), key="dep_date")
+        with col2:
+            dep_type = st.selectbox("유형", ["deposit", "withdraw"],
+                format_func=lambda x: "입금" if x == "deposit" else "출금", key="dep_type")
+        with col3:
+            dep_currency = st.selectbox("통화", ["KRW", "USD"], key="dep_currency")
+        col1, col2 = st.columns(2)
+        with col1:
+            dep_amount = st.number_input("금액", min_value=0.0, step=1.0, key="dep_amount")
+        with col2:
+            dep_notes = st.text_input("비고", key="dep_notes")
+
+        if st.button("기록", key="btn_save_dep"):
+            if dep_amount <= 0:
+                st.error("금액을 입력해주세요")
+            else:
+                result = AssetStorage.save_deposit(dep_account_id, dep_amount, dep_type, dep_date, dep_currency, dep_notes)
+                st.success("✅ 기록됨") if result else st.error("기록 실패")
+
     def _render_account_setup(self, account_id=None):
+        accounts = AssetStorage.list_accounts()
+        if accounts:
+            st.subheader("📋 등록된 계좌")
+            for acc in accounts:
+                st.write(f"• **{acc['name']}** — {acc['type'].upper()} ({acc['currency']})")
+            st.divider()
+
         st.subheader("➕ 새 계좌 추가")
         col1, col2 = st.columns(2)
         with col1:
@@ -355,65 +429,12 @@ class AssetView:
             else:
                 st.error("계좌명을 입력해주세요")
 
-        st.divider()
-        accounts = AssetStorage.list_accounts()
-        if accounts:
-            st.subheader("📋 등록된 계좌")
-            for acc in accounts:
-                st.write(f"• **{acc['name']}** — {acc['type'].upper()} ({acc['currency']})")
-
-        if account_id is None:
-            return
-
-        st.divider()
-        st.subheader("💰 입출금")
-
-        # 계좌 선택 (현재 선택된 계좌가 기본값)
-        dep_account_names = [a['name'] for a in accounts]
-        dep_default_idx = next((i for i, a in enumerate(accounts) if a['id'] == account_id), 0)
-        dep_selected_name = st.selectbox("계좌 선택", dep_account_names, index=dep_default_idx, key="dep_account")
-        dep_account = next((a for a in accounts if a['name'] == dep_selected_name), None)
-        dep_account_id = dep_account['id'] if dep_account else account_id
-
-        deposits = AssetStorage.list_deposits(dep_account_id)
-        if deposits:
-            dep_data = [{
-                '날짜': d['date'],
-                '유형': '입금' if d['type'] == 'deposit' else '출금',
-                '금액': f"{d['currency']} {d['amount']:,.0f}",
-                '비고': d['notes'] or "—"
-            } for d in deposits]
-            st.dataframe(pd.DataFrame(dep_data), use_container_width=True, hide_index=True)
-
-        st.subheader("💳 입출금 기록")
-        col1, col2 = st.columns(2)
-        with col1:
-            dep_date = st.date_input("날짜", value=date.today(), key="dep_date")
-        with col2:
-            dep_type = st.selectbox("유형", ["deposit", "withdraw"],
-                format_func=lambda x: "입금" if x == "deposit" else "출금", key="dep_type")
-        col1, col2 = st.columns(2)
-        with col1:
-            dep_currency = st.selectbox("통화", ["KRW", "USD"], key="dep_currency")
-        with col2:
-            dep_amount = st.number_input("금액", min_value=0.0, step=1.0, key="dep_amount")
-        dep_notes = st.text_input("비고", key="dep_notes")
-
-        if st.button("기록", key="btn_save_dep"):
-            if dep_amount <= 0:
-                st.error("금액을 입력해주세요")
-            else:
-                result = AssetStorage.save_deposit(dep_account_id, dep_amount, dep_type, dep_date, dep_currency, dep_notes)
-                st.success(f"✅ [{dep_selected_name}] 기록됨") if result else st.error("기록 실패")
-
     # ══════════════════════════════════════════════════════
     # 핵심 로직
     # ══════════════════════════════════════════════════════
     @staticmethod
     def _compute_target_allocation(configs, signals):
         """신호 기반 목표 배분 계산 → [{ticker, weight, label}]"""
-        # STAGE_RATIOS imported from core.constants
-
         result = []
         for config in configs:
             name = config['name']
@@ -459,7 +480,6 @@ class AssetView:
         holdings_map = {h['asset_id'].upper(): h for h in holdings_data}
         orders = []
 
-        # 보유 자산 + 목표에 있는 신규 자산 모두 처리
         all_keys = set(holdings_map.keys()) | set(target_map.keys())
 
         for key in all_keys:
@@ -476,7 +496,6 @@ class AssetView:
             if abs(diff_pct) < threshold:
                 continue
 
-            # 신규 자산의 경우 현재가 조회
             if not current_price and t:
                 from core.data import DataService
                 current_price = DataService.get_price(t['ticker']) or 0
@@ -511,7 +530,6 @@ class AssetView:
             new_asset = sig.get('base_asset', '')
 
             if prev_stage == -1:
-                # 최초 등록
                 continue
             if prev_stage != new_stage or prev_asset != new_asset:
                 action = 'buy' if new_stage > prev_stage else ('sell' if new_stage < prev_stage else 'asset_change')
@@ -524,9 +542,10 @@ class AssetView:
 
     @staticmethod
     def _record_signal_events(account_id, portfolio_name, signals, last_snapshot, total_value, event_date=None):
-        """현재 신호를 signal_events 테이블에 기록"""
+        """현재 신호를 signal_events 테이블에 기록 → 저장된 event_id 목록 반환"""
         if event_date is None:
             event_date = date.today()
+        event_ids = []
         for name, sig in signals.items():
             prev = last_snapshot.get(name, {})
             prev_stage = prev.get('stage', 0)
@@ -537,7 +556,7 @@ class AssetView:
 
             if prev_stage != new_stage or prev_asset != new_asset or not prev:
                 action = 'buy' if new_stage > prev_stage else ('sell' if new_stage < prev_stage else 'rebalance')
-                AssetStorage.save_signal_event(
+                eid = AssetStorage.save_signal_event(
                     account_id=account_id,
                     portfolio_name=portfolio_name,
                     strategy_name=name,
@@ -550,18 +569,17 @@ class AssetView:
                     total_value=total_value,
                     event_date=event_date
                 )
+                if eid:
+                    event_ids.append(eid)
+        return event_ids
 
     @staticmethod
     def _extract_signals(result, configs):
-        """signal_service.extract_signals() 위임 래퍼"""
         from core.signal_service import extract_signals
         return extract_signals(result, configs)
 
     @staticmethod
     def _fetch_current_signals(portfolio_name, configs):
-        """신호 갱신 버튼 클릭 시 호출.
-        현재가 있으면 실시간 신호, 없으면 종가 기준 신호를 계산한다.
-        compute_portfolio_signals → signal_service로 단일 경로 사용."""
         try:
             from core.data import DataService
             from ui.portfolio_view import PortfolioView
@@ -570,9 +588,8 @@ class AssetView:
             if not data_dict:
                 return {}
 
-            # 현재가 조회 (없으면 None → 종가 기준)
             _all_tickers = list(data_dict.keys()) + ['^VIX', '^VXN']
-            _cur_prices  = DataService.fetch_current_prices(_all_tickers)
+            _cur_prices = DataService.fetch_current_prices(_all_tickers)
 
             sidebar_start = st.session_state.get('start_input', None)
             start_date = sidebar_start or (data_dict['QQQ'].index.min().date() if 'QQQ' in data_dict else None)
@@ -593,12 +610,10 @@ class AssetView:
 
     @staticmethod
     def _get_current_price(asset_id, asset_name):
-        """DataService.get_price() 래퍼 — asset_name 파싱 fallback 포함"""
         from core.data import DataService
         price = DataService.get_price(asset_id)
         if price:
             return price
-        # asset_name에서 대문자 토큰 추출하여 추가 시도
         for token in str(asset_name).split():
             if token.isupper() and 2 <= len(token) <= 6:
                 price = DataService.get_price(token)

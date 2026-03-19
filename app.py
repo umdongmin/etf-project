@@ -249,6 +249,26 @@ class GoldenStrategyApp:
                     st.session_state.start_input = datetime.date(yr, 1, 1)
                     st.session_state.end_input = datetime.date(yr, 12, 31)
 
+            # 데이터 수집 상태 표시
+            st.sidebar.divider()
+            st.sidebar.subheader("📡 데이터 상태")
+            status_labels = {'FRED': 'FRED 매크로', 'VXN': 'VXN 변동성'}
+            all_ok = all(v == 'Success' for v in fetch_status.values())
+            data_warnings = fetch_status.get('DataWarnings', [])
+            if all_ok and not data_warnings:
+                st.sidebar.success(f"모든 데이터 정상 · {fetch_time}")
+            else:
+                for key, label in status_labels.items():
+                    s = fetch_status.get(key, 'Pending')
+                    if s == 'Success':
+                        st.sidebar.success(f"✅ {label}")
+                    elif s == 'Error':
+                        st.sidebar.error(f"❌ {label} 실패")
+                    else:
+                        st.sidebar.warning(f"⏳ {label} 대기중")
+                for w in data_warnings:
+                    st.sidebar.warning(f"⚠️ {w}")
+
             st.sidebar.divider()
             st.sidebar.subheader("💸 거래 수수료 설정")
             use_fee = st.sidebar.toggle("수수료 적용", value=st.session_state.get('global_use_fee', True), key='global_use_fee')

@@ -586,10 +586,53 @@ class TesterView:
                     'leverage_asset':'TMF',
                 }
 
+        # ── FOMC 감성 분석 외부 채널 ──────────────────────────────────────────
+        with tab1:
+            st.divider()
+            st.markdown("##### 🧠 FOMC 회의록 감성 분석 (외부 채널)")
+            st.caption("Gemini AI가 FOMC 회의록을 분석한 매파/비둘기 점수로 final_state를 보정합니다. F1/F2/F3 투표 구조 외부에서 독립적으로 작동합니다.")
+
+            fc1, fc2 = st.columns([1, 2])
+            with fc1:
+                fomc_use = st.toggle("FOMC 감성 채널 활성화",
+                                     value=bool(current_params.get('fomc_use', True)),
+                                     key=k("fomc_use"))
+            with fc2:
+                if fomc_use:
+                    st.success("활성: 매파 구간 → RISING 강제 | 비둘기 구간 → FALLING 강제")
+                else:
+                    st.info("비활성: 기존 V8 동작과 동일 (하위 호환)")
+
+            if fomc_use:
+                fh1, fh2 = st.columns(2)
+                with fh1:
+                    fomc_hi = st.slider(
+                        "매파 임계값 fomc_hi (이상이면 RISING 강제)",
+                        min_value=0.1, max_value=1.0,
+                        value=float(current_params.get('fomc_hi', 0.5)),
+                        step=0.1, format="%.1f",
+                        key=k("fomc_hi")
+                    )
+                with fh2:
+                    fomc_lo = st.slider(
+                        "비둘기 임계값 fomc_lo (이하면 FALLING 강제)",
+                        min_value=-1.0, max_value=-0.1,
+                        value=float(current_params.get('fomc_lo', -0.3)),
+                        step=0.1, format="%.1f",
+                        key=k("fomc_lo")
+                    )
+                st.caption(f"현재 설정: 점수 > **{fomc_hi:+.1f}** → 매파(채권 회피) | 점수 < **{fomc_lo:+.1f}** → 비둘기(채권 선호)")
+            else:
+                fomc_hi = float(current_params.get('fomc_hi', 0.5))
+                fomc_lo = float(current_params.get('fomc_lo', -0.3))
+
         layer1_params = {
             'ffv_lo': ffv_lo, 'ffv_hi': ffv_hi,
             'yc_inv': yc_inv, 'yc_steep': yc_steep,
             'tlt_rsi_max': tlt_rsi_max,
+            'fomc_use': fomc_use,
+            'fomc_hi':  fomc_hi,
+            'fomc_lo':  fomc_lo,
         }
         return layer1_params, lev_params_out
 
@@ -630,6 +673,11 @@ class TesterView:
         st.session_state[k("reb_up")] = float(lp.get('buy_reb_up', 0.01)) * 100
         st.session_state[k("reb_dn")] = float(abs(lp.get('buy_reb_down', 0.02))) * 100
 
+        # FOMC 감성 채널
+        st.session_state[k("fomc_use")] = bool(params.get('fomc_use', True))
+        st.session_state[k("fomc_hi")]  = float(params.get('fomc_hi', 0.5))
+        st.session_state[k("fomc_lo")]  = float(params.get('fomc_lo', -0.3))
+
     @staticmethod
     def get_bond_params_from_widgets(key_prefix="bond_"):
         """UI 위젯의 현재 상태를 읽어서 파라미터 번들 생성 (Save 시 사용)"""
@@ -642,7 +690,10 @@ class TesterView:
             'ffv_hi': s.get(k("ffv_hi"), 1.5),
             'tlt_rsi_max': s.get(k("rsi_max"), 60),
             'yc_inv': s.get(k("yc_inv"), -0.3),
-            'yc_steep': s.get(k("yc_steep"), 0.4)
+            'yc_steep': s.get(k("yc_steep"), 0.4),
+            'fomc_use': s.get(k("fomc_use"), True),
+            'fomc_hi':  s.get(k("fomc_hi"),  0.5),
+            'fomc_lo':  s.get(k("fomc_lo"),  -0.3),
         }
         
         # Layer 2

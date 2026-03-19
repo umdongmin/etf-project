@@ -8,6 +8,7 @@ run_tqqq_bot(token, chat_id, dry_run=False)
 
 import os
 import datetime
+import json
 
 
 def run_tqqq_bot(token, chat_id, dry_run=False):
@@ -33,7 +34,7 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
 
         # ── 2. 데이터 수집 ────────────────────────────────────────────
         print("📡 데이터 수집 중...", flush=True)
-        data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data()
+        data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, _ = DataService.load_all_data()
         if not data_dict:
             print("❌ 데이터 로드 실패", flush=True)
             return
@@ -168,11 +169,65 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
                     action_statuses.append(status)
                     lines.append(f"  결과: {' / '.join(result_parts) if result_parts else '변동 없음'}")
 
-            drift = portfolio_sig.get('drift_pct', 0)
-            try: drift_str = f"{float(drift):.1f}"
-            except: drift_str = str(drift)
-            rebal = '필요 ⚠️' if portfolio_sig.get('rebalance_needed') else '정상 ✅'
-            lines.append(f"\n🔄 Drift: `{drift_str}%`  Rebalance: {rebal}")
+            # ── 실잔고 기반 드리프트 계산 ──────────────────────────────
+            PRESET_BANDS = {
+                'hybrid':     0.07, 'trend':    0.07,
+                'band_5pct':  0.05, 'band_10pct': 0.10,
+                'asymmetric': 0.15,
+            }
+            preset_key  = portfolio_data.get('rebalance_preset', 'hybrid')
+            upper_band  = PRESET_BANDS.get(preset_key, 0.07)
+            rebal_method = 'none' if preset_key == 'none' else 'threshold'
+
+            strat_drifts = {}
+            needs_rebal  = False
+            if total_value > 0:
+                # asset → strategy 매핑
+                asset_to_strat = {}
+                for cfg in configs:
+                    p = cfg.get('params', {})
+                    lev = (p.get('leverage_asset') or '').upper()
+                    base = (p.get('base_asset') or '').upper()
+                    stype = cfg.get('type', 'equity')
+                    related = ({lev, base, 'QLD', 'TQQQ', 'QQQ'} if stype == 'equity'
+                               else {lev, base, 'TLT', 'TMF', 'TMV', 'TBF', 'BIL', 'IEF'})
+                    for a in related:
+                        if a:
+                            asset_to_strat[a] = cfg['name']
+
+                strat_values = {cfg['name']: 0.0 for cfg in configs}
+                for ticker, hdata in holdings_map.items():
+                    sname = asset_to_strat.get(ticker)
+                    if sname and sname in strat_values:
+                        strat_values[sname] += hdata['value']
+
+                for cfg in configs:
+                    sname   = cfg['name']
+                    target  = cfg.get('weight', 0)
+                    actual  = strat_values[sname] / total_value
+                    drift_v = round(actual - target, 4)
+                    strat_drifts[sname] = {'target': target, 'actual': actual, 'drift': drift_v}
+                    if rebal_method != 'none' and abs(drift_v) > upper_band:
+                        needs_rebal = True
+
+            max_drift_pct = max((abs(v['drift']) * 100 for v in strat_drifts.values()), default=0)
+            rebal = '필요 ⚠️' if needs_rebal else '정상 ✅'
+            lines.append(f"\n🔄 Drift: `{max_drift_pct:.1f}%`  Rebalance: {rebal} (±{upper_band*100:.0f}%)")
+            if strat_drifts:
+                for sname, d in strat_drifts.items():
+                    flag = ' ⚠️' if abs(d['drift']) > upper_band else ''
+                    lines.append(f"  {sname}: 목표 {d['target']*100:.0f}% → 실제 {d['actual']*100:.1f}% ({d['drift']*100:+.1f}%{flag})")
+
+            # 데이터 이상 경고
+            data_warnings = []
+            if fetch_status.get('FRED') != 'Success':
+                data_warnings.append("FRED 실패 (매크로 지표 없음)")
+            if fetch_status.get('VXN') != 'Success':
+                data_warnings.append("VXN 실패 (변동성 지표 없음)")
+            data_warnings.extend(fetch_status.get('DataWarnings', []))
+            if data_warnings:
+                lines.append(f"\n⚠️ 데이터 경고: {' / '.join(data_warnings)}")
+
             lines.append("━━━━━━━━━━━━━━━━━━━━━━")
 
             msg = '\n'.join(lines)
@@ -183,9 +238,48 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
             print(msg, flush=True)
             print('='*50 + '\n', flush=True)
 
-            has_action   = any(s != '보유' for s in action_statuses)
-            needs_rebal  = portfolio_sig.get('rebalance_needed', False)
-            should_send  = has_action or needs_rebal
+            has_action  = any(s != '보유' for s in action_statuses)
+            should_send = has_action or needs_rebal
+
+            # ── 5. 신호 감사 로그 저장 (신호/리밸런싱 발생 시만) ─────────
+            if should_send and not dry_run:
+                # 핵심 지표 스냅샷 구성
+                snapshot = {'fetch_status': {k: v for k, v in fetch_status.items() if k != 'DataWarnings'}}
+                if 'QQQ' in data_dict:
+                    qqq = data_dict['QQQ']
+                    snapshot['QQQ'] = {
+                        'price': round(float(qqq['Close'].iloc[-1]), 2),
+                        'RSI':   round(float(qqq['RSI'].iloc[-1]), 1) if 'RSI' in qqq else None,
+                        'MACD':  round(float(qqq['MACD'].iloc[-1]), 4) if 'MACD' in qqq else None,
+                    }
+                if 'TQQQ' in data_dict:
+                    snapshot['TQQQ'] = {'price': round(float(data_dict['TQQQ']['Close'].iloc[-1]), 2)}
+                if not vxn_df.empty and 'VXN' in vxn_df.columns:
+                    snapshot['VXN'] = round(float(vxn_df['VXN'].iloc[-1]), 2)
+                if not macro_df.empty and 'DFEDTARU' in macro_df.columns:
+                    snapshot['FedRate'] = round(float(macro_df['DFEDTARU'].iloc[-1]), 2)
+                notes_json = json.dumps(snapshot, ensure_ascii=False)
+
+                for name, new_sig in realtime_signals.items():
+                    cur_sig   = closing_signals.get(name, new_sig)
+                    cur_stage = cur_sig['stage']
+                    new_stage = new_sig['stage']
+                    action    = action_statuses[list(realtime_signals.keys()).index(name)]
+                    if action != '보유':
+                        AssetStorage.save_signal_event(
+                            account_id=acc_id,
+                            portfolio_name=PORTFOLIO_NAME,
+                            strategy_name=name,
+                            strat_type=new_sig['strat_type'],
+                            prev_stage=cur_stage,
+                            new_stage=new_stage,
+                            prev_asset=cur_sig['base_asset'],
+                            new_asset=new_sig['base_asset'],
+                            action=action,
+                            total_value=total_value,
+                            notes=notes_json,
+                        )
+                        print(f"📝 [{name}] 신호 감사 로그 저장 완료 (action={action})", flush=True)
 
             if not dry_run:
                 if should_send:
