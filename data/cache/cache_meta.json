@@ -1,4 +1,15 @@
 {
-  "last_date": "2026-03-18",
-  "updated_at": "2026-03-19 23:21:19"
+  "last_date": "2026-03-19",
+  "updated_at": "2026-03-20 19:45:11",
+  "tickers": [
+    "QQQ",
+    "QLD",
+    "TQQQ",
+    "TLT",
+    "TBF",
+    "BIL",
+    "TMF",
+    "TMV",
+    "^TNX"
+  ]
 }
