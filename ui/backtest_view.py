@@ -270,60 +270,89 @@ class BacktestView:
                 st.dataframe(journal_df[j_display_cols].style.format(j_formats).apply(_color_return, axis=0), width='stretch', height=400)
 
     @staticmethod
-    def render_execution_log(golden_history, base_asset):
-        """실시간 매매 체결 내역"""
+    def render_execution_log(golden_history, base_asset, is_bond=False):
+        """실시간 매매 체결 내역 (주식/채권 공용)"""
         with st.expander("📝 실시간 거래 체결 내역 (Actual Execution Log)", expanded=False):
             # Trade_Label이 '매수(' 또는 '매도('로 시작하는 행만 필터링
             exec_df = golden_history[golden_history['Trade_Label'].str.startswith(('매수(', '매도('), na=False)].copy()
-            
+
             if not exec_df.empty:
                 exec_df.index = exec_df.index.date
-                
-                # 이미지 양식에 맞춘 고정 컬럼 구성
-                # 모든 자산 비중 컬럼이 존재하도록 보장 (없으면 0.0)
-                all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', f'{base_asset}_Weight']
-                for col in all_weight_cols:
-                    if col not in exec_df.columns:
-                        exec_df[col] = 0.0
-                
-                # 최종 출력 컬럼 순서 (이미지 양식과 동일 + Stage 추가)
-                e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'QLD_Weight', 'TQQQ_Weight', 
-                          f'{base_asset}_Weight', 
-                          'RSI', 'MACD', 'VXN', 'ADX', 'WILLR', 'DMP', 'DMN', 'SAR']
-                
-                display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
-                
-                # 컬럼명 리네임
-                display_exec_df = display_exec_df.rename(columns={
-                    'WILLR': 'Williams',
-                    'DMP': 'DI+',
-                    'DMN': 'DI-',
-                    'SAR': 'Parabolic'
-                })
-                
-                # 포맷팅 설정
-                e_formats = {
-                    'Value': '${:,.0f}', 
-                    'Lev_Weight': '{:.1%}', 
-                    'RSI': '{:.1f}', 
-                    'MACD': '{:.2f}', 
-                    'VXN': '{:.1f}',
-                    'ADX': '{:.1f}',
-                    'Williams': '{:.1f}',
-                    'DI+': '{:.1f}',
-                    'DI-': '{:.1f}',
-                    'Parabolic': '{:.2f}'
-                }
-                e_formats.update({c: '{:.1%}' for c in all_weight_cols})
-                
+
+                if is_bond:
+                    # ── 채권 전략 컬럼 구성 ──
+                    all_weight_cols = ['TLT_Weight', 'TMF_Weight', 'TBF_Weight', 'TMV_Weight', 'BIL_Weight']
+                    for col in all_weight_cols:
+                        if col not in exec_df.columns:
+                            exec_df[col] = 0.0
+
+                    e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight',
+                              'TLT_Weight', 'TMF_Weight', 'TBF_Weight', 'TMV_Weight', 'BIL_Weight',
+                              'lev_asset', 'lev_frac', 'f_state', 'tlt_rsi', 'gap', 't10y2y']
+
+                    display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
+
+                    # 컬럼명 리네임
+                    display_exec_df = display_exec_df.rename(columns={
+                        'lev_asset': 'Lev Asset',
+                        'lev_frac': 'Lev Ratio',
+                        'f_state': 'Regime',
+                        'tlt_rsi': 'TLT RSI',
+                        'gap': 'FFV Gap',
+                        't10y2y': '10Y-2Y',
+                    })
+
+                    e_formats = {
+                        'Value': '${:,.0f}',
+                        'Lev_Weight': '{:.1%}',
+                        'Lev Ratio': '{:.0%}',
+                        'TLT RSI': '{:.1f}',
+                        'FFV Gap': '{:+.2f}',
+                        '10Y-2Y': '{:.2f}',
+                    }
+                    e_formats.update({c: '{:.1%}' for c in all_weight_cols})
+                else:
+                    # ── 주식 전략 컬럼 구성 (기존 로직) ──
+                    all_weight_cols = ['QLD_Weight', 'TQQQ_Weight', f'{base_asset}_Weight']
+                    for col in all_weight_cols:
+                        if col not in exec_df.columns:
+                            exec_df[col] = 0.0
+
+                    e_cols = ['Value', 'Trade_Label', 'Asset', 'Stage', 'Lev_Weight', 'QLD_Weight', 'TQQQ_Weight',
+                              f'{base_asset}_Weight',
+                              'RSI', 'MACD', 'VXN', 'ADX', 'WILLR', 'DMP', 'DMN', 'SAR']
+
+                    display_exec_df = exec_df[[c for c in e_cols if c in exec_df.columns]].sort_index(ascending=False)
+
+                    display_exec_df = display_exec_df.rename(columns={
+                        'WILLR': 'Williams',
+                        'DMP': 'DI+',
+                        'DMN': 'DI-',
+                        'SAR': 'Parabolic'
+                    })
+
+                    e_formats = {
+                        'Value': '${:,.0f}',
+                        'Lev_Weight': '{:.1%}',
+                        'RSI': '{:.1f}',
+                        'MACD': '{:.2f}',
+                        'VXN': '{:.1f}',
+                        'ADX': '{:.1f}',
+                        'Williams': '{:.1f}',
+                        'DI+': '{:.1f}',
+                        'DI-': '{:.1f}',
+                        'Parabolic': '{:.2f}'
+                    }
+                    e_formats.update({c: '{:.1%}' for c in all_weight_cols})
+
                 def style_exec(row):
                     sig = str(row['Trade_Label'])
-                    if sig.startswith("매도"): 
+                    if sig.startswith("매도"):
                         return ['background-color: rgba(52, 152, 219, 0.1); color: #3498db; font-weight: bold'] * len(row)
-                    elif sig.startswith("매수"): 
+                    elif sig.startswith("매수"):
                         return ['background-color: rgba(231, 76, 60, 0.1); color: #e74c3c; font-weight: bold'] * len(row)
                     return [''] * len(row)
-                
+
                 # [수정] 존재하지 않는 컬럼에 대한 포맷팅 제외 (KeyError 방지)
                 active_e_formats = {k: v for k, v in e_formats.items() if k in display_exec_df.columns}
 

@@ -156,7 +156,8 @@ class PortfolioRealtimeView:
                         start_date, cur_prices=_cur_prices,
                     )
                     if result:
-                        result['_calc_time'] = datetime.datetime.now().strftime('%H:%M:%S')
+                        import pytz
+                        result['_calc_time'] = datetime.datetime.now(pytz.timezone('Asia/Seoul')).strftime('%H:%M:%S')
                         result['_cache_key'] = _current_cache_key
                         st.session_state[SK.PORTFOLIO_REALTIME_RESULT] = result
                     else:

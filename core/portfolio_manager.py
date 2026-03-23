@@ -1,26 +1,12 @@
 import pandas as pd
 import numpy as np
+from core.defaults import REBALANCE_PRESET_CONFIGS
 from core.engine import StrategyEngine
 
 class PortfolioManager:
     """여러 전략을 결합하여 포트폴리오를 구성하고 리밸런싱을 수행하는 클래스"""
 
-    # 리밸런싱 프리셋 정의
-    REBALANCE_PRESETS = {
-        # UI 키와 완전 일치 (portfolio_view.py PRESET_LABELS 기준)
-        'none':        {'method': 'none'},
-        'annual':      {'method': 'calendar', 'interval_days': 252},
-        'semi_annual': {'method': 'calendar', 'interval_days': 126},
-        'quarterly':   {'method': 'calendar', 'interval_days': 63},
-        'band_5pct':   {'method': 'threshold', 'band': 0.05, 'upper_band': 0.05, 'lower_band': 0.05, 'min_interval_days': 21},
-        'band_10pct':  {'method': 'threshold', 'band': 0.10, 'upper_band': 0.10, 'lower_band': 0.10, 'min_interval_days': 21},
-        'asymmetric':  {'method': 'threshold', 'upper_band': 0.15, 'lower_band': 0.05, 'min_interval_days': 21},
-        # ── 신규 ──────────────────────────────────────────────────────────────────
-        # hybrid   : calendar 강제 주기(quarterly) + band 이탈 즉시 트리거 (OR 조건)
-        # trend    : QQQ MA200 기반 동적 비중 전환 + band 이탈 트리거
-        'hybrid':      {'method': 'hybrid', 'interval_days': 63, 'upper_band': 0.07, 'lower_band': 0.07, 'min_interval_days': 5},
-        'trend':       {'method': 'trend',  'upper_band': 0.07, 'lower_band': 0.07, 'min_interval_days': 5},
-    }
+    REBALANCE_PRESETS = REBALANCE_PRESET_CONFIGS
 
     def __init__(self, strategies=None, rebalance_preset='none', total_capital=10000.0,
                  regime_series=None, regime_weights=None, custom_preset_cfg=None, fee_rate=0.0, integer_shares=False,
@@ -45,6 +31,7 @@ class PortfolioManager:
         self.total_capital = total_capital
         self._last_rebalance_day_idx = 0
         self.history = []
+        self.rebalance_events = []
 
         # Dynamic Weight 설정 (None이면 기존 fixed weight 동작)
         self.regime_series         = regime_series
@@ -230,11 +217,28 @@ class PortfolioManager:
 
                 if do_rebalance:
                     self._last_rebalance_day_idx = loop_day_idx
+                    event = {
+                        'Date': current_date,
+                        'Total_Value': current_total_portfolio_value,
+                        'Method': rb_method,
+                        'Details': [],
+                    }
                     for name in active_names:
                         target_w = self._get_target_weight(name, current_date)
                         target_val = target_w * current_total_portfolio_value
                         curr_val = states[name]['portfolio_value']
                         cash_injections[name] = target_val - curr_val
+                        actual_w = curr_val / current_total_portfolio_value if current_total_portfolio_value > 0 else 0
+                        event['Details'].append({
+                            'Strategy': name,
+                            'Before_Value': curr_val,
+                            'After_Value': target_val,
+                            'Delta': target_val - curr_val,
+                            'Target_Weight': target_w,
+                            'Actual_Weight': actual_w,
+                            'Drift': actual_w - target_w,
+                        })
+                    self.rebalance_events.append(event)
 
             loop_day_idx += 1
             # --- 제너레이터 1일 단위 전진 ---
@@ -264,10 +268,10 @@ class PortfolioManager:
                     
         # 3. 결과 정리
         if not portfolio_history:
-            return pd.DataFrame(), individual_results
+            return pd.DataFrame(), individual_results, self.rebalance_events
 
         combined_equity = pd.DataFrame(portfolio_history).set_index('Date')
-        return combined_equity, individual_results
+        return combined_equity, individual_results, self.rebalance_events
 
     def predict_portfolio_today(self, data_dict, fg_df, vxn_df, macro_df, news_df,
                                 start_date=None):
@@ -450,7 +454,7 @@ class PortfolioManager:
             print(f"[DEBUG] 등록된 전략: {list(self.strategies.keys())}")
 
             # 포트폴리오 전체 수익률
-            portfolio_history, individual_results = self.run_portfolio(
+            portfolio_history, individual_results, _rb_events = self.run_portfolio(
                 start_date=calc_start,
                 end_date=calc_end,
                 total_capital=self.total_capital

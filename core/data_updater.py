@@ -47,6 +47,8 @@ FRED_SERIES = [
     ('NROU',     'nrou',     45),
     ('T10YIE',   'exp_inf',   0),
     ('T10Y2Y',   't10y2y',    0),
+    ('DFII10',   'real_rate_10y', 0),   # 10Y TIPS 실질금리
+    ('T5YIFR',   'breakeven_5y5y', 0),  # 5Y5Y Forward Breakeven 인플레 기대
 ]
 
 
@@ -89,7 +91,7 @@ def update_ohlcv() -> list:
         except Exception:
             pass
 
-    start_date = '2010-01-01'
+    start_date = '2008-01-01'
     if last_date:
         # 마지막 날짜 다음날부터 증분
         start_dt = datetime.datetime.strptime(last_date, '%Y-%m-%d') + datetime.timedelta(days=1)
@@ -255,107 +257,218 @@ def update_fred() -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. FOMC 신규 회의록 점수화
+# 3. FOMC 신규 회의록 점수화 (회의록 미공개 시 성명서+기자회견 임시 점수)
 # ─────────────────────────────────────────────────────────────
 
-def update_fomc() -> list:
-    """FOMC 신규 회의록 크롤링 + 감성 점수화. 변경된 파일 경로 목록 반환."""
-    scores_path  = DATA_DIR / "fomc_scores.csv"
-    minutes_dir  = DATA_DIR / "fomc_minutes"
-    minutes_dir.mkdir(parents=True, exist_ok=True)
+CSV_FIELDS = ['date', 'score', 'reasoning', 'model_version', 'created_at', 'source', 'is_preliminary']
 
-    # 기존 점수 로드 → 마지막 처리 날짜 확인
-    existing = {}
-    if scores_path.exists():
-        import csv
-        with open(scores_path, encoding='utf-8') as f:
-            for row in csv.DictReader(f):
-                existing[row['date']] = row
-    last_scored = max(existing.keys()) if existing else '20100101'
-    print(f"  FOMC 마지막 점수화 날짜: {last_scored}")
+def _fetch_text(url: str, headers: dict) -> str:
+    """URL에서 본문 텍스트 추출. 실패 시 빈 문자열 반환."""
+    try:
+        from bs4 import BeautifulSoup
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        article = soup.find("div", id="article") or soup.find("body")
+        return article.get_text(separator="\n", strip=True) if article else ""
+    except Exception as e:
+        print(f"  fetch 실패 ({url}): {e}")
+        return ""
 
-    # 신규 회의록 링크 수집
+
+def _parse_calendar(html: str) -> tuple[dict, dict, dict]:
+    """
+    캘린더 페이지 파싱.
+    Returns: (minutes_links, statement_links, presconf_links)
+             각각 {date_str: full_url} 딕셔너리
+    """
     import re
     from bs4 import BeautifulSoup
-    FED_BASE     = "https://www.federalreserve.gov"
-    CALENDAR_URL = f"{FED_BASE}/monetarypolicy/fomccalendars.htm"
-    HEADERS      = {"User-Agent": "Mozilla/5.0"}
+    FED_BASE = "https://www.federalreserve.gov"
+    soup = BeautifulSoup(html, "html.parser")
+    minutes, statements, presconfs = {}, {}, {}
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        m = re.search(r"fomcminutes(\d{8})\.htm", href)
+        if m:
+            minutes[m.group(1)] = FED_BASE + href
+            continue
+        m = re.search(r"monetary(\d{8})a\.htm", href)
+        if m:
+            statements[m.group(1)] = FED_BASE + href
+            continue
+        m = re.search(r"fomcpresconf(\d{8})\.htm", href)
+        if m:
+            presconfs[m.group(1)] = FED_BASE + href
+    return minutes, statements, presconfs
 
+
+def _gemini_score(client, text: str, source_label: str) -> dict | None:
+    """Gemini로 감성 점수화. 실패 시 None 반환."""
+    MODEL     = "gemini-2.5-flash"
+    MAX_CHARS = 12000
+    PROMPT    = (
+        "You are a senior Federal Reserve analyst. "
+        "Analyze the following FOMC {source} and return JSON only:\n"
+        '{{\"score\": <float -1.0 to +1.0>, \"reasoning\": \"<3-line Korean summary>\"}}\n'
+        "Scoring: +1.0=extremely hawkish, 0.0=neutral, -1.0=extremely dovish\n"
+        "Text:\n{text}"
+    )
     try:
-        r    = requests.get(CALENDAR_URL, headers=HEADERS, timeout=30)
-        soup = BeautifulSoup(r.text, "html.parser")
-        new_links = []
-        for a in soup.find_all("a", href=True):
-            m = re.search(r"fomcminutes(\d{8})\.htm", a["href"])
-            if m:
-                date_str = m.group(1)
-                if date_str > last_scored:
-                    new_links.append({"date": date_str, "url": FED_BASE + a["href"]})
+        prompt   = PROMPT.format(source=source_label, text=text[:MAX_CHARS])
+        response = client.models.generate_content(model=MODEL, contents=prompt)
+        raw      = response.text.strip().strip('`').replace('```json', '').replace('```', '').strip()
+        result   = json.loads(raw)
+        score    = max(-1.0, min(1.0, round(float(result['score']), 1)))
+        return {"score": score, "reasoning": result.get("reasoning", "")}
     except Exception as e:
-        print(f"  FOMC 캘린더 수집 실패: {e}")
-        return []
+        print(f"  Gemini 점수화 실패: {e}")
+        return None
 
-    if not new_links:
-        print("  신규 FOMC 회의록 없음 — 스킵")
-        return []
 
-    print(f"  신규 FOMC 회의록 {len(new_links)}개 발견")
+def _save_fomc_csv(scores_path: Path, existing: dict):
+    """existing 딕셔너리 전체를 fomc_scores.csv로 저장."""
+    import csv
+    sorted_rows = sorted(existing.values(), key=lambda x: x['date'])
+    with open(scores_path, 'w', encoding='utf-8', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(sorted_rows)
+    print(f"  ✓ fomc_scores.csv 업데이트 ({len(sorted_rows)}건)")
+
+
+def update_fomc() -> list:
+    """
+    FOMC 감성 점수 증분 업데이트.
+
+    처리 우선순위:
+    1. is_preliminary=1 항목 중 공식 회의록이 공개된 것 → 재점수화 (is_preliminary=0 갱신)
+    2. 신규 공식 회의록 → 점수화 (source=minutes, is_preliminary=0)
+    3. 성명서+기자회견은 있으나 회의록 미공개 → 임시 점수화 (source=statement+presconf, is_preliminary=1)
+    """
+    import csv
+    scores_path = DATA_DIR / "fomc_scores.csv"
+    minutes_dir = DATA_DIR / "fomc_minutes"
+    minutes_dir.mkdir(parents=True, exist_ok=True)
+
+    # 기존 점수 로드 + 구버전 행에 신규 필드 기본값 채우기
+    existing = {}
+    if scores_path.exists():
+        with open(scores_path, encoding='utf-8') as f:
+            for row in csv.DictReader(f):
+                row.setdefault('source', 'minutes')
+                row.setdefault('is_preliminary', '0')
+                existing[row['date']] = row
 
     # Gemini 클라이언트
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         print("  GEMINI_API_KEY 없음 — 스킵")
         return []
-
     from google import genai
-    client    = genai.Client(api_key=api_key)
-    MODEL     = "gemini-2.5-flash"
-    PROMPT    = """You are a senior Federal Reserve analyst. Analyze FOMC meeting minutes and return JSON only:
-{{"score": <float -1.0 to +1.0>, "reasoning": "<3-line Korean summary>"}}
-Scoring: +1.0=extremely hawkish, 0.0=neutral, -1.0=extremely dovish
-FOMC Minutes:\n{text}"""
-    MAX_CHARS = 12000
+    client = genai.Client(api_key=api_key)
 
-    for item in new_links:
-        date_str = item['date']
-        try:
-            # 회의록 다운로드
-            r    = requests.get(item['url'], headers=HEADERS, timeout=30)
-            soup = BeautifulSoup(r.text, "html.parser")
-            article = soup.find("div", id="article") or soup.find("body")
-            text    = article.get_text(separator="\n", strip=True) if article else ""
-            if len(text) < 500:
-                print(f"  ⚠️ {date_str} 텍스트 너무 짧음 — 스킵")
-                continue
+    # 캘린더 페이지 파싱
+    FED_BASE     = "https://www.federalreserve.gov"
+    CALENDAR_URL = f"{FED_BASE}/monetarypolicy/fomccalendars.htm"
+    HEADERS      = {"User-Agent": "Mozilla/5.0"}
+    try:
+        r = requests.get(CALENDAR_URL, headers=HEADERS, timeout=30)
+        minutes_links, statement_links, presconf_links = _parse_calendar(r.text)
+    except Exception as e:
+        print(f"  FOMC 캘린더 수집 실패: {e}")
+        return []
 
-            # 회의록 저장
-            (minutes_dir / f"{date_str}.txt").write_text(text, encoding='utf-8')
+    changed = False
 
-            # Gemini 점수화
-            response = client.models.generate_content(model=MODEL, contents=PROMPT.format(text=text[:MAX_CHARS]))
-            raw      = response.text.strip().strip('`').replace('```json','').replace('```','').strip()
-            result   = json.loads(raw)
-            score    = max(-1.0, min(1.0, round(float(result['score']), 1)))
-
-            existing[date_str] = {
-                'date': date_str, 'score': score,
-                'reasoning': result.get('reasoning', ''),
-                'model_version': MODEL,
+    # ── 1. Preliminary → 공식 회의록으로 갱신 ────────────────
+    upgradeable = [
+        date for date, row in existing.items()
+        if row.get('is_preliminary') == '1' and date in minutes_links
+    ]
+    if upgradeable:
+        print(f"  Preliminary → 공식 회의록 갱신 대상: {upgradeable}")
+    for date_str in upgradeable:
+        text = _fetch_text(minutes_links[date_str], HEADERS)
+        if len(text) < 500:
+            print(f"  ⚠️ {date_str} 회의록 텍스트 짧음 — 스킵")
+            continue
+        (minutes_dir / f"{date_str}.txt").write_text(text, encoding='utf-8')
+        result = _gemini_score(client, text, "meeting minutes")
+        if result:
+            existing[date_str].update({
+                'score': result['score'], 'reasoning': result['reasoning'],
+                'model_version': 'gemini-2.5-flash',
                 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            }
-            print(f"  ✓ {date_str} 점수화 완료: {score:+.1f}")
-            time.sleep(2.0)
-        except Exception as e:
-            print(f"  ✗ {date_str} 실패: {e}")
+                'source': 'minutes', 'is_preliminary': '0',
+            })
+            print(f"  ✓ {date_str} 공식 갱신: {result['score']:+.1f}")
+            changed = True
+        time.sleep(2.0)
 
-    # fomc_scores.csv 저장
-    import csv
-    sorted_rows = sorted(existing.values(), key=lambda x: x['date'])
-    with open(scores_path, 'w', encoding='utf-8', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['date','score','reasoning','model_version','created_at'])
-        writer.writeheader()
-        writer.writerows(sorted_rows)
-    print(f"  ✓ fomc_scores.csv 업데이트 ({len(sorted_rows)}건)")
+    # ── 2. 신규 공식 회의록 ───────────────────────────────────
+    new_minutes = [d for d in minutes_links if d not in existing]
+    if new_minutes:
+        print(f"  신규 공식 회의록: {new_minutes}")
+    for date_str in sorted(new_minutes):
+        text = _fetch_text(minutes_links[date_str], HEADERS)
+        if len(text) < 500:
+            print(f"  ⚠️ {date_str} 텍스트 짧음 — 스킵")
+            continue
+        (minutes_dir / f"{date_str}.txt").write_text(text, encoding='utf-8')
+        result = _gemini_score(client, text, "meeting minutes")
+        if result:
+            existing[date_str] = {
+                'date': date_str, 'score': result['score'],
+                'reasoning': result['reasoning'],
+                'model_version': 'gemini-2.5-flash',
+                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'source': 'minutes', 'is_preliminary': '0',
+            }
+            print(f"  ✓ {date_str} 점수화 완료: {result['score']:+.1f}")
+            changed = True
+        time.sleep(2.0)
+
+    # ── 3. 임시 점수 (성명서+기자회견, 회의록 미공개 기간) ────
+    # 성명서는 있으나 회의록 미공개 + 아직 점수 없는 날짜
+    preliminary_candidates = [
+        d for d in statement_links
+        if d not in minutes_links and d not in existing
+    ]
+    if preliminary_candidates:
+        print(f"  임시 점수화 대상 (회의록 미공개): {preliminary_candidates}")
+    for date_str in sorted(preliminary_candidates):
+        parts = []
+        stmt_text = _fetch_text(statement_links[date_str], HEADERS)
+        if stmt_text:
+            parts.append(f"[FOMC Statement]\n{stmt_text}")
+        if date_str in presconf_links:
+            pc_text = _fetch_text(presconf_links[date_str], HEADERS)
+            if pc_text:
+                parts.append(f"[Press Conference]\n{pc_text}")
+        if not parts:
+            print(f"  ⚠️ {date_str} 성명서+기자회견 텍스트 없음 — 스킵")
+            continue
+        combined = "\n\n".join(parts)
+        source_label = "statement and press conference transcript (official minutes not yet published)"
+        result = _gemini_score(client, combined, source_label)
+        if result:
+            existing[date_str] = {
+                'date': date_str, 'score': result['score'],
+                'reasoning': result['reasoning'],
+                'model_version': 'gemini-2.5-flash',
+                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'source': 'statement+presconf', 'is_preliminary': '1',
+            }
+            print(f"  ✓ {date_str} 임시 점수화 완료: {result['score']:+.1f} [preliminary]")
+            changed = True
+        time.sleep(2.0)
+
+    if not changed:
+        print("  FOMC 신규/갱신 없음 — 스킵")
+        return []
+
+    _save_fomc_csv(scores_path, existing)
     return [scores_path]
 
 
@@ -432,7 +545,7 @@ def run_daily_update():
     print("\n[2/3] FRED 증분 업데이트", flush=True)
     changed += update_fred()
 
-    print("\n[3/3] FOMC 신규 점수화", flush=True)
+    print("\n[3/3] FOMC 점수화 (회의록 or 임시)", flush=True)
     changed += update_fomc()
 
     if changed:

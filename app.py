@@ -22,7 +22,11 @@ from ui.portfolio_view import PortfolioView
 from ui.portfolio_realtime_view import PortfolioRealtimeView
 from ui.asset_view import AssetView
 from ui.tester_view import TesterView
+from ui.simulation_view import SimulationView
 from utils.metrics import calculate_metrics
+from core.defaults import get_default_equity_params, get_default_bond_params, get_default_bond_lev_params, REBALANCE_PRESET_LABELS
+from core.engine_kwargs_builder import extract_smart_params
+from core.config_loader import load_default_equity_params, load_default_bond_params
 
 class GoldenStrategyApp:
     def __init__(self):
@@ -41,6 +45,7 @@ class GoldenStrategyApp:
             "📈 포트폴리오 매니저",
             "📜 주식 전략 설정",
             "📉 채권 전략 설정",
+            "💰 모의투자 시뮬레이터",
             "🧠 AI 뉴스 분석 리포트"
         ])
         
@@ -50,172 +55,31 @@ class GoldenStrategyApp:
             st.session_state.trigger_recalc = False
             
         if 'current_params' not in st.session_state:
-            st.session_state.current_params = {
-                'buy_signals': [
-                    {'rsi_val': 35, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [10, 60], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': True, 'rsi_inc': False, 'macd_inc': True, 'macd_signal_below': True, 'macd_golden': False, 'bb_lower': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_above': False, 'di_plus_cross': False, 'use_sar': False, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '>', 'news_q_val': 0.8, 'use_news_z': False, 'news_z_op': '>', 'news_z_val': 1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.13,
-                     'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                ],
-                'sell_signals': [
-                    {'rsi_val': 70, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': True, 'rsi_dec': False, 'macd_dec': True, 'macd_signal_above': True, 'macd_dead': False, 'di_minus_above': False, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                    {'rsi_val': 0, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': False, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': True, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': False, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                    {'rsi_val': 50, 'use_rsi_wait': False, 'rsi_wait_val': 70, 'rsi_dead': False, 'rsi_dec': True, 'macd_dec': False, 'macd_signal_above': False, 'macd_dead': False, 'di_minus_above': True, 'bb_upper': False, 'use_chandelier': False, 'chandelier_mult': 3.0, 'use_sar': True, 'use_willr': False, 'willr_val': -20, 'di_minus_cross': False, 'use_news_q': False, 'news_q_op': '<', 'news_q_val': 0.2, 'use_news_z': False, 'news_z_op': '<', 'news_z_val': -1.0, 
-                     'use_dev200': False, 'dev200_op': '>=', 'dev200_val': 1.0,
-                     'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0], 'opt_dev200_val': False, 'rng_dev200_val': [0.8, 1.3]},
-                ],
-                's3_protection': [
-                    {
-                        'use_daily_drop': False, 'drop_limit': -3.0, 
-                        'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
-                        'use_gap_down': True, 'gap_limit': -3.0,
-                        'use_drop_acc': False, 'acc_limit': -7.0,
-                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
-                    },
-                    {
-                        'use_daily_drop': False, 'drop_limit': -3.0, 
-                        'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
-                        'use_gap_down': False, 'gap_limit': -3.0,
-                        'use_drop_acc': True, 'acc_limit': -7.0,
-                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
-                    },
-                    {
-                        'use_daily_drop': False, 'drop_limit': -3.0, 
-                        'use_ma60': False, 'ma60_limit': 0.0, 'use_ma200': False, 'ma200_limit': 0.0,
-                        'use_vxn_jump': False, 'vxn_jump': 15.0, 
-                        'use_gap_down': False, 'gap_limit': -3.0,
-                        'use_drop_acc': False, 'acc_limit': -7.0,
-                        'use_exit_all': False, 'use_chandelier': False, 'chandelier_mult': 3.0
-                    }
-                ],
-                'buy_reb_up': 0.018, 'rng_buy_reb_up': [0.1, 5.0], 'buy_reb_down': -1.0, 'rng_buy_reb_down': [-15.0, -1.0], 
-                'sell_reb_up': 0.03, 'rng_sell_reb_up': [0.5, 10.0], 'sell_reb_down': -0.035, 'rng_sell_reb_down': [-10.0, -0.5],
-                'use_reb_interlock': False, 'reb_interlock_dev': 1.13, 'reb_interlock_vxn': 22.0,
-                'opt_buy_reb_up': False, 'opt_buy_reb_down': False, 'opt_sell_reb_up': False, 'opt_sell_reb_down': False,
-                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
-                'use_fixed_reb': True, 'use_atr_reb': True,
-                'atr_mult_buy_up': 10.0, 'rng_atr_m_buy_up': [1.0, 20.0], 'atr_mult_buy_down': 3.0, 'rng_atr_m_buy_down': [0.5, 5.0], 'atr_mult_sell': 10.0, 'rng_atr_m_sell': [1.0, 6.0],
-                'opt_atr_m_buy_up': False, 'opt_atr_m_buy_down': False, 'opt_atr_m_sell': False,
-                'atr_period_buy': 20, 'atr_period_sell': 20,
-                'use_panic': True, 'panic_ma': 200, 
-                'panic_buy_signals': [
-                    {'rsi_val': 27, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
-                    {'rsi_val': 28, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
-                    {'rsi_val': 30, 'use_rsi_wait': False, 'rsi_wait_val': 35, 'rsi_cross': False, 'rsi_inc': False, 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False, 'bb_lower': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40, 'use_willr': False, 'willr_val': -80, 'di_plus_cross': False, 'di_minus_cross': False, 'use_sar': False, 'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]}
-                ],
-                'use_vxn_safety': False, 'vxn_exit': 31.0,
-                'use_rsi_turbo': False, 'rsi_turbo': 31.0,
-                'dynamic_cash': {
-                    'use': False,
-                    'bull_vxn': 18.0,
-                    'caution_vxn': 35.0,
-                    'bear_vxn': 40.0,
-                    'ma200_buffer': 0.0, 
-                    'cash_bull': 0.0,
-                    'cash_neutral': 20.0,
-                    'cash_caution': 30.0,
-                    'cash_bear': 80.0,
-                    'opt_bull_vxn': False, 'rng_bull_vxn': [10.0, 25.0],
-                    'opt_caution_vxn': False, 'rng_caution_vxn': [25.0, 40.0],
-                    'opt_bear_vxn': False, 'rng_bear_vxn': [35.0, 50.0],
-                    'opt_ma200_buffer': False, 'rng_ma200_buffer': [0.0, 5.0],
-                    'opt_cash_bull': False, 'rng_cash_bull': [0.0, 20.0],
-                    'opt_cash_neutral': False, 'rng_cash_neutral': [0.0, 50.0],
-                    'opt_cash_caution': False, 'rng_cash_caution': [0.0, 80.0],
-                    'opt_cash_bear': False, 'rng_cash_bear': [0.0, 100.0]
-                }
-            }
+            _eq_name, _eq_params = load_default_equity_params()
+            st.session_state.current_params = _eq_params
+            if _eq_name:
+                st.session_state.default_equity_strategy_name = _eq_name
 
-        # [신규] 채권 전략 초기화 로직 (Bond_V7_Custom 기본 적용)
-        # [Definitive Fix] 채권 전략 초기화 로직 (Bond_V7_Custom v26 골드 스탠다드 적용)
+        # [신규] 채권 전략 초기화 로직 (중앙화된 config_loader 사용)
         if ('current_bond_params' not in st.session_state
                 or 'current_bond_lev_params' not in st.session_state
-                or st.session_state.get('initial_bond_load_v28', False) is False):
-            # 골드 스탠다드 (최적 수익률 구현용 풀스펙)
-            GOLDEN_BOND_PARAMS = {
-                'ffv_lo': -1.0, 'ffv_hi': 1.5, 'yc_inv': -0.3, 'yc_steep': 0.4, 'tlt_rsi_max': 60
-            }
-            _sig_defaults = {
-                'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
-                'use_sar': False, 'bb_lower': False,
-                'use_willr': False, 'willr_val': -80,
-                'di_plus_cross': False, 'di_minus_cross': False,
-                'use_rsi_wait': False, 'rsi_wait_val': 35,
-                'rsi_inc': False, 'macd_golden': False,
-            }
-            _sell_defaults = {
-                'use_sar': False, 'bb_upper': False,
-                'use_willr': False, 'willr_val': -20,
-                'di_minus_above': False, 'di_minus_cross': False,
-                'use_chandelier': False, 'chandelier_mult': 3.0,
-                'use_rsi_wait': False, 'rsi_wait_val': 70,
-                'macd_dead': False,
-            }
-            GOLDEN_LEV_PARAMS = {
-                'use_leverage': True,
-                'buy_signals': [
-                    {**_sig_defaults, 'rsi_val': 35, 'rsi_cross': False,
-                     'macd_inc': False, 'macd_signal_below': False},
-                    {**_sig_defaults, 'rsi_val': 0, 'rsi_cross': True,
-                     'macd_inc': True, 'macd_signal_below': True},
-                ],
-                'sell_signals': [
-                    {**_sell_defaults, 'rsi_val': 70, 'rsi_dec': True,
-                     'rsi_dead': False, 'macd_dec': False, 'macd_signal_above': False},
-                    {**_sell_defaults, 'rsi_val': 0, 'rsi_dec': False,
-                     'rsi_dead': True, 'macd_dec': True, 'macd_signal_above': True},
-                ],
-                's3_protection': [], 'panic_buy_signals': [],
-                'buy_reb_up': 0.01, 'buy_reb_down': -0.02,
-                'sell_reb_up': 0.02, 'sell_reb_down': -0.02,
-                'use_fixed_reb': True, 'use_atr_reb': False,
-                'cash_ratio': 0.0, 'trade_at': '종가',
-                'panic_ma': 200, 'use_panic': False,
-                'base_asset': 'TLT', 'leverage_asset': 'TMF',
-            }
+                or st.session_state.get('initial_bond_load_v31', False) is False):
+            _bond_name, _bond_params, _bond_lev_params = load_default_bond_params()
 
-            # 1. DB 로드 시도
-            custom_strat = StrategyStorage.load_strategy("Bond_V7_Custom")
-            
-            if custom_strat and isinstance(custom_strat, dict) and 'ffv_lo' in custom_strat:
-                # DB에 값이 있으면 기본값은 가져오되, 레버리지 시그널이 부실하면 골든 스탠다드로 병합
-                st.session_state.current_bond_params = {k: custom_strat.get(k, v) for k, v in GOLDEN_BOND_PARAMS.items()}
-                
-                db_lev = custom_strat.get('lev_params') or custom_strat
-                if not db_lev.get('buy_signals'):
-                    # 레버리지 시그널이 없으면 골든 스탠다드 강제 적용
-                    st.session_state.current_bond_lev_params = GOLDEN_LEV_PARAMS
-                else:
-                    st.session_state.current_bond_lev_params = db_lev
-            else:
-                # 2. DB에 없거나 비정상이면 완전 초기화
-                st.session_state.current_bond_params = GOLDEN_BOND_PARAMS
-                st.session_state.current_bond_lev_params = GOLDEN_LEV_PARAMS
-            
-            # 3. UI 위젯 동기화
+            st.session_state.current_bond_params = _bond_params
+            st.session_state.current_bond_lev_params = _bond_lev_params
+            if _bond_name:
+                st.session_state.default_bond_strategy_name = _bond_name
+
+            # UI 위젯 동기화
             TesterView.sync_bond_params_to_widgets(
-                st.session_state.current_bond_params, 
+                st.session_state.current_bond_params,
                 lev_params=st.session_state.current_bond_lev_params,
                 key_prefix="bond_"
             )
-            
-            # 4. 상태 저장 및 강제 재실행 (모든 레이어 동기화 보장)
+
             st.session_state.trigger_recalc_bond = True
-            st.session_state.initial_bond_load_v28 = True
+            st.session_state.initial_bond_load_v31 = True
             st.rerun()
         
         if 'comparison_list' not in st.session_state:
@@ -285,6 +149,44 @@ class GoldenStrategyApp:
                 help="활성화 시 소수점 주식 없이 정수 단위로만 매매 (잔여금은 현금으로 보존)")
 
             st.sidebar.divider()
+            st.sidebar.subheader("📋 기본 전략 설정")
+
+            _eq_strats = StrategyStorage.list_strategies(category='equity')
+            _bond_strats = StrategyStorage.list_strategies(category='bond')
+            _portfolio_list = StrategyStorage.list_portfolios()
+
+            _cur_default_eq = StrategyStorage.get_default_strategy(category='equity')
+            _cur_default_bond = StrategyStorage.get_default_strategy(category='bond')
+            _cur_default_pf = StrategyStorage.get_default_portfolio()
+
+            if _eq_strats:
+                _eq_fmt = lambda x: f"⭐ {x}" if x == _cur_default_eq else x
+                _eq_idx = _eq_strats.index(_cur_default_eq) if _cur_default_eq in _eq_strats else 0
+                _sel_eq = st.sidebar.selectbox("주식 전략", _eq_strats, index=_eq_idx, format_func=_eq_fmt, key="sb_default_eq")
+                if st.sidebar.button("⭐ 주식 기본 설정", key="btn_set_default_eq", use_container_width=True):
+                    StrategyStorage.set_default_strategy(_sel_eq, category='equity')
+                    st.sidebar.success(f"⭐ '{_sel_eq}' 설정 완료")
+                    st.rerun()
+
+            if _bond_strats:
+                _bond_fmt = lambda x: f"⭐ {x}" if x == _cur_default_bond else x
+                _bond_idx = _bond_strats.index(_cur_default_bond) if _cur_default_bond in _bond_strats else 0
+                _sel_bond = st.sidebar.selectbox("채권 전략", _bond_strats, index=_bond_idx, format_func=_bond_fmt, key="sb_default_bond")
+                if st.sidebar.button("⭐ 채권 기본 설정", key="btn_set_default_bond", use_container_width=True):
+                    StrategyStorage.set_default_strategy(_sel_bond, category='bond')
+                    st.sidebar.success(f"⭐ '{_sel_bond}' 설정 완료")
+                    st.rerun()
+
+            if _portfolio_list:
+                _pf_fmt = lambda x: f"⭐ {x}" if x == _cur_default_pf else x
+                _pf_idx = _portfolio_list.index(_cur_default_pf) if _cur_default_pf in _portfolio_list else 0
+                _sel_pf = st.sidebar.selectbox("포트폴리오", _portfolio_list, index=_pf_idx, format_func=_pf_fmt, key="sb_default_pf")
+                if st.sidebar.button("⭐ 포트폴리오 기본 설정", key="btn_set_default_pf", use_container_width=True):
+                    StrategyStorage.set_default_portfolio(_sel_pf)
+                    st.sidebar.success(f"⭐ '{_sel_pf}' 설정 완료")
+                    st.rerun()
+
+            st.sidebar.divider()
             st.sidebar.subheader("📅 분석 기간 설정")
             st.sidebar.selectbox(
                 "연도 선택 (1/1 ~ 12/31 자동설정)", 
@@ -296,26 +198,8 @@ class GoldenStrategyApp:
             start_d = st.sidebar.date_input("시작일", key="start_input")
             end_d = st.sidebar.date_input("종료일", key="end_input")
 
-        # [수정] 세션 파라미터를 기반으로 로직 파라미터 구성
-        smart_params = {
-            'use_panic': cp['use_panic'], 
-            'panic_ma': cp['panic_ma'],
-            'panic_buy_signals': cp.get('panic_buy_signals', []),
-            'panic_rsi_s1': cp.get('panic_rsi_s1', 27),
-            'panic_rsi_s2': cp.get('panic_rsi_s2', 28),
-            'panic_rsi_s3': cp.get('panic_rsi_s3', 30),
-            'use_vxn_safety': cp['use_vxn_safety'],
-            'vxn_exit': cp['vxn_exit'],
-            'use_rsi_turbo': cp['use_rsi_turbo'],
-            'rsi_turbo': cp['rsi_turbo'],
-            'use_sl_control': cp.get('use_sl_control', False),
-            'sl_control_limit': cp.get('sl_control_limit', -15.0),
-            # [신규] 개별 거래 세트 기준 손절 라인
-            'use_set_sl': cp.get('use_set_sl', False),
-            'set_sl_limit': cp.get('set_sl_limit', -15.0),
-            # [신규] 동적 현금 비중 제어
-            'dynamic_cash': cp.get('dynamic_cash', {})
-        }
+        # [수정] 중앙화된 extract_smart_params 사용
+        smart_params = extract_smart_params(cp)
         cash_ratio = cp['cash_ratio_pct'] / 100.0
 
         # [신규] 실시간 시그널 프리뷰 처리 인터럽트
@@ -499,7 +383,7 @@ class GoldenStrategyApp:
  
                     # [신규 추가] 채권 전략 상세 분석 로그 (주식 전략과 동일한 구성)
                     BacktestView.render_closed_sets(res['closed_trades'])
-                    BacktestView.render_execution_log(res['history'], 'TLT')
+                    BacktestView.render_execution_log(res['history'], 'TLT', is_bond=True)
                     
                     st.divider()
                     BacktestView.render_daily_log(res['history'], res['benchmarks'], 'TLT')
@@ -525,6 +409,8 @@ class GoldenStrategyApp:
                                 st.rerun()
                         st.write(f"- 최적화 파라미터: {st.session_state.current_bond_params}")
 
+        elif menu == "💰 모의투자 시뮬레이터":
+            SimulationView.render(data_dict, fg_df, vxn_df, macro_df, news_df)
         elif menu == "🧠 AI 뉴스 분석 리포트":
             IntelligenceView.render()
 

@@ -326,7 +326,7 @@ class TesterView:
                     })
             
             smart_config['panic_buy_signals'] = panic_buy_signals_list
-            
+
         # --- [신규] 국면별 동적 현금 비중 제어 섹션 (별도 익스펜더) ---
         with st.expander("🌊 시장 국면별 동적 현금 비중 제어 (Dynamic Cash Allocation)"):
             dc = current_params.get('dynamic_cash', {
@@ -433,20 +433,20 @@ class TesterView:
             with c1:
                 st.markdown("##### FFV 내재가치 임계값")
                 ffv_lo = st.number_input("FFV 하한 (Undervalued — TLT 진입 허용)", -5.0, 5.0,
-                                         float(current_params.get('ffv_lo', -1.0)), 0.1, key=k("ffv_lo"))
+                                         float(current_params.get('ffv_lo', -1.11)), 0.1, key=k("ffv_lo"))
                 ffv_hi = st.number_input("FFV 상한 (Overvalued — TBF 진입 차단)", -5.0, 5.0,
-                                         float(current_params.get('ffv_hi', 1.5)), 0.1, key=k("ffv_hi"))
+                                         float(current_params.get('ffv_hi', 2.93)), 0.1, key=k("ffv_hi"))
                 st.markdown("---")
                 st.markdown("##### TLT 진입 RSI 필터")
                 tlt_rsi_max = st.slider("TLT 진입 허용 RSI 최대치", 30, 90,
-                                        int(current_params.get('tlt_rsi_max', 60)), key=k("rsi_max"))
+                                        int(current_params.get('tlt_rsi_max', 70)), key=k("rsi_max"))
 
             with c2:
                 st.markdown("##### 수익률 곡선(YC) 오버라이드")
                 yc_inv = st.number_input("역전 임계값 (10Y-2Y, 이하면 TBF 전환)", -1.0, 1.0,
-                                         float(current_params.get('yc_inv', -0.3)), 0.01, key=k("yc_inv"))
+                                         float(current_params.get('yc_inv', -0.40)), 0.01, key=k("yc_inv"))
                 yc_steep = st.number_input("스티프닝 모멘텀 임계값 (63일 변화량)", -1.0, 1.0,
-                                           float(current_params.get('yc_steep', 0.4)), 0.01, key=k("yc_steep"))
+                                           float(current_params.get('yc_steep', 0.13)), 0.01, key=k("yc_steep"))
                 st.info("수익률 곡선이 스티프닝 국면이면 다른 조건에 관계없이 TLT 우선 매수합니다.")
 
         # ── Tab 2: Layer 2 (V8) ──────────────────────────────────────────────
@@ -487,10 +487,10 @@ class TesterView:
                         buy_signals.append({
                             'rsi_val': rsi_val_1, 'rsi_cross': False, 'rsi_inc': False,
                             'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False,
-                            'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                            'use_adx': True, 'adx_op': '<=', 'adx_val': 40,
                             'use_sar': False, 'bb_lower': False,
                             'use_willr': False, 'willr_val': -80,
-                            'di_plus_cross': False, 'di_minus_cross': False,
+                            'di_plus_cross': False, 'di_plus_above': False, 'di_minus_cross': False,
                             'use_rsi_wait': False, 'rsi_wait_val': 35,
                         })
 
@@ -506,10 +506,10 @@ class TesterView:
                             'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False,
                             'macd_inc': macd_inc_2, 'macd_signal_below': macd_signal_below_2,
                             'macd_golden': False,
-                            'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                            'use_adx': True, 'adx_op': '<=', 'adx_val': 40,
                             'use_sar': False, 'bb_lower': False,
                             'use_willr': False, 'willr_val': -80,
-                            'di_plus_cross': False, 'di_minus_cross': False,
+                            'di_plus_cross': False, 'di_plus_above': False, 'di_minus_cross': False,
                             'use_rsi_wait': False, 'rsi_wait_val': 35,
                         })
 
@@ -555,35 +555,111 @@ class TesterView:
                         })
 
                 st.divider()
-                st.markdown("##### 가격 트리거 (스테이지 전환)")
-                pc1, pc2 = st.columns(2)
-                with pc1:
-                    reb_up = st.slider("상승 트리거 reb_up (S업)", 0.5, 5.0,
-                                       float(lp.get('buy_reb_up', 0.01)) * 100, 0.5,
-                                       format="%.1f%%", key=k("reb_up")) / 100
-                with pc2:
-                    reb_dn = st.slider("하락 트리거 reb_down (S다운)", 0.5, 5.0,
-                                       float(abs(lp.get('buy_reb_down', 0.02))) * 100, 0.5,
-                                       format="%.1f%%", key=k("reb_dn")) / 100
+
+                # ── 가격 트리거 / ATR / 인터락 (3컬럼) ──
+                rc1, rc2, rc3 = st.columns(3)
+
+                with rc1:
+                    st.markdown("##### 🔹 고정 비율 세부 설정")
+                    buy_reb_up = st.number_input("매수 상향 (%)", 0.0, 100.0,
+                        float(lp.get('buy_reb_up', 0.02)) * 100, 0.1, key=k("r_b_u")) / 100.0
+                    buy_reb_down = st.number_input("매수 하향 (%)", -100.0, 0.0,
+                        float(lp.get('buy_reb_down', -1.0)) * 100, 0.1,
+                        help="-100 = OFF (하방 매수 트리거 비활성화)", key=k("r_b_d")) / 100.0
+                    sell_reb_up = st.number_input("매도 상향 (%)", 0.0, 100.0,
+                        float(lp.get('sell_reb_up', 0.05)) * 100, 0.1, key=k("r_s_u")) / 100.0
+                    sell_reb_down = st.number_input("매도 하향 (%)", -100.0, 0.0,
+                        float(lp.get('sell_reb_down', -0.02)) * 100, 0.1, key=k("r_s_d")) / 100.0
+
+                with rc2:
+                    st.markdown("##### 🔸 ATR 변동성 세부 설정")
+                    use_atr_reb = st.checkbox("ATR 변동성 리밸런싱 사용",
+                        value=lp.get('use_atr_reb', True), key=k("use_atr"))
+                    atr_m_buy_up = st.number_input("매수 상향 승수 (불타기)", 0.1, 25.0,
+                        float(lp.get('atr_mult_buy_up', 10.0)), 0.1, key=k("atr_m_buy_up"))
+                    atr_m_buy_down = st.number_input("매수 하향 승수 (물타기)", 0.1, 15.0,
+                        float(lp.get('atr_mult_buy_down', 2.0)), 0.1, key=k("atr_m_buy_down"))
+                    atr_m_sell = st.number_input("매도 승수", 0.1, 15.0,
+                        float(lp.get('atr_mult_sell', 7.0)), 0.1, key=k("atr_m_sell"))
+
+                with rc3:
+                    st.markdown("##### 🚦 리밸런싱 인터락")
+                    use_reb_interlock = st.toggle("인터락 활성화",
+                        value=lp.get('use_reb_interlock', True),
+                        help="MACD < Signal 조건 충족 시에만 가격 트리거 매수를 허용합니다.",
+                        key=k("use_reb_interlock"))
+                    reb_interlock_macd = st.checkbox("MACD < Signal 게이트",
+                        value=lp.get('reb_interlock_macd_below', True),
+                        key=k("reb_interlock_macd"))
+
+                    st.markdown("---")
+                    st.markdown("##### 📊 Stage 비율")
+                    sf = lp.get('stage_fracs', {1: 0.30, 2: 0.70, 3: 1.0})
+                    s1_frac = st.number_input("S1 비율", 0.0, 1.0,
+                        float(sf.get(1, 0.30)), 0.05, key=k("s1_frac"))
+                    s2_frac = st.number_input("S2 비율", 0.0, 1.0,
+                        float(sf.get(2, 0.70)), 0.05, key=k("s2_frac"))
+                    s3_frac = st.number_input("S3 비율", 0.0, 1.0,
+                        float(sf.get(3, 1.0)), 0.05, key=k("s3_frac"))
+
+                # ── Panic Mode 설정 ──
+                st.divider()
+                st.markdown("##### 🔥 Panic Mode (200MA 하방 매수 조건)")
+                pk1, pk2 = st.columns([1, 3])
+                with pk1:
+                    use_panic = st.toggle("Panic Mode 활성화",
+                        value=lp.get('use_panic', True), key=k("use_panic"))
+                    panic_ma = st.number_input("이동평균 기준", 50, 300,
+                        int(lp.get('panic_ma', 200)), 10, key=k("panic_ma"))
+                with pk2:
+                    if use_panic:
+                        pb_sigs = lp.get('panic_buy_signals', [])
+                        st.caption("200MA 아래에서 Stage별 매수 조건을 강화합니다.")
+                        pb_cols = st.columns(3)
+                        panic_buy_signals = []
+                        for idx, (col, stage_name) in enumerate(zip(pb_cols, ["S1 (30%)", "S2 (70%)", "S3 (100%)"])):
+                            with col:
+                                pb = pb_sigs[idx] if idx < len(pb_sigs) else {}
+                                st.markdown(f"**{stage_name}**")
+                                pb_rsi = st.number_input(f"RSI ≤", 10, 50,
+                                    int(pb.get('rsi_val', 35)), 1, key=k(f"pb{idx+1}_rsi"))
+                                pb_macd = st.checkbox("MACD < Signal",
+                                    value=pb.get('macd_signal_below', False),
+                                    key=k(f"pb{idx+1}_macd"))
+                                panic_buy_signals.append({
+                                    'rsi_val': pb_rsi, 'rsi_cross': False,
+                                    'macd_inc': False, 'macd_signal_below': pb_macd,
+                                    'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                                    'di_plus_cross': False, 'di_plus_above': False,
+                                })
+                    else:
+                        panic_buy_signals = []
 
                 lev_params_out = {
                     'use_leverage': True,
                     'buy_signals':  buy_signals,
                     'sell_signals': sell_signals,
-                    's3_protection': [],
-                    'panic_buy_signals': [],
-                    'buy_reb_up':    reb_up,
-                    'buy_reb_down':  -reb_dn,
-                    'sell_reb_up':   0.02,
-                    'sell_reb_down': -0.02,
+                    's3_protection': lp.get('s3_protection', []),
+                    'panic_buy_signals': panic_buy_signals,
+                    'buy_reb_up':    buy_reb_up,
+                    'buy_reb_down':  buy_reb_down,
+                    'sell_reb_up':   sell_reb_up,
+                    'sell_reb_down': sell_reb_down,
                     'use_fixed_reb': True,
-                    'use_atr_reb':   False,
+                    'use_atr_reb':   use_atr_reb,
+                    'atr_mult_buy_up':  atr_m_buy_up,
+                    'atr_mult_buy_down': atr_m_buy_down,
+                    'atr_mult_sell':    atr_m_sell,
+                    'sell_mode':     lp.get('sell_mode', 'instant'),
                     'cash_ratio':    0.0,
                     'trade_at':      '종가',
-                    'panic_ma':      200,
-                    'use_panic':     False,
+                    'panic_ma':      panic_ma,
+                    'use_panic':     use_panic,
+                    'use_reb_interlock': use_reb_interlock,
+                    'reb_interlock_macd_below': reb_interlock_macd,
                     'base_asset':    'TLT',
                     'leverage_asset':'TMF',
+                    'stage_fracs':   {1: s1_frac, 2: s2_frac, 3: s3_frac},
                 }
 
         # ── FOMC 감성 분석 외부 채널 ──────────────────────────────────────────
@@ -609,7 +685,7 @@ class TesterView:
                     fomc_hi = st.slider(
                         "매파 임계값 fomc_hi (이상이면 RISING 강제)",
                         min_value=0.1, max_value=1.0,
-                        value=float(current_params.get('fomc_hi', 0.5)),
+                        value=float(current_params.get('fomc_hi', 0.64)),
                         step=0.1, format="%.1f",
                         key=k("fomc_hi")
                     )
@@ -617,15 +693,16 @@ class TesterView:
                     fomc_lo = st.slider(
                         "비둘기 임계값 fomc_lo (이하면 FALLING 강제)",
                         min_value=-1.0, max_value=-0.1,
-                        value=float(current_params.get('fomc_lo', -0.3)),
+                        value=float(current_params.get('fomc_lo', -0.37)),
                         step=0.1, format="%.1f",
                         key=k("fomc_lo")
                     )
                 st.caption(f"현재 설정: 점수 > **{fomc_hi:+.1f}** → 매파(채권 회피) | 점수 < **{fomc_lo:+.1f}** → 비둘기(채권 선호)")
             else:
-                fomc_hi = float(current_params.get('fomc_hi', 0.5))
-                fomc_lo = float(current_params.get('fomc_lo', -0.3))
+                fomc_hi = float(current_params.get('fomc_hi', 0.64))
+                fomc_lo = float(current_params.get('fomc_lo', -0.37))
 
+        # F1/F2/F3 상태머신 파라미터는 UI 위젯 없이 current_params에서 passthrough
         layer1_params = {
             'ffv_lo': ffv_lo, 'ffv_hi': ffv_hi,
             'yc_inv': yc_inv, 'yc_steep': yc_steep,
@@ -633,6 +710,18 @@ class TesterView:
             'fomc_use': fomc_use,
             'fomc_hi':  fomc_hi,
             'fomc_lo':  fomc_lo,
+            # F1/F2/F3 상태머신 임계값 (V3 최적화) — UI 미노출, passthrough
+            'f1_lookback':    current_params.get('f1_lookback', 15),
+            'f1_rise_thr':    current_params.get('f1_rise_thr', 0.27),
+            'f1_fall_thr':    current_params.get('f1_fall_thr', -0.27),
+            'f1_freeze_days': current_params.get('f1_freeze_days', 28),
+            'f2_cpi_window':    current_params.get('f2_cpi_window', 142),
+            'f2_accel_window':  current_params.get('f2_accel_window', 114),
+            'f2_ppi_window':    current_params.get('f2_ppi_window', 135),
+            'f3_emp_window': current_params.get('f3_emp_window', 72),
+            'f3_gap_hi':     current_params.get('f3_gap_hi', 0.47),
+            'f3_chg_thr':    current_params.get('f3_chg_thr', -0.11),
+            'f3_gap_lo':     current_params.get('f3_gap_lo', -0.21),
         }
         return layer1_params, lev_params_out
 
@@ -642,11 +731,11 @@ class TesterView:
         def k(base_key): return f"{key_prefix}{base_key}"
         
         # Layer 1
-        st.session_state[k("ffv_lo")] = float(params.get('ffv_lo', -1.0))
-        st.session_state[k("ffv_hi")] = float(params.get('ffv_hi', 1.5))
-        st.session_state[k("rsi_max")] = int(params.get('tlt_rsi_max', 60))
-        st.session_state[k("yc_inv")] = float(params.get('yc_inv', -0.3))
-        st.session_state[k("yc_steep")] = float(params.get('yc_steep', 0.4))
+        st.session_state[k("ffv_lo")] = float(params.get('ffv_lo', -1.11))
+        st.session_state[k("ffv_hi")] = float(params.get('ffv_hi', 2.93))
+        st.session_state[k("rsi_max")] = int(params.get('tlt_rsi_max', 70))
+        st.session_state[k("yc_inv")] = float(params.get('yc_inv', -0.40))
+        st.session_state[k("yc_steep")] = float(params.get('yc_steep', 0.13))
         
         # Layer 2
         lp = lev_params or {}
@@ -655,7 +744,7 @@ class TesterView:
         # Buy Signals
         b_sigs = lp.get('buy_signals', [])
         if len(b_sigs) > 0:
-            st.session_state[k("b1_rsi")] = int(b_sigs[0].get('rsi_val', 35))
+            st.session_state[k("b1_rsi")] = int(b_sigs[0].get('rsi_val', 45))
         if len(b_sigs) > 1:
             st.session_state[k("b2_macd_below")] = b_sigs[1].get('macd_signal_below', True)
             st.session_state[k("b2_macd_inc")] = b_sigs[1].get('macd_inc', True)
@@ -663,20 +752,47 @@ class TesterView:
         # Sell Signals
         s_sigs = lp.get('sell_signals', [])
         if len(s_sigs) > 0:
-            st.session_state[k("s1_rsi")] = int(s_sigs[0].get('rsi_val', 70))
+            st.session_state[k("s1_rsi")] = int(s_sigs[0].get('rsi_val', 60))
             st.session_state[k("s1_rsi_dec")] = s_sigs[0].get('rsi_dec', True)
         if len(s_sigs) > 1:
             st.session_state[k("s2_macd_dec")] = s_sigs[1].get('macd_dec', True)
             st.session_state[k("s2_macd_above")] = s_sigs[1].get('macd_signal_above', True)
             
-        # Rebalance
-        st.session_state[k("reb_up")] = float(lp.get('buy_reb_up', 0.01)) * 100
-        st.session_state[k("reb_dn")] = float(abs(lp.get('buy_reb_down', 0.02))) * 100
+        # 고정 비율
+        st.session_state[k("r_b_u")] = float(lp.get('buy_reb_up', 0.02)) * 100
+        st.session_state[k("r_b_d")] = float(lp.get('buy_reb_down', -1.0)) * 100
+        st.session_state[k("r_s_u")] = float(lp.get('sell_reb_up', 0.05)) * 100
+        st.session_state[k("r_s_d")] = float(lp.get('sell_reb_down', -0.02)) * 100
+
+        # ATR
+        st.session_state[k("use_atr")] = bool(lp.get('use_atr_reb', True))
+        st.session_state[k("atr_m_buy_up")] = float(lp.get('atr_mult_buy_up', 10.0))
+        st.session_state[k("atr_m_buy_down")] = float(lp.get('atr_mult_buy_down', 2.0))
+        st.session_state[k("atr_m_sell")] = float(lp.get('atr_mult_sell', 7.0))
+
+        # 인터락
+        st.session_state[k("use_reb_interlock")] = bool(lp.get('use_reb_interlock', True))
+        st.session_state[k("reb_interlock_macd")] = bool(lp.get('reb_interlock_macd_below', True))
+
+        # Stage 비율
+        sf = lp.get('stage_fracs', {1: 0.30, 2: 0.70, 3: 1.0})
+        st.session_state[k("s1_frac")] = float(sf.get(1, 0.30))
+        st.session_state[k("s2_frac")] = float(sf.get(2, 0.70))
+        st.session_state[k("s3_frac")] = float(sf.get(3, 1.0))
+
+        # Panic Mode
+        st.session_state[k("use_panic")] = bool(lp.get('use_panic', True))
+        st.session_state[k("panic_ma")] = int(lp.get('panic_ma', 200))
+        pb_sigs = lp.get('panic_buy_signals', [])
+        for idx in range(3):
+            pb = pb_sigs[idx] if idx < len(pb_sigs) else {}
+            st.session_state[k(f"pb{idx+1}_rsi")] = int(pb.get('rsi_val', 35))
+            st.session_state[k(f"pb{idx+1}_macd")] = bool(pb.get('macd_signal_below', False))
 
         # FOMC 감성 채널
         st.session_state[k("fomc_use")] = bool(params.get('fomc_use', True))
-        st.session_state[k("fomc_hi")]  = float(params.get('fomc_hi', 0.5))
-        st.session_state[k("fomc_lo")]  = float(params.get('fomc_lo', -0.3))
+        st.session_state[k("fomc_hi")]  = float(params.get('fomc_hi', 0.64))
+        st.session_state[k("fomc_lo")]  = float(params.get('fomc_lo', -0.37))
 
     @staticmethod
     def get_bond_params_from_widgets(key_prefix="bond_"):
@@ -686,14 +802,17 @@ class TesterView:
         
         # Layer 1
         params = {
-            'ffv_lo': s.get(k("ffv_lo"), -1.0),
-            'ffv_hi': s.get(k("ffv_hi"), 1.5),
-            'tlt_rsi_max': s.get(k("rsi_max"), 60),
-            'yc_inv': s.get(k("yc_inv"), -0.3),
-            'yc_steep': s.get(k("yc_steep"), 0.4),
+            'ffv_lo': s.get(k("ffv_lo"), -1.11),
+            'ffv_hi': s.get(k("ffv_hi"), 2.93),
+            'tlt_rsi_max': s.get(k("rsi_max"), 47),
+            'yc_inv': s.get(k("yc_inv"), -0.40),
+            'yc_steep': s.get(k("yc_steep"), 0.13),
             'fomc_use': s.get(k("fomc_use"), True),
-            'fomc_hi':  s.get(k("fomc_hi"),  0.5),
-            'fomc_lo':  s.get(k("fomc_lo"),  -0.3),
+            'fomc_hi':  s.get(k("fomc_hi"),  0.64),
+            'fomc_lo':  s.get(k("fomc_lo"),  -0.37),
+            'f1_lookback': 15, 'f1_rise_thr': 0.27, 'f1_fall_thr': -0.27, 'f1_freeze_days': 28,
+            'f2_cpi_window': 142, 'f2_accel_window': 114, 'f2_ppi_window': 135,
+            'f3_emp_window': 72, 'f3_gap_hi': 0.47, 'f3_chg_thr': -0.11, 'f3_gap_lo': -0.21,
         }
         
         # Layer 2
@@ -703,23 +822,23 @@ class TesterView:
             {
                 'rsi_val': s.get(k("b1_rsi"), 35), 'rsi_cross': False, 'rsi_inc': False,
                 'macd_inc': False, 'macd_signal_below': False, 'macd_golden': False,
-                'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                'use_adx': True, 'adx_op': '<=', 'adx_val': 40,
                 'use_sar': False, 'bb_lower': False, 'use_willr': False, 'willr_val': -80,
-                'di_plus_cross': False, 'di_minus_cross': False, 'use_rsi_wait': False, 'rsi_wait_val': 35,
+                'di_plus_cross': False, 'di_plus_above': False, 'di_minus_cross': False, 'use_rsi_wait': False, 'rsi_wait_val': 35,
             },
             {
                 'rsi_val': 0, 'rsi_cross': True, 'rsi_inc': False,
-                'macd_inc': s.get(k("b2_macd_inc"), True), 
+                'macd_inc': s.get(k("b2_macd_inc"), True),
                 'macd_signal_below': s.get(k("b2_macd_below"), True),
-                'macd_golden': False, 'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                'macd_golden': False, 'use_adx': True, 'adx_op': '<=', 'adx_val': 40,
                 'use_sar': False, 'bb_lower': False, 'use_willr': False, 'willr_val': -80,
-                'di_plus_cross': False, 'di_minus_cross': False, 'use_rsi_wait': False, 'rsi_wait_val': 35,
+                'di_plus_cross': False, 'di_plus_above': False, 'di_minus_cross': False, 'use_rsi_wait': False, 'rsi_wait_val': 35,
             }
         ]
-        
+
         sell_signals = [
             {
-                'rsi_val': s.get(k("s1_rsi"), 70), 'rsi_dec': s.get(k("s1_rsi_dec"), True), 'rsi_dead': False,
+                'rsi_val': s.get(k("s1_rsi"), 72), 'rsi_dec': s.get(k("s1_rsi_dec"), True), 'rsi_dead': False,
                 'macd_dec': False, 'macd_dead': False, 'macd_signal_above': False,
                 'use_sar': False, 'bb_upper': False, 'use_willr': False, 'willr_val': -20,
                 'di_minus_above': False, 'di_minus_cross': False, 'use_chandelier': False, 'chandelier_mult': 3.0,
@@ -734,17 +853,45 @@ class TesterView:
                 'use_rsi_wait': False, 'rsi_wait_val': 70,
             }
         ]
-        
+
+        # Panic buy signals 복원
+        panic_buy_signals = []
+        for idx in range(3):
+            panic_buy_signals.append({
+                'rsi_val': s.get(k(f"pb{idx+1}_rsi"), 35),
+                'rsi_cross': False, 'macd_inc': False,
+                'macd_signal_below': s.get(k(f"pb{idx+1}_macd"), False),
+                'use_adx': False, 'adx_op': '<=', 'adx_val': 40,
+                'di_plus_cross': False, 'di_plus_above': False,
+            })
+
         lev_params = {
             'use_leverage': use_lev,
             'buy_signals': buy_signals,
             'sell_signals': sell_signals,
-            'buy_reb_up': s.get(k("reb_up"), 1.0) / 100,
-            'buy_reb_down': -s.get(k("reb_dn"), 2.0) / 100,
-            'sell_reb_up': 0.02, 'sell_reb_down': -0.02,
-            'use_fixed_reb': True, 'use_atr_reb': False, 'cash_ratio': 0.0,
-            'trade_at': '종가', 'panic_ma': 200, 'use_panic': False,
-            'base_asset': 'TLT', 'leverage_asset': 'TMF'
+            'buy_reb_up': s.get(k("r_b_u"), 2.0) / 100,
+            'buy_reb_down': s.get(k("r_b_d"), -100.0) / 100,
+            'sell_reb_up': s.get(k("r_s_u"), 5.0) / 100,
+            'sell_reb_down': s.get(k("r_s_d"), -2.0) / 100,
+            'sell_mode': 'instant',
+            'use_fixed_reb': True,
+            'use_atr_reb': s.get(k("use_atr"), True),
+            'atr_mult_buy_up': s.get(k("atr_m_buy_up"), 10.0),
+            'atr_mult_buy_down': s.get(k("atr_m_buy_down"), 2.0),
+            'atr_mult_sell': s.get(k("atr_m_sell"), 7.0),
+            'cash_ratio': 0.0,
+            'trade_at': '종가',
+            'panic_ma': s.get(k("panic_ma"), 200),
+            'use_panic': s.get(k("use_panic"), True),
+            'panic_buy_signals': panic_buy_signals,
+            'use_reb_interlock': s.get(k("use_reb_interlock"), True),
+            'reb_interlock_macd_below': s.get(k("reb_interlock_macd"), True),
+            'base_asset': 'TLT', 'leverage_asset': 'TMF',
+            'stage_fracs': {
+                1: s.get(k("s1_frac"), 0.30),
+                2: s.get(k("s2_frac"), 0.70),
+                3: s.get(k("s3_frac"), 1.0),
+            },
         }
         
         return params, lev_params

@@ -109,8 +109,129 @@ try:
         else:
             return "SUCCESS: Daily update done (Telegram keys missing).", 200
 
+    # ── Telegram Webhook: /approve, /reject, /kill, /resume, /status ────
+
+    def telegram_webhook():
+        """Telegram Bot Webhook 수신 — KIS 주문 승인/거부/긴급정지"""
+        from flask import request as flask_request
+        data = flask_request.get_json(silent=True)
+        if not data:
+            return 'OK', 200
+
+        message = data.get('message', {})
+        text = (message.get('text') or '').strip()
+        incoming_chat_id = str(message.get('chat', {}).get('id', ''))
+
+        # 인가된 사용자만 허용
+        allowed_chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+        if incoming_chat_id != allowed_chat_id:
+            print(f"[Telegram Webhook] Unauthorized chat_id: {incoming_chat_id}", flush=True)
+            return 'OK', 200
+
+        token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN")
+
+        def _send_reply(reply_text):
+            if token and incoming_chat_id:
+                try:
+                    import requests as req
+                    req.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": incoming_chat_id, "text": reply_text, "parse_mode": "Markdown"},
+                        timeout=10,
+                    )
+                except Exception as e:
+                    print(f"[Telegram Reply Error] {e}", flush=True)
+
+        try:
+            if text.startswith('/approve'):
+                parts = text.split()
+                if len(parts) < 2:
+                    _send_reply("사용법: /approve <승인코드>")
+                    return 'OK', 200
+                code = parts[1].strip()
+                from core.kis_trader import KISTrader
+                trader = KISTrader()
+                result = trader.execute_approved_order(code)
+                icon = '✅' if result['success'] else '❌'
+                _send_reply(f"{icon} {result['message']}")
+
+            elif text.startswith('/reject'):
+                parts = text.split()
+                if len(parts) < 2:
+                    _send_reply("사용법: /reject <승인코드>")
+                    return 'OK', 200
+                code = parts[1].strip()
+                from core.kis_trader import KISTrader
+                result = KISTrader.reject_order(code)
+                icon = '✅' if result['success'] else '❌'
+                _send_reply(f"{icon} {result['message']}")
+
+            elif text.startswith('/kill'):
+                from core.storage import AssetStorage, OrderStorage
+                accounts = AssetStorage.list_accounts()
+                halted = []
+                for acc in accounts:
+                    OrderStorage.set_trading_halt(acc['id'], True)
+                    halted.append(acc['name'])
+                _send_reply(f"🛑 *거래 긴급 중단*\n모든 계좌 거래 정지됨: {', '.join(halted)}")
+
+            elif text.startswith('/resume'):
+                from core.storage import AssetStorage, OrderStorage
+                accounts = AssetStorage.list_accounts()
+                resumed = []
+                for acc in accounts:
+                    OrderStorage.set_trading_halt(acc['id'], False)
+                    resumed.append(acc['name'])
+                _send_reply(f"▶️ *거래 재개*\n모든 계좌 거래 활성화: {', '.join(resumed)}")
+
+            elif text.startswith('/status'):
+                import datetime as dt
+                mode = os.environ.get('TRADING_MODE', 'disabled')
+                kill = os.environ.get('TRADING_KILL_SWITCH', 'false')
+                lines = [
+                    "━━━━━━━━━━━━━━━━━━━━━━",
+                    f"📊 *KIS 거래 상태*",
+                    f"  Mode: `{mode}`",
+                    f"  Kill Switch: `{kill}`",
+                ]
+                # 대기 중 승인 목록
+                from core.storage import OrderStorage
+                pending = OrderStorage.list_pending_approvals('pending')
+                if pending:
+                    lines.append(f"\n🔔 *대기 중 승인: {len(pending)}건*")
+                    for p in pending[:5]:
+                        icon = '🟢' if p['side'] == 'buy' else '🔴'
+                        lines.append(f"  {icon} {p['ticker']} {p['quantity']}주 — /approve {p['approval_code']}")
+                else:
+                    lines.append("\n✅ 대기 중 승인 없음")
+
+                # KIS 잔고 조회 시도
+                if mode in ('paper', 'live'):
+                    try:
+                        from core.kis_client import KISClient
+                        client = KISClient(mode)
+                        balance = client.get_balance()
+                        if balance:
+                            lines.append(f"\n💰 *KIS 잔고 ({mode})*")
+                            for ticker, info in balance.items():
+                                lines.append(f"  {ticker}: {info['qty']}주 (${info['eval_amount']:,.0f})")
+                    except Exception as e:
+                        lines.append(f"\n⚠️ KIS 잔고 조회 실패: {e}")
+
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+                _send_reply('\n'.join(lines))
+
+        except Exception as e:
+            print(f"[Telegram Webhook Error] {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            _send_reply(f"❌ 오류 발생: {str(e)[:200]}")
+
+        return 'OK', 200
+
     if app:
         app.add_url_rule('/', 'handle_request', handle_request, methods=['GET', 'POST'])
+        app.add_url_rule('/telegram-webhook', 'telegram_webhook', telegram_webhook, methods=['POST'])
 
     if __name__ == "__main__":
         port = int(os.environ.get("PORT", 8080))

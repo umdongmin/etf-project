@@ -28,12 +28,12 @@ class AssetView:
         selected_account = next((a for a in accounts if a['name'] == selected_account_name), None)
         account_id = selected_account['id']
 
-        tab1, tab2, tab3 = st.tabs(["📡 신호 & 주문지시", "📋 거래 내역", "⚙️ 설정"])
+        tab1, tab2, tab3 = st.tabs(["📡 신호 & 주문지시", "💼 보유 현황", "⚙️ 설정"])
 
         with tab1:
             self._render_signal_orders(account_id)
         with tab2:
-            self._render_transactions(account_id)
+            self._render_holdings_and_deposits(account_id)
         with tab3:
             self._render_settings(account_id)
 
@@ -145,16 +145,12 @@ class AssetView:
         # ── 통합 현황 + 주문지시 테이블 ─────────────────────────────
         st.subheader("💼 보유 현황 & 주문지시")
         rows = []
-        total_cost = 0
         holdings_keys = {h['asset_id'].upper() for h in holdings_data}
 
         for h in holdings_data:
             key = h['asset_id'].upper()
             target_w = target_map.get(key, 0.0) * 100
             current_w = (h['current_value'] / total_value * 100) if total_value > 0 else 0
-            pnl = h['current_value'] - h['total_cost']
-            pnl_pct = pnl / h['total_cost'] * 100 if h['total_cost'] > 0 else 0
-            total_cost += h['total_cost']
 
             order_info = next((o for o in rebal_orders if o['asset_id'] == key), None)
             if order_info:
@@ -173,7 +169,6 @@ class AssetView:
                 '현재비중': f"{current_w:.1f}%",
                 '목표비중': f"{target_w:.1f}%",
                 '📌 주문지시': order_str,
-                '손익': f"{pnl_pct:+.1f}%"
             })
 
         # 미보유 신규 매수 대상
@@ -190,19 +185,24 @@ class AssetView:
                     '현재비중': "0.0%",
                     '목표비중': f"{o['target_weight']:.1f}%",
                     '📌 주문지시': f"🟢 신규매수 {qty}주 (${amt:,.0f})",
-                    '손익': "—"
                 })
 
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # 순 입금액 (deposits 기준)
+        deposits = AssetStorage.list_deposits(account_id)
+        net_cash = sum(d['amount'] if d['type'] == 'deposit' else -d['amount'] for d in deposits if d['currency'] == 'USD')
 
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("총 평가액", f"${total_value:,.0f}")
         with col2:
-            st.metric("총 투입액", f"${total_cost:,.0f}")
+            st.metric("순 입금액 (USD)", f"${net_cash:,.0f}")
         with col3:
-            total_pnl_pct = (total_value - total_cost) / total_cost * 100 if total_cost > 0 else 0
-            st.metric("수익률", f"{total_pnl_pct:+.2f}%", delta=f"${total_value - total_cost:+,.0f}")
+            if net_cash and net_cash != 0:
+                pnl = total_value - net_cash
+                pnl_pct = pnl / net_cash * 100
+                st.metric("수익률", f"{pnl_pct:+.2f}%", delta=f"${pnl:+,.0f}")
 
         st.divider()
 
@@ -236,18 +236,18 @@ class AssetView:
 
         if save_clicked:
             success = 0
+            holdings_map = {h['asset_id'].upper(): h for h in holdings_data}
             for o in rebal_orders:
-                qty = int(o['suggested_qty']) if use_integer else o['suggested_qty']
-                if qty <= 0:
+                delta_qty = int(o['suggested_qty']) if use_integer else o['suggested_qty']
+                if delta_qty <= 0:
                     continue
                 AssetStorage.save_asset(o['asset_id'], o['asset_id'], 'etf', 'USD', o['asset_id'], 'yfinance')
-                result = AssetStorage.save_transaction(
-                    account_id, o['asset_id'], o['action'],
-                    qty * o['current_price'],
-                    quantity=float(qty), price=o['current_price'],
-                    tx_date=exec_date,
-                    notes=f"리밸런싱: {portfolio_name}"
-                )
+                current_qty = holdings_map.get(o['asset_id'], {}).get('quantity', 0)
+                if o['action'] == 'buy':
+                    new_qty = current_qty + delta_qty
+                else:
+                    new_qty = max(0, current_qty - delta_qty)
+                result = AssetStorage.upsert_holding_qty(account_id, o['asset_id'], new_qty)
                 if result:
                     success += 1
 
@@ -262,97 +262,113 @@ class AssetView:
                 st.rerun()
 
     # ══════════════════════════════════════════════════════
-    # Tab 2: 거래 내역
+    # Tab 2: 보유 현황 & 입출금
     # ══════════════════════════════════════════════════════
-    def _render_transactions(self, account_id):
-        tab_tx, tab_event = st.tabs(["거래 기록", "신호 이벤트"])
+    def _render_holdings_and_deposits(self, account_id):
+        tab_hold, tab_dep, tab_event = st.tabs(["📊 보유 수량", "💰 입출금", "📡 신호 이벤트"])
 
-        with tab_tx:
-            transactions = AssetStorage.list_transactions(account_id)
-            if not transactions:
-                st.info("거래 내역이 없습니다.")
-            else:
-                data = [{
-                    '날짜': tx['tx_date'],
-                    '자산': tx['asset_name'],
-                    '유형': tx['type'].upper(),
-                    '수량': f"{tx['quantity']:,.0f}" if tx['quantity'] else "—",
-                    '단가': f"${tx['price']:,.2f}" if tx['price'] else "—",
-                    '금액': f"${tx['amount']:,.2f}",
-                    '비고': tx['notes'] or "—"
-                } for tx in transactions]
-                st.dataframe(pd.DataFrame(data), use_container_width=True, hide_index=True)
-                st.caption(f"총 {len(transactions)}건")
-
-            with st.expander("➕ 수동 거래 추가"):
-                self._render_manual_transaction(account_id)
-
+        with tab_hold:
+            self._render_holdings_simple(account_id)
+        with tab_dep:
+            self._render_deposits(account_id)
         with tab_event:
-            events = AssetStorage.list_signal_events(account_id)
-            if not events:
-                st.info("기록된 신호 이벤트가 없습니다.")
-            else:
-                rows = []
-                for e in events:
-                    stage_str = f"S{e['prev_stage']}→S{e['new_stage']}" if e['prev_stage'] != e['new_stage'] else f"S{e['new_stage']}"
-                    asset_str = f"{e['prev_asset']}→{e['new_asset']}" if e['prev_asset'] != e['new_asset'] else (e['new_asset'] or "—")
-                    rows.append({
-                        '날짜': e['event_date'],
-                        '포트폴리오': e['portfolio_name'],
-                        '전략': e['strategy_name'],
-                        '스테이지': stage_str,
-                        '자산': asset_str,
-                        '액션': e['action'] or "—",
-                        '실행': '✅' if e['is_executed'] else '기록됨'
-                    })
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("총 이벤트", len(events))
-                with col2:
-                    st.metric("실행 완료", sum(1 for e in events if e['is_executed']))
+            self._render_signal_events(account_id)
 
-    def _render_manual_transaction(self, account_id):
+    def _render_holdings_simple(self, account_id):
+        """보유 현황 — 수량 + 종가/현재가 기반 평가액"""
+        from core.data import DataService
+
+        holdings = AssetStorage.list_holdings(account_id)
+
+        # 가격 소스 토글
+        price_mode = st.radio(
+            "가격 기준",
+            ["종가 기준", "현재가 기준"],
+            horizontal=True,
+            key="holdings_price_mode"
+        )
+
+        tickers = [h['asset_id'] for h in holdings]
+        if tickers:
+            if price_mode == "현재가 기준":
+                price_map = DataService.fetch_current_prices(tickers)
+            else:
+                price_map = DataService.get_prices(tickers)
+
+        rows = []
+        total_value = 0
+        for h in holdings:
+            price = price_map.get(h['asset_id'].upper()) if tickers else None
+            val = h['quantity'] * price if price else 0
+            total_value += val
+            rows.append({
+                '티커': h['asset_id'],
+                '보유수량': int(h['quantity']),
+                '단가': f"${price:,.2f}" if price else "—",
+                '평가액 (USD)': f"${val:,.0f}",
+                '최종수정': str(h['last_updated'])[:10] if h['last_updated'] else "—"
+            })
+
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.metric("총 평가액 (USD)", f"${total_value:,.0f}")
+        else:
+            st.info("보유 자산이 없습니다.")
+
+        st.divider()
+        st.subheader("✏️ 수량 직접 수정")
         col1, col2, col3 = st.columns(3)
         with col1:
-            m_date = st.date_input("날짜", value=date.today(), key="m_tx_date")
+            edit_ticker = st.text_input("티커", placeholder="TQQQ", key="edit_hold_ticker")
         with col2:
-            m_type = st.selectbox("유형", ["buy", "sell", "dividend"],
-                format_func=lambda x: {"buy": "매수", "sell": "매도", "dividend": "배당"}[x],
-                key="m_tx_type")
+            edit_qty = st.number_input("수량", min_value=0.0, step=1.0, key="edit_hold_qty")
         with col3:
-            m_ticker = st.text_input("티커", placeholder="TQQQ", key="m_tx_ticker")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            m_qty = st.number_input("수량", min_value=0.0, step=1.0, key="m_tx_qty")
-        with col2:
-            m_price = st.number_input("단가 ($)", min_value=0.0, step=0.01, key="m_tx_price")
-        with col3:
-            m_notes = st.text_input("비고", key="m_tx_notes")
+            st.write("")
+            st.write("")
+            if st.button("수량 저장", key="btn_edit_hold", use_container_width=True):
+                if not edit_ticker:
+                    st.error("티커를 입력하세요.")
+                else:
+                    ticker = edit_ticker.upper()
+                    AssetStorage.save_asset(ticker, ticker, 'etf', 'USD', ticker, 'yfinance')
+                    result = AssetStorage.update_holding_quantity(account_id, ticker, edit_qty)
+                    st.success("✅ 저장됨") if result else st.error("저장 실패")
+                    if result:
+                        st.rerun()
 
-        if st.button("저장", key="btn_manual_tx"):
-            if not m_ticker or m_qty <= 0 or m_price <= 0:
-                st.error("티커, 수량, 단가를 모두 입력하세요.")
-            else:
-                AssetStorage.save_asset(m_ticker.upper(), m_ticker.upper(), 'etf', 'USD', m_ticker.upper(), 'yfinance')
-                result = AssetStorage.save_transaction(
-                    account_id, m_ticker.upper(), m_type,
-                    m_qty * m_price,
-                    quantity=m_qty, price=m_price,
-                    tx_date=m_date, notes=m_notes or None
-                )
-                st.success("✅ 저장 완료") if result else st.error("저장 실패")
+    def _render_signal_events(self, account_id):
+        events = AssetStorage.list_signal_events(account_id)
+        if not events:
+            st.info("기록된 신호 이벤트가 없습니다.")
+            return
+        rows = []
+        for e in events:
+            stage_str = f"S{e['prev_stage']}→S{e['new_stage']}" if e['prev_stage'] != e['new_stage'] else f"S{e['new_stage']}"
+            asset_str = f"{e['prev_asset']}→{e['new_asset']}" if e['prev_asset'] != e['new_asset'] else (e['new_asset'] or "—")
+            rows.append({
+                '날짜': e['event_date'],
+                '포트폴리오': e['portfolio_name'],
+                '전략': e['strategy_name'],
+                '스테이지': stage_str,
+                '자산': asset_str,
+                '액션': e['action'] or "—",
+                '실행': '✅' if e['is_executed'] else '기록됨'
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("총 이벤트", len(events))
+        with col2:
+            st.metric("실행 완료", sum(1 for e in events if e['is_executed']))
 
     # ══════════════════════════════════════════════════════
     # Tab 3: 설정
     # ══════════════════════════════════════════════════════
     def _render_settings(self, account_id):
-        tab_sync, tab_deposit, tab_account = st.tabs(["🔀 수량 동기화", "💰 입출금", "🏦 계좌 관리"])
+        tab_sync, tab_account = st.tabs(["🔀 수량 동기화", "🏦 계좌 관리"])
 
         with tab_sync:
             SyncView().render(account_id=account_id)
-        with tab_deposit:
-            self._render_deposits(account_id)
         with tab_account:
             self._render_account_setup(account_id)
 

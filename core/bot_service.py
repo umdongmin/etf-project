@@ -260,13 +260,14 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
                     snapshot['FedRate'] = round(float(macro_df['DFEDTARU'].iloc[-1]), 2)
                 notes_json = json.dumps(snapshot, ensure_ascii=False)
 
+                signal_event_ids = {}
                 for name, new_sig in realtime_signals.items():
                     cur_sig   = closing_signals.get(name, new_sig)
                     cur_stage = cur_sig['stage']
                     new_stage = new_sig['stage']
                     action    = action_statuses[list(realtime_signals.keys()).index(name)]
                     if action != '보유':
-                        AssetStorage.save_signal_event(
+                        eid = AssetStorage.save_signal_event(
                             account_id=acc_id,
                             portfolio_name=PORTFOLIO_NAME,
                             strategy_name=name,
@@ -279,6 +280,8 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
                             total_value=total_value,
                             notes=notes_json,
                         )
+                        if eid:
+                            signal_event_ids[name] = eid
                         print(f"📝 [{name}] 신호 감사 로그 저장 완료 (action={action})", flush=True)
 
             if not dry_run:
@@ -291,6 +294,36 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
                     print(f"⏭️ [{acc_name}] 변동 없음 — 전송 생략", flush=True)
             else:
                 print(f"🔕 [DRY RUN] {acc_name} {'전송 예정' if should_send else '전송 생략 (변동 없음)'}", flush=True)
+
+            # ── 6. KIS 주문 파이프라인 (기존 로직과 완전 분리) ─────────
+            if should_send and not dry_run:
+                try:
+                    from core.kis_trader import KISTrader
+                    trader = KISTrader()
+                    if trader.mode != 'disabled':
+                        validated = trader.process_signal_orders(
+                            account_id=acc_id,
+                            realtime_signals=realtime_signals,
+                            closing_signals=closing_signals,
+                            target_qty=target_qty,
+                            holdings_map=holdings_map,
+                            cur_prices=cur_prices or {},
+                            portfolio_name=PORTFOLIO_NAME,
+                            signal_event_ids=signal_event_ids if should_send else {},
+                        )
+                        if validated:
+                            if trader.mode == 'paper' and trader.is_auto_approve(acc_id):
+                                for order in validated:
+                                    trader.execute_order_directly(order)
+                            else:
+                                trader.request_telegram_approval(token, chat_id, validated)
+                        else:
+                            print(f"[KIS] [{acc_name}] 실행 가능 주문 없음", flush=True)
+                except Exception as e:
+                    # KIS 실패가 기존 Telegram 알림을 방해하면 안 됨
+                    print(f"[KIS Pipeline Error] {e}", flush=True)
+                    import traceback as tb
+                    tb.print_exc()
 
     except Exception as e:
         print(f"❌ [Bot Service Error]: {e}", flush=True)

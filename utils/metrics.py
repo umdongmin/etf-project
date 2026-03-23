@@ -9,10 +9,17 @@ def calculate_metrics(history):
     df = history.copy()
     if 'PortfolioValue' not in df.columns and 'Value' in df.columns:
         df.rename(columns={'Value': 'PortfolioValue'}, inplace=True)
-        
+
+    # DatetimeIndex 보장 — 정수/문자열 인덱스 방어
+    if not isinstance(df.index, pd.DatetimeIndex):
+        if 'Date' in df.columns:
+            df = df.set_index('Date')
+        df.index = pd.to_datetime(df.index, errors='coerce')
+        df = df[df.index.notna()]
+
     df['Daily_Return'] = df['PortfolioValue'].pct_change()
     df['Cumulative_Return'] = (1 + df['Daily_Return']).cumprod() - 1
-    
+
     # CAGR 계산
     days = (df.index[-1] - df.index[0]).days
     if days <= 0: return {'Final Value': df['PortfolioValue'].iloc[-1], 'Cumulative Return': 0, 'CAGR': 0, 'MDD': 0}

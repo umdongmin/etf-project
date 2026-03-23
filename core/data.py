@@ -483,6 +483,8 @@ class DataService:
             ('NROU',     'nrou',     45),
             ('T10YIE',   'exp_inf',   0),
             ('T10Y2Y',   't10y2y',    0),
+            ('DFII10',   'real_rate_10y', 0),   # 10Y TIPS 실질금리
+            ('T5YIFR',   'breakeven_5y5y', 0),  # 5Y5Y Forward Breakeven 인플레 기대
         ]
         macro_df = pd.DataFrame()
 
@@ -836,4 +838,4 @@ class DataService:
     @staticmethod
     @st.cache_data(ttl=21600)  # 6시간 캐시 (Rate Limit 방지)
     def load_all_data():
-        return DataService.fetch_live_data()
+        return DataService.fetch_live_data(start_date='2008-01-01')
