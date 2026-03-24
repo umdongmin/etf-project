@@ -26,7 +26,9 @@ from ui.simulation_view import SimulationView
 from utils.metrics import calculate_metrics
 from core.defaults import get_default_equity_params, get_default_bond_params, get_default_bond_lev_params, REBALANCE_PRESET_LABELS
 from core.engine_kwargs_builder import extract_smart_params
-from core.config_loader import load_default_equity_params, load_default_bond_params
+from core.state import AppState
+from core.session_keys import SK
+# config_loader는 core/state.py 내부에서 호출됨 (AppState.init_equity/bond)
 
 class GoldenStrategyApp:
     def __init__(self):
@@ -50,42 +52,29 @@ class GoldenStrategyApp:
         ])
         
         
-        # 세션 상태 초기화
+        # ── 세션 상태 초기화 (AppState 중앙 관리) ─────────────────────────────
         if 'trigger_recalc' not in st.session_state:
             st.session_state.trigger_recalc = False
-            
-        if 'current_params' not in st.session_state:
-            _eq_name, _eq_params = load_default_equity_params()
-            st.session_state.current_params = _eq_params
-            if _eq_name:
-                st.session_state.default_equity_strategy_name = _eq_name
 
-        # [신규] 채권 전략 초기화 로직 (중앙화된 config_loader 사용)
-        if ('current_bond_params' not in st.session_state
-                or 'current_bond_lev_params' not in st.session_state
-                or st.session_state.get('initial_bond_load_v31', False) is False):
-            _bond_name, _bond_params, _bond_lev_params = load_default_bond_params()
+        # 주식 전략: DB 우선 → defaults.py fallback (최초 1회)
+        AppState.init_equity()
 
-            st.session_state.current_bond_params = _bond_params
-            st.session_state.current_bond_lev_params = _bond_lev_params
-            if _bond_name:
-                st.session_state.default_bond_strategy_name = _bond_name
-
-            # UI 위젯 동기화
+        # 채권 전략: DB 우선 → defaults.py fallback (최초 1회)
+        _bond_needs_init = not st.session_state.get(SK.INITIAL_BOND_LOAD_V28, False)
+        if _bond_needs_init:
+            AppState.init_bond()
             TesterView.sync_bond_params_to_widgets(
-                st.session_state.current_bond_params,
-                lev_params=st.session_state.current_bond_lev_params,
+                AppState.get_bond_params(),
+                lev_params=AppState.get_bond_lev_params(),
                 key_prefix="bond_"
             )
-
-            st.session_state.trigger_recalc_bond = True
-            st.session_state.initial_bond_load_v31 = True
+            st.session_state[SK.TRIGGER_RECALC_BOND] = True
             st.rerun()
-        
-        if 'comparison_list' not in st.session_state:
-            st.session_state.comparison_list = []
+
+        if SK.COMPARISON_LIST not in st.session_state:
+            st.session_state[SK.COMPARISON_LIST] = []
             
-        cp = st.session_state.current_params
+        cp = AppState.get_equity_params()
 
         # 데이터 로딩 (st.cache_data 활용, TTL 1시간)
         with st.spinner('실시간 데이터를 가져오는 중...'):
@@ -135,17 +124,17 @@ class GoldenStrategyApp:
 
             st.sidebar.divider()
             st.sidebar.subheader("💸 거래 수수료 설정")
-            use_fee = st.sidebar.toggle("수수료 적용", value=st.session_state.get('global_use_fee', True), key='global_use_fee')
+            use_fee = st.sidebar.toggle("수수료 적용", value=st.session_state.get(SK.GLOBAL_USE_FEE, True), key=SK.GLOBAL_USE_FEE)
             if use_fee:
                 fee_pct = st.sidebar.number_input("수수료율 (%)", min_value=0.0, max_value=1.0,
-                    value=st.session_state.get('global_fee_pct', 0.10), step=0.01,
-                    format="%.3f", help="0.10% = 한국 증권사 해외 ETF 기준 (수수료 0.07% + 슬리피지)", key='global_fee_pct')
-                st.session_state.global_fee_rate = fee_pct / 100.0
+                    value=st.session_state.get(SK.GLOBAL_FEE_PCT, 0.10), step=0.01,
+                    format="%.3f", help="0.10% = 한국 증권사 해외 ETF 기준 (수수료 0.07% + 슬리피지)", key=SK.GLOBAL_FEE_PCT)
+                AppState.set_fee_rate(fee_pct / 100.0)
             else:
-                st.session_state.global_fee_rate = 0.0
+                AppState.set_fee_rate(0.0)
 
             st.sidebar.subheader("📦 주식 수량 설정")
-            st.sidebar.toggle("정수 주식 수량 적용", value=st.session_state.get('global_integer_shares', True), key='global_integer_shares',
+            st.sidebar.toggle("정수 주식 수량 적용", value=st.session_state.get(SK.GLOBAL_INTEGER_SHARES, True), key=SK.GLOBAL_INTEGER_SHARES,
                 help="활성화 시 소수점 주식 없이 정수 단위로만 매매 (잔여금은 현금으로 보존)")
 
             st.sidebar.divider()
@@ -165,7 +154,8 @@ class GoldenStrategyApp:
                 _sel_eq = st.sidebar.selectbox("주식 전략", _eq_strats, index=_eq_idx, format_func=_eq_fmt, key="sb_default_eq")
                 if st.sidebar.button("⭐ 주식 기본 설정", key="btn_set_default_eq", use_container_width=True):
                     StrategyStorage.set_default_strategy(_sel_eq, category='equity')
-                    st.sidebar.success(f"⭐ '{_sel_eq}' 설정 완료")
+                    AppState.init_equity(force=True)  # 세션에 즉시 반영
+                    st.sidebar.success(f"⭐ '{_sel_eq}' 기본 전략 설정 및 로드 완료")
                     st.rerun()
 
             if _bond_strats:
@@ -174,7 +164,9 @@ class GoldenStrategyApp:
                 _sel_bond = st.sidebar.selectbox("채권 전략", _bond_strats, index=_bond_idx, format_func=_bond_fmt, key="sb_default_bond")
                 if st.sidebar.button("⭐ 채권 기본 설정", key="btn_set_default_bond", use_container_width=True):
                     StrategyStorage.set_default_strategy(_sel_bond, category='bond')
-                    st.sidebar.success(f"⭐ '{_sel_bond}' 설정 완료")
+                    AppState.init_bond(force=True)  # 세션에 즉시 반영
+                    st.session_state[SK.TRIGGER_RECALC_BOND] = True
+                    st.sidebar.success(f"⭐ '{_sel_bond}' 기본 전략 설정 및 로드 완료")
                     st.rerun()
 
             if _portfolio_list:
@@ -183,7 +175,12 @@ class GoldenStrategyApp:
                 _sel_pf = st.sidebar.selectbox("포트폴리오", _portfolio_list, index=_pf_idx, format_func=_pf_fmt, key="sb_default_pf")
                 if st.sidebar.button("⭐ 포트폴리오 기본 설정", key="btn_set_default_pf", use_container_width=True):
                     StrategyStorage.set_default_portfolio(_sel_pf)
-                    st.sidebar.success(f"⭐ '{_sel_pf}' 설정 완료")
+                    st.session_state.pop(SK.PORTFOLIO_INIT_VER, None)   # 포트폴리오 재초기화 허용
+                    st.session_state.pop(SK.PORTFOLIO_RESULT, None)
+                    # 각 뷰의 selectbox 위젯 키 초기화 → rerun 후 DB 기본값으로 재선택
+                    for _wk in ('p_load_sel', 'signal_portfolio', SK.PORTFOLIO_SELECTED_NAME):
+                        st.session_state.pop(_wk, None)
+                    st.sidebar.success(f"⭐ '{_sel_pf}' 기본 포트폴리오 설정 완료")
                     st.rerun()
 
             st.sidebar.divider()
@@ -273,13 +270,9 @@ class GoldenStrategyApp:
                         st.write("📝 현재 채권 전략 저장")
                         new_bond_name = st.text_input("새 전략 이름", value="Bond_V7_Custom")
                         if st.form_submit_button("💾 신규 저장", use_container_width=True):
-                            # [개선] UI 위젯의 현재 상태를 즉시 읽어서 통합 저장
+                            # Layer1(params)와 Layer2(lev_params)를 strategies 테이블에 분리 저장
                             p, lp = TesterView.get_bond_params_from_widgets(key_prefix="bond_")
-                            bundle = {
-                                'params': p,
-                                'lev_params': lp
-                            }
-                            StrategyStorage.save_strategy(new_bond_name, bundle, category='bond')
+                            StrategyStorage.save_strategy(new_bond_name, p, category='bond', lev_params=lp)
                             st.success(f"'{new_bond_name}' 저장 완료 (UI 현재값 반영)")
                             st.rerun()
 
@@ -292,23 +285,19 @@ class GoldenStrategyApp:
                             if st.form_submit_button("✨ 적용하기", use_container_width=True):
                                 loaded = StrategyStorage.load_strategy(selected_bond)
                                 if loaded:
-                                    # [개선] 번들 데이터 해제 및 세션 반영
-                                    if 'params' in loaded and 'lev_params' in loaded:
-                                        st.session_state.current_bond_params = loaded['params']
-                                        st.session_state.current_bond_lev_params = loaded['lev_params']
-                                    else:
-                                        # 하위 호환성 (구형 데이터)
-                                        st.session_state.current_bond_params = loaded
-                                        st.session_state.current_bond_lev_params = None
-                                    
-                                    # [신규] UI 위젯 키 강제 동기화 (Apply 즉시 반영)
+                                    lev_p = loaded.pop('lev_params', None)
+                                    loaded.pop('category', None)
+                                    AppState.set_bond_params(
+                                        loaded,
+                                        lev_params=lev_p or get_default_bond_lev_params(),
+                                        strategy_name=selected_bond,
+                                    )
                                     TesterView.sync_bond_params_to_widgets(
-                                        st.session_state.current_bond_params,
-                                        lev_params=st.session_state.get('current_bond_lev_params'),
+                                        AppState.get_bond_params(),
+                                        lev_params=AppState.get_bond_lev_params(),
                                         key_prefix="bond_"
                                     )
-                                    
-                                    st.session_state.trigger_recalc_bond = True
+                                    st.session_state[SK.TRIGGER_RECALC_BOND] = True
                                     st.success(f"'{selected_bond}' 로드 및 UI 동기화 완료")
                                     st.rerun()
                     else:
@@ -319,16 +308,15 @@ class GoldenStrategyApp:
                 with st.form("bond_settings_form"):
                     # 기존 설정 UI 호출
                     new_bond_params, new_lev_params = TesterView.render_bond_settings(
-                        st.session_state.current_bond_params,
-                        current_lev_params=st.session_state.get('current_bond_lev_params'),
+                        AppState.get_bond_params(),
+                        current_lev_params=AppState.get_bond_lev_params(),
                     )
                     st.write("---")
                     bond_submitted = st.form_submit_button("🚀 설정값 확정 및 재시뮬레이션 실행", use_container_width=True, type="primary")
 
                     if bond_submitted:
-                        st.session_state.current_bond_params = new_bond_params
-                        st.session_state.current_bond_lev_params = new_lev_params
-                        st.session_state.trigger_recalc_bond = True
+                        AppState.set_bond_params(new_bond_params, lev_params=new_lev_params)
+                        st.session_state[SK.TRIGGER_RECALC_BOND] = True
                         st.rerun()
             
             with b_tab1:
@@ -338,16 +326,20 @@ class GoldenStrategyApp:
                 
                 # [수정] 성과 변경 감지 및 자동 계산 로직 (trigger_recalc_bond 또는 해시 변경 시)
                 # [수정] 레버리지(lev_params) 설정 변경도 감지 대상에 추가
+                _bond_params     = AppState.get_bond_params()
+                _bond_lev_params = AppState.get_bond_lev_params()
                 current_bond_hash = hash(
                     str(start_b) + str(end_b) +
-                    str(st.session_state.current_bond_params) +
-                    str(st.session_state.get('current_bond_lev_params')) +
+                    str(_bond_params) +
+                    str(_bond_lev_params) +
                     str(len(macro_df)) +
-                    str(st.session_state.get('global_fee_rate', 0.0)) +
-                    str(st.session_state.get('global_integer_shares', False))
+                    str(AppState.get_fee_rate()) +
+                    str(AppState.get_integer_shares())
                 )
-                should_calc_bond = st.session_state.get('trigger_recalc_bond', False) or (st.session_state.get('last_bond_hash') != current_bond_hash)
-                
+                should_calc_bond = (
+                    st.session_state.get(SK.TRIGGER_RECALC_BOND, False) or
+                    st.session_state.get(SK.LAST_BOND_HASH) != current_bond_hash
+                )
 
                 if should_calc_bond:
                     with st.spinner('채권 분석 데이터 업데이트 중...'):
@@ -355,21 +347,20 @@ class GoldenStrategyApp:
                         bond_bench = {'TLT': StrategyEngine.run_benchmark(data_dict, 'TLT', start_b, end_b)}
                         bond_history, b_closed, _ = StrategyEngine.run_bond_strategy(
                             data_dict, macro_df, start_b, end_b,
-                            params=st.session_state.current_bond_params,
-                            lev_params=st.session_state.get('current_bond_lev_params'),
-                            fee_rate=st.session_state.get('global_fee_rate', 0.0),
-                            integer_shares=st.session_state.get('global_integer_shares', False)
+                            params=_bond_params,
+                            lev_params=_bond_lev_params,
+                            fee_rate=AppState.get_fee_rate(),
+                            integer_shares=AppState.get_integer_shares(),
                         )
-                        
-                        # [수정] 부분 업데이트
-                        curr_res = st.session_state.get('last_bt_result', {})
+
+                        curr_res = st.session_state.get(SK.LAST_BT_RESULT, {})
                         curr_res['bond'] = {'history': bond_history, 'closed_trades': b_closed, 'benchmarks': bond_bench}
-                        st.session_state.last_bt_result = curr_res
-                        st.session_state.last_bond_hash = current_bond_hash
-                        st.session_state.trigger_recalc_bond = False # 완료 후 해제
+                        st.session_state[SK.LAST_BT_RESULT] = curr_res
+                        st.session_state[SK.LAST_BOND_HASH] = current_bond_hash
+                        st.session_state[SK.TRIGGER_RECALC_BOND] = False
 
 
-                res = st.session_state.get('last_bt_result', {}).get('bond')
+                res = st.session_state.get(SK.LAST_BT_RESULT, {}).get('bond')
                 if res and res['history'] is not None and not res['history'].empty:
                     # [신규] 주식 전략 설정과 동일한 요약 정보 추가
                     bh_bond = res['benchmarks'].get('TLT', pd.DataFrame())
@@ -407,7 +398,7 @@ class GoldenStrategyApp:
                             if st.button("🔄 데이터 캐시 초기화 후 재시도", key="clear_cache_bond"):
                                 DataService.load_all_data.clear()
                                 st.rerun()
-                        st.write(f"- 최적화 파라미터: {st.session_state.current_bond_params}")
+                        st.write(f"- 최적화 파라미터: {AppState.get_bond_params()}")
 
         elif menu == "💰 모의투자 시뮬레이터":
             SimulationView.render(data_dict, fg_df, vxn_df, macro_df, news_df)

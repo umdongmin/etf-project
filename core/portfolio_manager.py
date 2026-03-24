@@ -116,6 +116,7 @@ class PortfolioManager:
         # 레버리지 ETF(TQQQ 등)는 상장일이 늦어 equity generator가 bond보다 늦게 시작할 수 있음
         # 예: TQQQ 상장 2010-02-11 → equity는 2월부터, bond는 1월부터 → 록스텝 불일치 → PortfolioValue 오염
         # 해결: 가장 늦게 시작하는 generator 날짜까지 나머지를 미리 전진
+        finished_strategies_final_values = {}  # 조기 종료 전략의 최종 가치 보존
         if states and len(states) > 1:
             max_start_date = max(states[n]['date'] for n in states)
             for name in list(generators.keys()):
@@ -144,7 +145,6 @@ class PortfolioManager:
         # 2. 록스텝(Lockstep) 시뮬레이션 엔진 루프
         loop_day_idx = 0
         portfolio_history = []
-        finished_strategies_final_values = {}
 
         while generators:
             active_names = list(generators.keys())

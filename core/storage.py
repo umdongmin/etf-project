@@ -47,6 +47,20 @@ class StrategyStorage:
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE strategies ADD COLUMN is_default BOOLEAN DEFAULT FALSE")
 
+            # [Migration] lev_params 컬럼 추가 — 채권 Layer2를 strategies에서 직접 관리
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='strategies' AND column_name='lev_params'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE strategies ADD COLUMN lev_params JSONB DEFAULT NULL")
+                # 기존 번들 형식 {'params':{L1}, 'lev_params':{L2}} → 컬럼으로 분리
+                cursor.execute("""
+                    UPDATE strategies
+                    SET lev_params = params->'lev_params',
+                        params     = params->'params'
+                    WHERE category = 'bond'
+                      AND params ? 'lev_params'
+                      AND params ? 'params'
+                """)
+
             # [Migration] 초기 데이터 JSON -> DB 이전
             cursor.execute("SELECT COUNT(*) FROM strategies")
             if cursor.fetchone()[0] == 0:
@@ -80,25 +94,37 @@ class StrategyStorage:
         conn.commit()
 
     @classmethod
-    def save_strategy(cls, name, params, category='equity'):
+    def save_strategy(cls, name, params, category='equity', lev_params=None):
+        """전략 저장. 채권은 params(Layer1)와 lev_params(Layer2)를 분리하여 저장.
+
+        하위 호환: params가 {'params':..., 'lev_params':...} 번들 형식이면 자동 분리.
+        """
         cls._init_db()
         try:
             conn = cls._get_connection()
             cursor = conn.cursor()
+
+            # 번들 형식 자동 분리 (구형 호환)
+            if isinstance(params, dict) and 'params' in params and 'lev_params' in params and category == 'bond':
+                lev_params = lev_params or params.get('lev_params')
+                params = params.get('params', {})
+
             params_json = json.dumps(params, ensure_ascii=False)
-            
+            lev_params_json = json.dumps(lev_params, ensure_ascii=False) if lev_params is not None else None
+
             sql = '''
-                INSERT INTO strategies (name, category, params)
-                VALUES (%s, %s, %s)
+                INSERT INTO strategies (name, category, params, lev_params)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
-                category = EXCLUDED.category,
-                params = EXCLUDED.params,
+                category   = EXCLUDED.category,
+                params     = EXCLUDED.params,
+                lev_params = EXCLUDED.lev_params,
                 updated_at = CURRENT_TIMESTAMP
             '''
-            cursor.execute(sql, (name, category, params_json))
+            cursor.execute(sql, (name, category, params_json, lev_params_json))
             if cursor.rowcount > 0:
                 conn.commit()
-                st.cache_data.clear() # 데이터 변경 시 캐시 무효화
+                st.cache_data.clear()
             conn.close()
             return name
         except Exception as e:
@@ -107,36 +133,42 @@ class StrategyStorage:
 
     @classmethod
     def list_strategies(cls, category=None):
-        """저장된 전략 이름 목록 조회 (캐시 적용)"""
-        cls._init_db()
-        try:
-            conn = cls._get_connection()
-            cursor = conn.cursor()
-            if category:
-                cursor.execute("SELECT name FROM strategies WHERE category = %s ORDER BY name ASC", (category,))
-            else:
-                cursor.execute("SELECT name FROM strategies ORDER BY name ASC")
-            names = [row[0] for row in cursor.fetchall()]
-            conn.close()
-            return names
-        except Exception as e:
-            print(f"List Strategy Error: {e}")
-            return []
+        """저장된 전략 이름 목록 조회.
+
+        @st.cache_data TTL=60s 래퍼를 통해 호출되므로,
+        매 rerun마다 Supabase를 조회하지 않는다.
+        저장/삭제 시 st.cache_data.clear()로 무효화됨.
+        """
+        return _cached_list_strategies(category)
+
+    @classmethod
+    def get_default_strategy(cls, category='equity'):
+        """해당 카테고리의 기본 전략 이름 반환 (캐시 적용, 없으면 None)."""
+        return _cached_get_default_strategy(category)
 
     @classmethod
     def load_strategy(cls, name):
+        """전략 로드. 반환값: {..L1 params.., 'category':..., 'lev_params':... (채권만)}"""
         cls._init_db()
         try:
             conn = cls._get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT params, category FROM strategies WHERE name = %s", (name,))
+            cursor.execute("SELECT params, category, lev_params FROM strategies WHERE name = %s", (name,))
             row = cursor.fetchone()
             conn.close()
             if row:
-                params = row[0]
-                category = row[1]
-                loaded = json.loads(params) if isinstance(params, str) else params
-                return {**loaded, 'category': category} if isinstance(loaded, dict) else loaded
+                params, category, lev_params_raw = row
+                loaded = json.loads(params) if isinstance(params, str) else (params or {})
+
+                # 하위 호환: 마이그레이션 전 번들 형식 처리
+                if isinstance(loaded, dict) and 'params' in loaded and 'lev_params' in loaded and category == 'bond':
+                    lev_params_raw = lev_params_raw or loaded.get('lev_params')
+                    loaded = loaded.get('params', {})
+
+                result = {**loaded, 'category': category} if isinstance(loaded, dict) else loaded
+                if lev_params_raw is not None:
+                    result['lev_params'] = json.loads(lev_params_raw) if isinstance(lev_params_raw, str) else lev_params_raw
+                return result
             return None
         except Exception as e:
             print(f"Load Strategy Error: {e}")
@@ -153,14 +185,15 @@ class StrategyStorage:
             cursor.execute("UPDATE strategies SET is_default = TRUE WHERE name = %s AND category = %s", (name, category))
             conn.commit()
             conn.close()
+            st.cache_data.clear()  # 캐시 무효화 → 다음 조회 시 DB 재조회
             return True
         except Exception as e:
             print(f"Set Default Strategy Error: {e}")
             return False
 
     @classmethod
-    def get_default_strategy(cls, category='equity'):
-        """해당 카테고리의 기본 전략 이름 반환 (없으면 None)"""
+    def _get_default_strategy_uncached(cls, category='equity'):
+        """내부용 비캐시 버전 (set_default_strategy 후 직접 DB 조회 필요 시)."""
         cls._init_db()
         try:
             conn = cls._get_connection()
@@ -229,10 +262,10 @@ class StrategyStorage:
             if cursor.fetchone():
                 cursor.execute("ALTER TABLE portfolio_items DROP COLUMN params_override")
 
-            # [Migration] lev_params 컬럼 추가 (채권 레버리지 Layer2 파라미터)
+            # [Migration] portfolio_items.lev_params 제거 — strategies.lev_params로 이관 완료
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='portfolio_items' AND column_name='lev_params'")
-            if not cursor.fetchone():
-                cursor.execute("ALTER TABLE portfolio_items ADD COLUMN lev_params JSONB DEFAULT NULL")
+            if cursor.fetchone():
+                cursor.execute("ALTER TABLE portfolio_items DROP COLUMN lev_params")
 
             # [Migration] is_default 컬럼 추가 (기본 포트폴리오 지정)
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='portfolios' AND column_name='is_default'")
@@ -291,14 +324,11 @@ class StrategyStorage:
             cursor.execute("DELETE FROM portfolio_items WHERE portfolio_name = %s", (name,))
             
             sql_i = '''
-                INSERT INTO portfolio_items (portfolio_name, strategy_name, weight, sort_order, lev_params)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO portfolio_items (portfolio_name, strategy_name, weight, sort_order)
+                VALUES (%s, %s, %s, %s)
             '''
             for idx, item in enumerate(configs):
-                import json
-                lev_p = item.get('lev_params')
-                lev_p_json = json.dumps(lev_p) if lev_p is not None else None
-                cursor.execute(sql_i, (name, item['name'], item['weight'], idx, lev_p_json))
+                cursor.execute(sql_i, (name, item['name'], item['weight'], idx))
                 
             conn.commit()
             st.cache_data.clear()
@@ -326,9 +356,9 @@ class StrategyStorage:
             total_capital, rb_preset = row
             
             # 2. 아이템 및 연관된 전략 정보 JOIN 조회
-            # strategies 테이블의 최신 params를 가져옴으로써 자동 동기화 실현
+            # strategies 테이블의 최신 params/lev_params를 가져옴으로써 자동 동기화 실현
             sql = '''
-                SELECT i.strategy_name, i.weight, s.category, s.params as global_params, i.lev_params
+                SELECT i.strategy_name, i.weight, s.category, s.params, s.lev_params
                 FROM portfolio_items i
                 LEFT JOIN strategies s ON i.strategy_name = s.name
                 WHERE i.portfolio_name = %s
@@ -339,19 +369,23 @@ class StrategyStorage:
 
             configs = []
             for r in rows:
-                strat_name, weight, category, g_params, lev_params = r
+                strat_name, weight, category, g_params, lev_params_raw = r
 
-                # 정규화 핵심: 글로벌 설정을 100% 사용 (params_override 제거)
-                final_params = g_params if g_params else {}
+                params_data = g_params if g_params else {}
+
+                # 하위 호환: 마이그레이션 전 번들 형식 처리
+                if isinstance(params_data, dict) and 'params' in params_data and 'lev_params' in params_data and category == 'bond':
+                    lev_params_raw = lev_params_raw or params_data.get('lev_params')
+                    params_data = params_data.get('params', {})
 
                 cfg_item = {
                     'name': strat_name,
                     'weight': weight,
                     'type': category if category else 'equity',
-                    'params': final_params,
+                    'params': params_data,
                 }
-                if lev_params is not None:
-                    cfg_item['lev_params'] = lev_params
+                if lev_params_raw is not None:
+                    cfg_item['lev_params'] = json.loads(lev_params_raw) if isinstance(lev_params_raw, str) else lev_params_raw
                 configs.append(cfg_item)
                 
             conn.close()
@@ -366,18 +400,13 @@ class StrategyStorage:
 
     @classmethod
     def list_portfolios(cls):
-        """저장된 포트폴리오 목록 조회 (캐시 적용)"""
-        cls._init_portfolio_db()
-        try:
-            conn = cls._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM portfolios ORDER BY updated_at DESC")
-            names = [row[0] for row in cursor.fetchall()]
-            conn.close()
-            return names
-        except Exception as e:
-            print(f"List Portfolios Error: {e}")
-            return []
+        """저장된 포트폴리오 목록 조회 (캐시 적용).
+
+        @st.cache_data TTL=60s 래퍼를 통해 호출되므로,
+        매 rerun마다 Supabase를 조회하지 않는다.
+        저장/삭제 시 st.cache_data.clear()로 무효화됨.
+        """
+        return _cached_list_portfolios()
 
     @classmethod
     def set_default_portfolio(cls, name):
@@ -390,6 +419,7 @@ class StrategyStorage:
             cursor.execute("UPDATE portfolios SET is_default = TRUE WHERE name = %s", (name,))
             conn.commit()
             conn.close()
+            st.cache_data.clear()  # 캐시 무효화 → 다음 조회 시 DB 재조회
             return True
         except Exception as e:
             print(f"Set Default Portfolio Error: {e}")
@@ -397,18 +427,8 @@ class StrategyStorage:
 
     @classmethod
     def get_default_portfolio(cls):
-        """기본 포트폴리오 이름 반환 (없으면 None)"""
-        cls._init_portfolio_db()
-        try:
-            conn = cls._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM portfolios WHERE is_default = TRUE LIMIT 1")
-            row = cursor.fetchone()
-            conn.close()
-            return row[0] if row else None
-        except Exception as e:
-            print(f"Get Default Portfolio Error: {e}")
-            return None
+        """기본 포트폴리오 이름 반환 (캐시 적용, 없으면 None)."""
+        return _cached_get_default_portfolio()
 
     @classmethod
     def delete_portfolio(cls, name):
@@ -1510,3 +1530,87 @@ class OrderStorage:
         except Exception as e:
             print(f"List Pending Approvals Error: {e}")
             return []
+
+
+# ── @st.cache_data 캐시 함수 (모듈 레벨, TTL=60s) ────────────────────────────
+# StrategyStorage / PortfolioStorage 목록 조회는 매 rerun마다 Supabase를
+# 조회하는 대신, 이 캐시 함수를 거쳐 60초 동안 결과를 재사용한다.
+# 저장·삭제·기본값 변경 등 쓰기 작업 완료 시 st.cache_data.clear()를
+# 호출하면 즉시 무효화된다.
+
+@st.cache_data(ttl=60)
+def _cached_list_strategies(category=None):
+    """전략 이름 목록을 DB에서 조회 (캐시 TTL 60s)."""
+    supabase_url = os.getenv("SUPABASE_DB_URL")
+    if not supabase_url or not HAS_PSYCOPG2:
+        return []
+    try:
+        conn = psycopg2.connect(supabase_url)
+        cursor = conn.cursor()
+        if category:
+            cursor.execute("SELECT name FROM strategies WHERE category = %s ORDER BY name ASC", (category,))
+        else:
+            cursor.execute("SELECT name FROM strategies ORDER BY name ASC")
+        names = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return names
+    except Exception as e:
+        print(f"[_cached_list_strategies] Error: {e}")
+        return []
+
+
+@st.cache_data(ttl=60)
+def _cached_get_default_strategy(category='equity'):
+    """카테고리 기본 전략 이름을 DB에서 조회 (캐시 TTL 60s)."""
+    supabase_url = os.getenv("SUPABASE_DB_URL")
+    if not supabase_url or not HAS_PSYCOPG2:
+        return None
+    try:
+        conn = psycopg2.connect(supabase_url)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM strategies WHERE category = %s AND is_default = TRUE LIMIT 1",
+            (category,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[_cached_get_default_strategy] Error: {e}")
+        return None
+
+
+@st.cache_data(ttl=60)
+def _cached_list_portfolios():
+    """포트폴리오 이름 목록을 DB에서 조회 (캐시 TTL 60s)."""
+    supabase_url = os.getenv("SUPABASE_DB_URL")
+    if not supabase_url or not HAS_PSYCOPG2:
+        return []
+    try:
+        conn = psycopg2.connect(supabase_url)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM portfolios ORDER BY updated_at DESC")
+        names = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return names
+    except Exception as e:
+        print(f"[_cached_list_portfolios] Error: {e}")
+        return []
+
+
+@st.cache_data(ttl=60)
+def _cached_get_default_portfolio():
+    """기본 포트폴리오 이름을 DB에서 조회 (캐시 TTL 60s)."""
+    supabase_url = os.getenv("SUPABASE_DB_URL")
+    if not supabase_url or not HAS_PSYCOPG2:
+        return None
+    try:
+        conn = psycopg2.connect(supabase_url)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM portfolios WHERE is_default = TRUE LIMIT 1")
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[_cached_get_default_portfolio] Error: {e}")
+        return None

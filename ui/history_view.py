@@ -5,6 +5,8 @@ import datetime
 import plotly.graph_objects as go
 from core.storage import StrategyStorage
 from core.engine import StrategyEngine
+from core.defaults import get_default_equity_params
+from core.session_keys import SK
 from ui.tester_view import TesterView
 from ui.backtest_view import BacktestView
 from utils.metrics import calculate_metrics
@@ -61,7 +63,8 @@ class HistoryLabView:
 
         st.divider()
         st.subheader("💾 전략 파일 관리")
-        cp = st.session_state.current_params
+        from core.state import AppState
+        cp = AppState.get_equity_params()
 
         col1, col2 = st.columns(2)
         with col1:
@@ -94,48 +97,8 @@ class HistoryLabView:
                     if load_submitted and target_strat != "선택 안 함":
                         config = StrategyStorage.load_strategy(target_strat)
                         if config:
-                            # [신규] 로드 전 세션 상태 초기화 (이전 전략 오염 방지)
-                            # app.py의 초기값을 복사하거나, 최소한 주요 리스트들은 비워야 함
-                            # 여기서는 app.py의 기본 구조를 세션에 다시 설정함
-                            st.session_state.current_params = {
-                                'buy_signals': [
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [10, 60], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [0, 45], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50], 'opt_news_q': False, 'rng_news_q_val': [0.5, 0.99], 'opt_news_z': False, 'rng_news_z_val': [-1.0, 4.0]}
-                                ],
-                                'sell_signals': [
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [40, 95], 'opt_chandelier_mult': False, 'rng_chandelier_mult': [1.0, 5.0], 'opt_willr_val': False, 'rng_willr_val': [-50, -5], 'opt_news_q': False, 'rng_news_q_val': [0.01, 0.5], 'opt_news_z': False, 'rng_news_z_val': [-4.0, 1.0]}
-                                ],
-                                's3_protection': [{}, {}, {}],
-                                'panic_buy_signals': [
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]},
-                                    {'opt_rsi_val': False, 'rng_rsi_val': [15, 50], 'opt_adx_val': False, 'rng_adx_val': [5, 80], 'opt_willr_val': False, 'rng_willr_val': [-95, -50]}
-                                ],
-                                'opt_buy_reb_up': False, 'rng_buy_reb_up': [0.1, 5.0], 'opt_buy_reb_down': False, 'rng_buy_reb_down': [-15.0, -1.0], 
-                                'opt_sell_reb_up': False, 'rng_sell_reb_up': [0.5, 10.0], 'opt_sell_reb_down': False, 'rng_sell_reb_down': [-10.0, -0.5],
-                                'opt_atr_m_buy_up': False, 'rng_atr_m_buy_up': [1.0, 20.0], 'opt_atr_m_buy_down': False, 'rng_atr_m_buy_down': [0.5, 5.0], 
-                                'opt_atr_m_sell': False, 'rng_atr_m_sell': [1.0, 6.0],
-                                'buy_reb_up': 0.018, 'buy_reb_down': -1.0, 'sell_reb_up': 0.03, 'sell_reb_down': -0.035,
-                                'base_asset': 'QQQ', 'leverage_asset': 'TQQQ', 'cash_ratio_pct': 0.0, 'trade_at': '종가',
-                                'use_fixed_reb': True, 'use_atr_reb': True,
-                                'atr_mult_buy_up': 10.0, 'atr_mult_buy_down': 3.0, 'atr_mult_sell': 10.0,
-                                'atr_period_buy': 20, 'atr_period_sell': 20,
-                                'use_panic': True, 'panic_ma': 200,
-                                'use_vxn_safety': False, 'vxn_exit': 31, 'vxn_dev_filter': 0.0,
-                                'use_rsi_turbo': False, 'rsi_turbo': 31,
-                                'use_reb_interlock': False, 'reb_interlock_dev': 1.13, 'reb_interlock_vxn': 22.0,
-                                'use_buy_interlock': False, 'interlock_vxn': 25.0,
-                                'interlock_dev': 1.1, 'interlock_min_stage': 1,
-                                'dynamic_cash': {
-                                    'use': False, 'bull_vxn': 18.0, 'caution_vxn': 35.0, 'bear_vxn': 40.0,
-                                    'ma200_buffer': 0.0, 'cash_bull': 0.0, 'cash_neutral': 20.0,
-                                    'cash_caution': 30.0, 'cash_bear': 80.0
-                                }
-                            }
+                            # 로드 전 defaults.py로 초기화 후 로드값 덮어쓰기
+                            base_params = get_default_equity_params()
 
                             # [수정] 중첩 데이터 평활화 (Flatten) - overwrite (update) 사용
                             if 'params' in config and isinstance(config['params'], dict):
@@ -154,8 +117,8 @@ class HistoryLabView:
                                 if old_k in config and new_k not in config:
                                     config[new_k] = config[old_k]
 
-                            # 1. 메인 파라미터 업데이트
-                            st.session_state.current_params.update(config)
+                            # 1. 메인 파라미터 업데이트 (defaults 기반 + 로드값 덮어쓰기)
+                            base_params.update(config)
                             
                             # 2. UI 위젯 상태 강제 동기화 (Widget Keys)
                             key_map = {
@@ -339,8 +302,13 @@ class HistoryLabView:
                             st.session_state.atr_p_buy = int(config.get('atr_period_buy', 20))
                             st.session_state.atr_p_sell = int(config.get('atr_period_sell', 20))
                             
-                            st.session_state.loaded_strat_name = target_strat
-                            st.session_state.trigger_recalc_history = True # [신규] 로드 즉시 재시뮬레이션 트리거
+                            # Dispatcher를 통해 AppState 반영 + dirty flag 자동 설정
+                            from core.dispatcher import Dispatcher, Action
+                            Dispatcher.dispatch(Action.SET_EQUITY_PARAMS, {
+                                'params': base_params,
+                                'name':   target_strat,
+                            })
+                            st.session_state[SK.LOADED_STRAT_NAME] = target_strat
                             st.success(f"'{target_strat}' 모든 설정 및 UI 로드 완료!")
                             st.rerun()
             else:
@@ -463,33 +431,35 @@ class HistoryLabView:
             st.divider()
 
             # [수정] st.form 재도입: 설정값 변경 시마다 발생하는 화면 깜빡임 방지
+            _cur_params = AppState.get_equity_params()
             with st.form("strategy_settings_form"):
                 st.subheader("⚖️ 리밸런싱 및 상세 시그널 설정")
                 c_sel1, c_sel2, c_sel3 = st.columns(3)
-                use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=st.session_state.current_params.get('use_fixed_reb', True), key="use_fixed_chk")
-                use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=st.session_state.current_params.get('use_atr_reb', False), key="use_atr_chk")
-                
+                use_fixed = c_sel1.checkbox("🔹 고정 비율 리밸런싱 사용", value=_cur_params.get('use_fixed_reb', True), key="use_fixed_chk")
+                use_atr = c_sel2.checkbox("🔸 ATR 변동성 리밸런싱 사용", value=_cur_params.get('use_atr_reb', False), key="use_atr_chk")
+
                 ticker_map = {
                     "QQQ": "나스닥 100 (QQQ)", "QLD": "나스닥 2배 (QLD)", "TQQQ": "나스닥 3배 (TQQQ)"
                 }
 
                 # 1. 상단 섹션 (기준 자산 및 매매 시그널)
-                new_params_top = TesterView.render_top_part(st.session_state.current_params, ticker_map=ticker_map)
+                new_params_top = TesterView.render_top_part(_cur_params, ticker_map=ticker_map)
                 # 2. 하위 섹션 (리밸런싱 구체 설정 및 스마트 필터)
-                new_params_bottom = TesterView.render_bottom_part(st.session_state.current_params, ticker_map=ticker_map)
-                
+                new_params_bottom = TesterView.render_bottom_part(_cur_params, ticker_map=ticker_map)
+
                 st.write("---")
-                # [수정] st.form_submit_button 사용: 클릭 시에만 모든 값이 한꺼번에 업데이트됨
                 submitted = st.form_submit_button("🚀 설정값 확정 및 재시뮬레이션 실행", width='stretch', type="primary")
-                
+
                 if submitted:
-                    # [신규] 폼 제출 시에만 세션 상태 동기화 및 재계산 트리거
-                    st.session_state.current_params['use_fixed_reb'] = use_fixed
-                    st.session_state.current_params['use_atr_reb'] = use_atr
-                    st.session_state.current_params.update(new_params_top)
-                    st.session_state.current_params.update(new_params_bottom)
-                    
-                    st.session_state.trigger_recalc_history = True
+                    # 폼 제출 시에만 Dispatcher를 통해 상태 반영 + dirty flag 설정
+                    updated = dict(_cur_params)
+                    updated['use_fixed_reb'] = use_fixed
+                    updated['use_atr_reb']   = use_atr
+                    updated.update(new_params_top)
+                    updated.update(new_params_bottom)
+
+                    from core.dispatcher import Dispatcher, Action
+                    Dispatcher.dispatch(Action.SET_EQUITY_PARAMS, {'params': updated})
                     st.rerun()
 
             st.write("")

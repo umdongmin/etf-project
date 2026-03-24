@@ -49,7 +49,13 @@ class AssetView:
             st.warning("등록된 포트폴리오가 없습니다.")
             return
 
-        default_idx = next((i for i, n in enumerate(portfolio_names) if n.startswith('A')), 0)
+        # DB 기본 포트폴리오 우선, 없으면 첫 번째 항목
+        _db_default_pf = StrategyStorage.get_default_portfolio()
+        default_idx = (
+            portfolio_names.index(_db_default_pf)
+            if _db_default_pf and _db_default_pf in portfolio_names
+            else 0
+        )
         col1, col2 = st.columns([3, 1])
         with col1:
             portfolio_name = st.selectbox("포트폴리오", portfolio_names, index=default_idx, key="signal_portfolio")

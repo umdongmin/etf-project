@@ -28,10 +28,11 @@ class PortfolioView:
         st.caption(f"📅 분석 기간 (적용됨): **{local_start} ~ {local_end}**")
 
         # 세션 상태 초기화: 포트폴리오 전략 목록
-        _portfolio_init_ver = 'v6'
+        from core.session_keys import SK as _SK
+        _PORTFOLIO_INIT_VER = 'v6'
         _needs_portfolio_init = (
             'portfolio_configs' not in st.session_state
-            or st.session_state.get('portfolio_init_ver') != _portfolio_init_ver
+            or st.session_state.get(_SK.PORTFOLIO_INIT_VER) != _PORTFOLIO_INIT_VER
             or not any(c.get('type') == 'bond' and 'lev_params' in c
                        for c in st.session_state.get('portfolio_configs', []))
         )
@@ -41,11 +42,8 @@ class PortfolioView:
             _loaded_default = StrategyStorage.load_portfolio(_default_portfolio_name) if _default_portfolio_name else None
 
             if _loaded_default:
-                _loaded_configs = copy.deepcopy(_loaded_default['configs'])
-                for cfg in _loaded_configs:
-                    if cfg.get('type') == 'bond' and 'lev_params' not in cfg:
-                        cfg['lev_params'] = copy.deepcopy(st.session_state.get('current_bond_lev_params'))
-                st.session_state.portfolio_configs = _loaded_configs
+                # lev_params는 strategies 테이블에서 load_portfolio()가 직접 가져옴
+                st.session_state.portfolio_configs = copy.deepcopy(_loaded_default['configs'])
                 st.session_state.portfolio_total_capital = _loaded_default['total_capital']
                 st.session_state.portfolio_rebalance_preset = _loaded_default.get('rebalance_preset', 'none')
             else:
@@ -67,7 +65,7 @@ class PortfolioView:
                      'lev_params': _default_bond_lev_params},
                 ]
 
-            st.session_state.portfolio_init_ver = _portfolio_init_ver
+            st.session_state[_SK.PORTFOLIO_INIT_VER] = _PORTFOLIO_INIT_VER
             st.session_state.pop('portfolio_result', None)  # 초기화 시 이전 결과 제거
         
         if 'portfolio_total_capital' not in st.session_state:
@@ -88,7 +86,12 @@ class PortfolioView:
                     if p_list:
                         _default_p_name = StrategyStorage.get_default_portfolio()
                         _fmt_p = lambda x: f"⭐ {x} (기본)" if x == _default_p_name else x
-                        selected_p = st.selectbox("저장된 포트폴리오 선택", p_list, key="p_load_sel", format_func=_fmt_p)
+                        _default_p_idx = (
+                            p_list.index(_default_p_name)
+                            if _default_p_name and _default_p_name in p_list
+                            else 0
+                        )
+                        selected_p = st.selectbox("저장된 포트폴리오 선택", p_list, index=_default_p_idx, key="p_load_sel", format_func=_fmt_p)
                         c1, c2, c3 = st.columns(3)
                         if c1.button("📂 불러오기", use_container_width=True):
                             loaded = StrategyStorage.load_portfolio(selected_p)
@@ -96,17 +99,12 @@ class PortfolioView:
                                 # (1) 핵심 데이터 교체 (deepcopy 필수)
                                 loaded_configs = copy.deepcopy(loaded['configs'])
 
-                                # (2) 불러온 configs에 lev_params 누락 시 현재 세션 값으로 보완
-                                #     → 누락 시 _needs_portfolio_init=True 가 다시 덮어쓰는 버그 방지
-                                for cfg in loaded_configs:
-                                    if cfg.get('type') == 'bond' and 'lev_params' not in cfg:
-                                        cfg['lev_params'] = copy.deepcopy(st.session_state.get('current_bond_lev_params'))
-
+                                # lev_params는 strategies 테이블에서 load_portfolio()가 직접 가져옴
                                 st.session_state.portfolio_configs = loaded_configs
                                 st.session_state.portfolio_total_capital = loaded['total_capital']
                                 st.session_state.portfolio_rebalance_preset = loaded.get('rebalance_preset', 'none')
                                 # portfolio_init_ver 동기화 → 재초기화 방지
-                                st.session_state.portfolio_init_ver = _portfolio_init_ver
+                                st.session_state[_SK.PORTFOLIO_INIT_VER] = _PORTFOLIO_INIT_VER
 
                                 # (3) 위젯 상태 초기화 (강력하게)
                                 if 'p_load_version' not in st.session_state:
@@ -143,15 +141,16 @@ class PortfolioView:
                         if not save_name.strip():
                             st.error("저장할 이름을 입력해 주세요.")
                         else:
-                            # 저장 직전 실시간 동기화
+                            # lev_params는 strategies 테이블에서 관리 — portfolio_configs 그대로 저장
                             saved_name = StrategyStorage.save_portfolio(
-                                save_name, 
-                                st.session_state.portfolio_configs, 
+                                save_name,
+                                st.session_state.portfolio_configs,
                                 st.session_state.portfolio_total_capital,
                                 st.session_state.get('portfolio_rebalance_preset', 'none')
                             )
                             if saved_name:
                                 st.success(f"✅ 현재 배분 상태가 '**{saved_name}**'(으)로 저장되었습니다.")
+                                st.session_state.pop('portfolio_result', None)  # 저장 후 재시뮬레이션 강제
                                 st.rerun()
 
             st.write("---")
@@ -174,12 +173,16 @@ class PortfolioView:
             )
             
             if col_add.button("➕ 전략 추가", use_container_width=True):
-                new_idx = len(st.session_state.portfolio_configs) + 1
-                st.session_state.portfolio_configs.append({
-                    'name': f'신규 전략 {new_idx}',
-                    'weight': 0.0,
-                    'type': 'equity', # [신규] 기본값 주식
-                    'params': copy.deepcopy(st.session_state.current_params)
+                from core.dispatcher import Dispatcher, Action
+                from core.state import AppState
+                new_idx = len(AppState.get_portfolio_configs()) + 1
+                Dispatcher.dispatch(Action.ADD_PORTFOLIO_STRATEGY, {
+                    'config': {
+                        'name':   f'신규 전략 {new_idx}',
+                        'weight': 0.0,
+                        'type':   'equity',
+                        'params': AppState.get_equity_params(),
+                    }
                 })
                 st.rerun()
 
@@ -231,13 +234,15 @@ class PortfolioView:
                             key=f"p_strat_sel_{i}_{p_v}"
                         )
                     
-                    # (3) 데이터 동기화 (타입 또는 이름 변경 시에만 DB 호출 및 rerun)
+                    # (3) 데이터 동기화 — Dispatcher를 통해 diff 비교 후 변경된 경우에만 DB 호출
                     if new_type != curr_type or (strat_options and selected_name != config['name']):
-                        loaded_strat = StrategyStorage.load_strategy(selected_name)
-                        if loaded_strat:
-                            configs[i]['name'] = selected_name
-                            configs[i]['type'] = new_type
-                            configs[i]['params'] = copy.deepcopy(loaded_strat)
+                        from core.dispatcher import Dispatcher, Action
+                        changed = Dispatcher.dispatch(Action.UPDATE_PORTFOLIO_STRATEGY, {
+                            'index': i,
+                            'name':  selected_name,
+                            'type':  new_type,
+                        })
+                        if changed:
                             st.rerun()
 
                     # (4) 비중 표시 (실시간 반영)
@@ -250,7 +255,8 @@ class PortfolioView:
                         to_delete = i
             
             if to_delete != -1:
-                st.session_state.portfolio_configs.pop(to_delete)
+                from core.dispatcher import Dispatcher, Action
+                Dispatcher.dispatch(Action.REMOVE_PORTFOLIO_STRATEGY, {'index': to_delete})
                 st.rerun()
 
             if abs(total_weight - 1.0) > 1e-5:
@@ -264,25 +270,33 @@ class PortfolioView:
                     st.error("비중 합계가 1.0이 아니면 실행할 수 없습니다.")
                 else:
                     PortfolioView.run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, local_start, local_end)
+                    from core.dispatcher import Dispatcher
+                    Dispatcher.clear_portfolio_dirty()
 
         with tab1:
-            # 수수료 설정 변경 시 재실행 안내
-            if 'portfolio_result' in st.session_state:
-                saved_fee = st.session_state.portfolio_result.get('fee_rate', 0.0)
-                current_fee = st.session_state.get('global_fee_rate', 0.0)
-                if abs(saved_fee - current_fee) > 1e-8:
-                    st.warning(f"⚠️ 수수료 설정이 변경되었습니다 (적용됨: {saved_fee*100:.3f}% → 현재: {current_fee*100:.3f}%). '시뮬레이션 실행' 버튼을 눌러 재계산하세요.")
+            from core.state import AppState
+            from core.dispatcher import Dispatcher
+            from core.session_keys import SK
 
-            # 결과 없으면 자동 시뮬레이션 실행
-            if 'portfolio_result' not in st.session_state:
-                configs_ok = (
-                    st.session_state.get('portfolio_configs')
-                    and abs(sum(c['weight'] for c in st.session_state.portfolio_configs) - 1.0) < 1e-5
-                )
-                if configs_ok:
-                    PortfolioView.run_simulation(data_dict, fg_df, vxn_df, macro_df, news_df, local_start, local_end)
-                    st.rerun()
-            PortfolioView.render_dashboard()
+            # ── 결과 stale 경고 (자동 재실행 대신 사용자에게 안내) ──────────────
+            result_exists = SK.PORTFOLIO_RESULT in st.session_state
+            if result_exists:
+                saved_fee   = st.session_state[SK.PORTFOLIO_RESULT].get('fee_rate', 0.0)
+                current_fee = AppState.get_fee_rate()
+                if abs(saved_fee - current_fee) > 1e-8:
+                    st.warning(
+                        f"⚠️ 수수료가 변경되었습니다 "
+                        f"({saved_fee*100:.3f}% → {current_fee*100:.3f}%). "
+                        f"'전략 구성 및 비중' 탭에서 시뮬레이션을 재실행하세요."
+                    )
+            if Dispatcher.is_portfolio_dirty() and result_exists:
+                st.info("⚡ 전략 구성이 변경되었습니다. '전략 구성 및 비중' 탭에서 시뮬레이션을 실행하세요.")
+
+            # ── 결과 없으면 안내만 표시 (자동 실행 금지) ────────────────────────
+            if not result_exists:
+                st.info("📊 시뮬레이션 결과가 없습니다. '전략 구성 및 비중' 탭에서 실행해 주세요.")
+            else:
+                PortfolioView.render_dashboard()
 
     @staticmethod
     def render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df, start_date, end_date=None):
@@ -309,8 +323,12 @@ class PortfolioView:
             return
 
         if 'portfolio_selected_name' not in st.session_state:
-            # "A" 포트폴리오 찾기, 없으면 첫 번째 사용
-            default_portfolio = next((n for n in portfolio_names if 'A' in n), portfolio_names[0] if portfolio_names else None)
+            # DB 기본값 우선 → 없으면 첫 번째 항목
+            _db_default = StrategyStorage.get_default_portfolio()
+            default_portfolio = (
+                _db_default if _db_default and _db_default in portfolio_names
+                else portfolio_names[0]
+            )
             st.session_state.portfolio_selected_name = default_portfolio
 
         def on_portfolio_change():
@@ -372,8 +390,9 @@ class PortfolioView:
         # custom_preset_cfg가 필요한 preset (hybrid, trend, 밴드 등)을 처리
         std_preset, custom_cfg = resolve_rebalance_preset(preset)
 
-        fee_rate       = st.session_state.get('global_fee_rate', 0.001)
-        integer_shares = st.session_state.get('global_integer_shares', True)
+        from core.state import AppState as _AppState
+        fee_rate       = _AppState.get_fee_rate()
+        integer_shares = _AppState.get_integer_shares()
 
         # ── 전략 B(trend) 전용: QQQ MA200 계산 ────────────────────────────────
         trend_data = None
@@ -440,10 +459,12 @@ class PortfolioView:
         filtered_data = {t: df.loc[start_date:end_date] for t, df in data_dict.items() if not df.empty}
         
         # Portfolio Manager 초기화
-        rebalance_preset = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
-        fee_rate = st.session_state.get('global_fee_rate', 0.001)
-        integer_shares = st.session_state.get('global_integer_shares', False)
-        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=rebalance_preset, fee_rate=fee_rate, integer_shares=integer_shares)
+        rebalance_preset_key = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
+        std_preset, custom_cfg = resolve_rebalance_preset(rebalance_preset_key)
+        from core.state import AppState as _AppState
+        fee_rate = _AppState.get_fee_rate()
+        integer_shares = _AppState.get_integer_shares()
+        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=std_preset, custom_preset_cfg=custom_cfg, fee_rate=fee_rate, integer_shares=integer_shares)
         
         # 전략 등록
         for config in configs:

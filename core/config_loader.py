@@ -33,6 +33,8 @@ def load_default_equity_params() -> tuple:
 def load_default_bond_params() -> tuple:
     """DB에서 기본 채권 전략을 로드.
 
+    strategies 테이블의 params(Layer1) + lev_params(Layer2) 분리 구조를 사용.
+
     Returns:
         (name: str | None, params: dict, lev_params: dict)
     """
@@ -42,10 +44,9 @@ def load_default_bond_params() -> tuple:
         if default_name:
             loaded = StrategyStorage.load_strategy(default_name)
             if loaded and isinstance(loaded, dict):
-                if 'params' in loaded and 'lev_params' in loaded:
-                    return default_name, loaded['params'], loaded['lev_params'] or get_default_bond_lev_params()
-                elif 'ffv_lo' in loaded:
-                    return default_name, loaded, get_default_bond_lev_params()
+                lev_p = loaded.pop('lev_params', None) or get_default_bond_lev_params()
+                loaded.pop('category', None)
+                return default_name, loaded, lev_p
     except Exception as e:
         print(f"[config_loader] bond 로드 실패: {e}")
     return None, get_default_bond_params(), get_default_bond_lev_params()

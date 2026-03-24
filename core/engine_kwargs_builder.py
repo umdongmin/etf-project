@@ -104,7 +104,7 @@ def resolve_rebalance_preset(preset_key: str) -> tuple:
     Returns:
         (std_preset: str, custom_cfg: dict | None)
     """
-    _CUSTOM_PRESETS = {'hybrid', 'trend', 'band_5pct', 'band_10pct', 'asymmetric'}
+    _CUSTOM_PRESETS = {'hybrid', 'trend', 'band_5pct', 'band_7pct', 'band_10pct', 'asymmetric'}
     if preset_key in _CUSTOM_PRESETS:
         cfg = REBALANCE_PRESET_CONFIGS.get(preset_key, {'method': 'none'})
         return 'none', cfg
