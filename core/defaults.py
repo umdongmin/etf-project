@@ -16,6 +16,15 @@ DEFAULT_BOND_PARAMS = {
     'f1_lookback': 15, 'f1_rise_thr': 0.27, 'f1_fall_thr': -0.27, 'f1_freeze_days': 28,
     'f2_cpi_window': 142, 'f2_accel_window': 114, 'f2_ppi_window': 135,
     'f3_emp_window': 72, 'f3_gap_hi': 0.47, 'f3_chg_thr': -0.11, 'f3_gap_lo': -0.21,
+    # Carry 필터: tnx_val - ff_rate (장기채 carry vs 현금) — 기본 비활성
+    'carry_use': False,
+    'carry_lo': -0.50,        # 10y금리 - FF금리 하한 임계 (%) → TLT→BIL 강제 전환
+    'carry_confirm': 0,       # 연속 확인 일수 (0=즉시, N=N일 연속 시 실행)
+    # F6: HY Spread (신용 리스크 프리미엄) — 기본 비활성
+    'f6_use': False,
+    'f6_window': 21,          # 변화율 관찰 기간 (거래일, 약 4주)
+    'f6_rise_thr': 0.50,      # 스프레드 급등 임계 (%) → FALLING (채권 선호)
+    'f6_fall_thr': -0.30,     # 스프레드 하락 임계 (%) → RISING (리스크온, 채권 회피)
 }
 
 # ── 채권 레버리지 신호 조건 기본값 ────────────────────────────────────────────

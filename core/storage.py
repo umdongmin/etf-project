@@ -1427,6 +1427,132 @@ class OrderStorage:
             print(f"Check Duplicate Order Error: {e}")
             return True  # 에러 시 중복으로 간주 (Fail-Closed)
 
+    # ── UI 조회 ──────────────────────────────────────────────────────────
+
+    @classmethod
+    def list_order_logs(cls, trading_mode: str = None, days: int = 30, limit: int = 200) -> list[dict]:
+        """
+        UI용 주문 로그 목록 조회.
+
+        Parameters
+        ----------
+        trading_mode : str | None — 'paper' / 'live' / None(전체)
+        days : int — 최근 N일 (기본 30일)
+        limit : int — 최대 행 수
+
+        Returns
+        -------
+        list[dict] — 최신순 정렬
+        """
+        cls._init_trading_db()
+        try:
+            conn = cls._get_connection()
+            cursor = conn.cursor()
+            where = ["created_at > NOW() - INTERVAL '%s days'"]
+            args  = [days]
+            if trading_mode:
+                where.append("trading_mode = %s")
+                args.append(trading_mode)
+            args.append(limit)
+            cursor.execute(f'''
+                SELECT
+                    id, portfolio_name, strategy_name, ticker, side,
+                    quantity, filled_price, filled_amount,
+                    safety_passed, rejection_reason,
+                    approval_status, execution_status,
+                    kis_order_no, trading_mode, created_at, updated_at,
+                    safety_checks
+                FROM order_log
+                WHERE {' AND '.join(where)}
+                ORDER BY created_at DESC
+                LIMIT %s
+            ''', args)
+            cols = [d[0] for d in cursor.description]
+            rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+            conn.close()
+            return rows
+        except Exception as e:
+            print(f"list_order_logs Error: {e}")
+            return []
+
+    @classmethod
+    def get_pnl_summary(cls, trading_mode: str = None, days: int = 90) -> dict:
+        """
+        UI용 손익 요약 (날짜별 누적 실현손익).
+
+        Returns
+        -------
+        dict : {
+            'daily': list[{date, realized_pnl, trade_count}],
+            'total_buy_amount': float,
+            'total_sell_amount': float,
+            'total_trades': int,
+            'filled_trades': int,
+            'blocked_trades': int,
+        }
+        """
+        cls._init_trading_db()
+        try:
+            conn = cls._get_connection()
+            cursor = conn.cursor()
+            where = ["created_at > NOW() - INTERVAL '%s days'", "execution_status = 'filled'"]
+            args  = [days]
+            if trading_mode:
+                where.append("trading_mode = %s")
+                args.append(trading_mode)
+
+            # 날짜별 매수/매도 금액 집계
+            cursor.execute(f'''
+                SELECT
+                    created_at::date AS dt,
+                    side,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(filled_amount), 0) AS total_amount
+                FROM order_log
+                WHERE {' AND '.join(where)}
+                GROUP BY dt, side
+                ORDER BY dt
+            ''', args)
+            rows = cursor.fetchall()
+
+            # 전체 통계
+            where2 = ["created_at > NOW() - INTERVAL '%s days'"]
+            args2  = [days]
+            if trading_mode:
+                where2.append("trading_mode = %s")
+                args2.append(trading_mode)
+            cursor.execute(f'''
+                SELECT
+                    COUNT(*) FILTER (WHERE execution_status = 'filled')   AS filled,
+                    COUNT(*) FILTER (WHERE safety_passed = FALSE)          AS blocked,
+                    COUNT(*)                                               AS total
+                FROM order_log
+                WHERE {' AND '.join(where2)}
+            ''', args2)
+            stats = cursor.fetchone()
+            conn.close()
+
+            # 날짜별 데이터 가공 (buy/sell 금액으로 실현손익 근사)
+            from collections import defaultdict
+            daily_map = defaultdict(lambda: {'buy': 0.0, 'sell': 0.0, 'count': 0})
+            for dt, side, cnt, amt in rows:
+                daily_map[dt][side] = float(amt)
+                daily_map[dt]['count'] += cnt
+
+            daily = [
+                {'date': str(dt), 'sell_amount': v['sell'], 'buy_amount': v['buy'], 'trade_count': v['count']}
+                for dt, v in sorted(daily_map.items())
+            ]
+            return {
+                'daily': daily,
+                'filled_trades': int(stats[0]) if stats else 0,
+                'blocked_trades': int(stats[1]) if stats else 0,
+                'total_trades': int(stats[2]) if stats else 0,
+            }
+        except Exception as e:
+            print(f"get_pnl_summary Error: {e}")
+            return {'daily': [], 'filled_trades': 0, 'blocked_trades': 0, 'total_trades': 0}
+
     # ── 승인 관리 ────────────────────────────────────────────────────────
 
     @classmethod

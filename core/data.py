@@ -485,6 +485,7 @@ class DataService:
             ('T10Y2Y',   't10y2y',    0),
             ('DFII10',   'real_rate_10y', 0),   # 10Y TIPS 실질금리
             ('T5YIFR',   'breakeven_5y5y', 0),  # 5Y5Y Forward Breakeven 인플레 기대
+            ('BAMLH0A0HYM2', 'hy_spread', 0),   # ICE BofA HY OAS (신용 리스크 프리미엄)
         ]
         macro_df = pd.DataFrame()
 
@@ -495,6 +496,13 @@ class DataService:
                 print(f"✅ FRED 캐시 로드 (마지막: {macro_df.index[-1].date()})")
             except Exception as e:
                 print(f"FRED 캐시 로드 실패: {e}")
+
+        # 캐시에 없는 신규 시리즈가 있으면 전체 재수집 강제 (컬럼 추가 시 자동 대응)
+        _expected_cols = {col for _, col, _ in _fred_macro_series}
+        _missing_cols = _expected_cols - set(macro_df.columns) if not macro_df.empty else set()
+        if _missing_cols:
+            print(f"⚠️ FRED 캐시에 신규 컬럼 누락 {_missing_cols} → 전체 재수집 강제")
+            macro_df = pd.DataFrame()  # 캐시 무효화 → 전체 재수집
 
         # 캐시가 3일 이상 오래됐거나 없으면 API 증분 호출
         _cache_age = (datetime.date.today() - macro_df.index[-1].date()).days if not macro_df.empty else 999

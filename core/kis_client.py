@@ -438,21 +438,27 @@ class KISClient:
         list[dict] : 체결 내역 리스트 또는 빈 list
         """
         today = datetime.date.today().strftime('%Y%m%d')
+        # 모의투자(paper)는 ORD_DT + ORD_STRT_DT + ORD_END_DT 모두 필요 (KIS 모의투자 API 스펙)
+        # 실거래(live)는 ORD_STRT_DT/ORD_END_DT만 사용
+        s_date = start_date or today
+        e_date = end_date or today
         params = {
             'CANO': self.account_prefix,
             'ACNT_PRDT_CD': self.account_suffix,
             'PDNO': '',
-            'ORD_STRT_DT': start_date or today,
-            'ORD_END_DT': end_date or today,
-            'SLL_BUY_DVSN': '00',  # 전체
-            'CCLD_NCCS_DVSN': '00',  # 전체
+            'ORD_STRT_DT': s_date,
+            'ORD_END_DT': e_date,
+            'SLL_BUY_DVSN': '00',
+            'CCLD_NCCS_DVSN': '00',
             'OVRS_EXCG_CD': 'NASD',
-            'SORT_SQN': 'DS',  # 최신순
+            'SORT_SQN': 'DS',
             'ORD_GNO_BRNO': '',
             'ODNO': '',
             'CTX_AREA_FK200': '',
             'CTX_AREA_NK200': '',
         }
+        if self._mode == 'paper':
+            params['ORD_DT'] = s_date  # 모의투자 추가 필수 필드
         data = self._api_request(
             'GET',
             '/uapi/overseas-stock/v1/trading/inquire-ccnl',
@@ -481,6 +487,40 @@ class KISClient:
                 'status': item.get('ccld_yn', ''),  # Y: 체결, N: 미체결
             })
         return result
+
+    def get_order_history_range(self, days: int = 7) -> list:
+        """
+        날짜 범위 체결내역 조회 (하루씩 반복 호출).
+
+        Parameters
+        ----------
+        days : int — 오늘 기준 최근 N일 (기본 7일, 최대 30일 권장)
+
+        Returns
+        -------
+        list[dict] : 전체 기간 체결 내역 (최신순)
+        """
+        import time as _time
+        today = datetime.date.today()
+        all_results = []
+        for delta in range(days):
+            target = today - datetime.timedelta(days=delta)
+            # 주말 스킵
+            if target.weekday() >= 5:
+                continue
+            try:
+                daily = self.get_order_history(
+                    start_date=target.strftime('%Y%m%d'),
+                    end_date=target.strftime('%Y%m%d'),
+                )
+                for r in daily:
+                    r['date'] = target.strftime('%Y-%m-%d')
+                all_results.extend(daily)
+                _time.sleep(0.1)  # API 호출 간격 (Rate Limit 방지)
+            except Exception as e:
+                print(f"[KIS] get_order_history_range error on {target}: {e}")
+                continue
+        return all_results
 
     # ── 주문 API ─────────────────────────────────────────────────────────
 

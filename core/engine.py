@@ -221,6 +221,39 @@ class StrategyEngine:
         current_planned_asset, rebalance_stage, last_entry_price = base_asset, 0, 0
         peak_price, peak_macd = 0, 0
 
+        # ── 비대칭 Stage 비율 파라미터 로드 (use=False 시 기본값 동작 유지) ──────
+        _sr = (params.get('stage_ratios') or {}) if params else {}
+        _sr_use = bool(_sr.get('use', False))
+        _buy_s1  = float(_sr.get('buy_s1',  0.30)) if _sr_use else 0.30
+        _buy_s2  = float(_sr.get('buy_s2',  0.70)) if _sr_use else 0.70
+        _buy_s3  = float(_sr.get('buy_s3',  1.00)) if _sr_use else 1.00
+        _sell_s2 = float(_sr.get('sell_s2', 0.70)) if _sr_use else 0.70
+        _sell_s1 = float(_sr.get('sell_s1', 0.30)) if _sr_use else 0.30
+
+        # ── S3 Retention Filter 파라미터 로드 ───────────────────────────────────
+        # S3 상태에서 매도신호 발생 시 추가 조건 충족 시에만 청산 허용
+        # use=False → 기존 동작 (매도신호 즉시 청산) 유지
+        _s3r = (params.get('s3_retention') or {}) if params else {}
+        _s3r_use      = bool(_s3r.get('use', False))
+        _s3r_vxn      = float(_s3r.get('vxn_exit',    30.0))   # VXN 임계값: 이 이상이어야 청산 허용
+        _s3r_dev      = float(_s3r.get('dev200_exit',  1.00))   # Dev200 임계값: 이 이하여야 청산 허용
+        _s3r_req_vxn  = bool(_s3r.get('require_vxn',  True))   # VXN 조건 활성화 여부
+        _s3r_req_dev  = bool(_s3r.get('require_dev200', False)) # Dev200 조건 활성화 여부
+        _s3r_both     = bool(_s3r.get('require_both',  False))  # True=AND, False=OR
+
+        # ── Confidence Score 기반 Stage Jump 파라미터 로드 ──────────────────────
+        # 동시 충족 신호셋 개수 → 허용 Stage 점프 크기 (use=False 시 기존 +1 고정 동작)
+        _cs = (params.get('confidence_sizing') or {}) if params else {}
+        _cs_use = bool(_cs.get('use', False))
+        # jump_map 키를 int로 정규화 (JSON 로드 시 str 키 처리)
+        _cs_jump_map: dict[int, int] = (
+            {int(k): int(v) for k, v in _cs.get('jump_map', {}).items()}
+            if _cs_use else {}
+        )
+        # stage → target_lev_pct 매핑 (buy/sell 구분)
+        _cs_lev_buy  = {0: 0.0, 1: _buy_s1,  2: _buy_s2,  3: _buy_s3}
+        _cs_lev_sell = {0: 0.0, 1: _sell_s1, 2: _sell_s2, 3: _buy_s3}
+
         holdings = {t: 0.0 for t in data_dict.keys()}
         
         initial_price = base_df['Close'].asof(dates[0])
@@ -409,13 +442,14 @@ class StrategyEngine:
             s3_drop_triggered_val = 0
             s3_detail_val = ""
             s3_sell3_event_val = 0
+            buy_confidence = 1   # 신호 동시 충족 개수 (confidence_sizing 미사용 시 1 고정)
             
             trade_label = ""
             rebalance_cause = ""
             # [긴급 수정] 목표 상태 변수 초기화 (현재 상태 유지가 기본 - UnboundLocalError 방지)
             new_planned = current_planned_asset
             new_stage = rebalance_stage
-            target_lev_pct = (1.0 if new_stage == 3 else (0.70 if new_stage == 2 else (0.30 if new_stage == 1 else 0.0)))
+            target_lev_pct = (_buy_s3 if new_stage == 3 else (_buy_s2 if new_stage == 2 else (_buy_s1 if new_stage == 1 else 0.0)))
             rebalance_needed = False
 
             is_delayed = False
@@ -667,6 +701,16 @@ class StrategyEngine:
                         signal_reason = " / ".join(reasons)
                         break
 
+                # ── Confidence Count: 모든 buy_signals 동시 충족 개수 산출 ──────────
+                # check_buy_cond의 wait_flag SET은 멱등(idempotent)이므로 재호출 안전
+                if _cs_use and is_buy_signal:
+                    _conf = 0
+                    for _ci, _cbp in enumerate(_active_buy_signals):
+                        _ca, _cc, _ = check_buy_cond(_cbp, _ci + 1, buy_wait_flags)
+                        if _ca and _cc:
+                            _conf += 1
+                    buy_confidence = max(1, _conf)
+
                 is_sell_signal = False
                 sell_signal_idx = -1 # [신규] 어떤 매도 신호가 발생했는지 추적
                 for idx, sp in enumerate(_active_sell_signals):
@@ -684,17 +728,30 @@ class StrategyEngine:
                             reasons.append(f"RSI대기(>={wait_val})")
                         active = True
 
-                    if sp.get('rsi_val', 0) > 0: 
+                    if sp.get('rsi_val', 0) > 0:
                         cond &= (rsi >= sp['rsi_val']); active = True
                         reasons.append(f"RSI>={sp['rsi_val']}")
 
-                    if sp.get('rsi_dead'): 
-                        cond &= is_rsi_dead_cross; active = True
+                    # [신규] RSI 상한 필터: RSI < rsi_max_val 일 때만 발동
+                    # 용도: RSI 데드크로스를 저RSI 구간(반등실패)에서만 감지
+                    if sp.get('rsi_max_val', 0) > 0:
+                        cond &= (rsi < sp['rsi_max_val']); active = True
+                        reasons.append(f"RSI<{sp['rsi_max_val']}")
 
+                    if sp.get('rsi_dead'):
+                        cond &= is_rsi_dead_cross; active = True
                         reasons.append("RSI 데드크로스")
-                    if sp.get('rsi_dec'): 
+                    if sp.get('rsi_dec'):
                         cond &= (rsi < prev_rsi); active = True
                         reasons.append("RSI 하락")
+
+                    # [신규] 진입가 기반 손절 (use=False → BASE 동일)
+                    # entry_stop_pct: 진입가 대비 X% 이상 하락 시 발동
+                    if sp.get('use_entry_stop') and last_entry_price > 0:
+                        stop_pct = float(sp.get('entry_stop_pct', 3.0)) / 100
+                        cond &= (prices[base_asset] < last_entry_price * (1 - stop_pct))
+                        active = True
+                        reasons.append(f"진입가손절(-{sp.get('entry_stop_pct', 3.0):.1f}%)")
                     if sp.get('macd_dec'): 
                         cond &= (macd_val < prev_macd); active = True
                         reasons.append("MACD 하락")
@@ -1116,21 +1173,34 @@ class StrategyEngine:
                     if effective_lev_asset == base_asset:
                         target_lev_pct, new_stage = 0.0, 0
                     else:
-                        if current_lev_pct < 0.25: target_lev_pct, new_stage = 0.30, 1
-                        elif current_lev_pct < 0.65: target_lev_pct, new_stage = 0.70, 2
+                        if current_lev_pct < 0.25:
+                            if _cs_use:
+                                _jump = _cs_jump_map.get(buy_confidence, 1)
+                                new_stage = min(3, 0 + _jump)
+                                target_lev_pct = _cs_lev_buy[new_stage]
+                            else:
+                                target_lev_pct, new_stage = _buy_s1, 1
+                        elif current_lev_pct < 0.65:
+                            if _cs_use:
+                                _jump = _cs_jump_map.get(buy_confidence, 1)
+                                new_stage = min(3, 1 + _jump)
+                                target_lev_pct = _cs_lev_buy[new_stage]
+                            else:
+                                target_lev_pct, new_stage = _buy_s2, 2
                         else:
+                            # 이미 고레버리지 상태 — 자산 교체 케이스 원본 로직 유지
                             if current_planned_asset != effective_lev_asset and effective_lev_asset == target_group[2] and current_lev_pct > 0.9:
                                 curr_tqqq_w = (holdings.get(target_group[2], 0) * prices.get(target_group[2], 0)) / etf_funds if etf_funds > 0 else 0
-                                if curr_tqqq_w < 0.25: target_lev_pct, new_stage = 1.0, 1
-                                elif curr_tqqq_w < 0.65: target_lev_pct, new_stage = 1.0, 2
-                                else: target_lev_pct, new_stage = 1.0, 3
+                                if curr_tqqq_w < 0.25: target_lev_pct, new_stage = _buy_s3, 1
+                                elif curr_tqqq_w < 0.65: target_lev_pct, new_stage = _buy_s3, 2
+                                else: target_lev_pct, new_stage = _buy_s3, 3
                             else:
-                                target_lev_pct, new_stage = 1.0, 3
+                                target_lev_pct, new_stage = _buy_s3, 3
                     rebalance_cause = "시그널"
                 else:
                     # 가격 트리거에 의한 매입/상향 (1->2, 2->3)
                     new_stage = min(3, rebalance_stage + 1)
-                    target_lev_pct = (0.70 if new_stage == 2 else 1.0)
+                    target_lev_pct = (_buy_s2 if new_stage == 2 else _buy_s3)
                     if fixed_buy_hit and atr_buy_hit: rebalance_cause = "고정+ATR(매수)"
                     elif fixed_buy_hit: rebalance_cause = "고정(매수)"
                     else: rebalance_cause = "ATR(매수)"
@@ -1142,18 +1212,33 @@ class StrategyEngine:
                 
             # (2) 매도 판정 (자산 교체 신호)
             elif is_sell_signal and current_planned_asset != base_asset:
-                new_planned = base_asset
-                # [수정] 점진적 매도 로직 복원 (3->2, 2->1, 1->0)
-                if current_lev_pct > 0.75: target_lev_pct, new_stage = 0.70, 2
-                elif current_lev_pct > 0.35: target_lev_pct, new_stage = 0.30, 1
-                else: target_lev_pct, new_stage = 0.0, 0
-                rebalance_cause = "시그널"
-                rebalance_needed = True
+                # [S3 Retention Filter] S3 상태에서 추가 청산 조건 미충족 시 청산 차단
+                _s3r_blocked = False
+                if _s3r_use and rebalance_stage == 3:
+                    _vxn_ok  = (vxn >= _s3r_vxn)  if _s3r_req_vxn  else True
+                    _dev_ok  = (cur_dev200 <= _s3r_dev) if _s3r_req_dev else True
+                    if _s3r_both:
+                        _exit_allowed = _vxn_ok and _dev_ok
+                    else:
+                        _exit_allowed = _vxn_ok or _dev_ok
+                    if not _exit_allowed:
+                        _s3r_blocked = True
+                        if not fast_mode:
+                            signal_events.append({'date': date, 'type': 'S3보유유지', 'reason': f"S3Retention: VXN={vxn:.1f}(<{_s3r_vxn}), Dev200={cur_dev200:.3f}(>{_s3r_dev})", 'price': price, 'executed': False})
+
+                if not _s3r_blocked:
+                    new_planned = base_asset
+                    # [수정] 점진적 매도 로직 복원 (3->2, 2->1, 1->0)
+                    if current_lev_pct > 0.75: target_lev_pct, new_stage = _sell_s2, 2
+                    elif current_lev_pct > 0.35: target_lev_pct, new_stage = _sell_s1, 1
+                    else: target_lev_pct, new_stage = 0.0, 0
+                    rebalance_cause = "시그널"
+                    rebalance_needed = True
                 
             elif sell_price_hit:
                 # 레버리지 비중 축소 (3->2, 2->1, 1->0)
                 new_stage = max(0, rebalance_stage - 1)
-                target_lev_pct = (0.70 if new_stage == 2 else (0.30 if new_stage == 1 else 0.0))
+                target_lev_pct = (_sell_s2 if new_stage == 2 else (_sell_s1 if new_stage == 1 else 0.0))
                 
                 if fixed_sell_hit and atr_sell_hit: rebalance_cause = "고정+ATR(매도)"
                 elif fixed_sell_hit: rebalance_cause = "고정(매도)"
@@ -1252,7 +1337,7 @@ class StrategyEngine:
                             rebalance_cause = f"S3-전량매도({detail_log})"
                         else:
                             new_stage = 2
-                            target_lev_pct = 0.70
+                            target_lev_pct = _sell_s2
                             rebalance_cause = f"S3-복합위기({detail_log})"
                         
                         s3_drop_triggered_val = dr 
@@ -1760,6 +1845,15 @@ class StrategyEngine:
                           'f5_window': 63,                    # Breakeven 변화 관찰 기간
                           'f5_rise_thr': 0.10,                # Breakeven 상승 임계 → RISING (인플레 상승)
                           'f5_fall_thr': -0.10,               # Breakeven 하락 임계 → FALLING (인플레 하락)
+                          # Carry 필터: tnx_val - ff_rate (장기채 carry vs 현금)
+                          'carry_use': False,                 # 활성화 여부
+                          'carry_lo': -0.50,                  # carry 하한 임계 (%) → TLT→BIL 강제
+                          'carry_confirm': 0,                 # 연속 확인 일수 (0=즉시)
+                          # F6: HY Spread (신용 리스크 프리미엄) 투표 채널
+                          'f6_use': False,                    # F6: HY OAS 방향 투표 활성화
+                          'f6_window': 21,                    # HY Spread 변화 관찰 기간 (거래일, 약 4주)
+                          'f6_rise_thr': 0.50,                # 스프레드 급등 임계(%) → FALLING (신용경색, 채권 선호)
+                          'f6_fall_thr': -0.30,               # 스프레드 하락 임계(%) → RISING (리스크온, 채권 회피)
                           # F1 가중치
                           'f1_weight': 1,                     # F1 투표 가중치 (1=기본, 2=2표)
                           }
@@ -1860,6 +1954,20 @@ class StrategyEngine:
         else:
             combined['f5_state'] = 'NEUTRAL'
 
+        # ─ F6: HY Spread (신용 리스크 프리미엄) ─
+        _f6_use = params.get('f6_use', False)
+        if _f6_use and 'hy_spread' in combined.columns:
+            _f6_w = int(params.get('f6_window', 21))
+            _f6_rise = params.get('f6_rise_thr', 0.50)
+            _f6_fall = params.get('f6_fall_thr', -0.30)
+            combined['_hy_chg'] = combined['hy_spread'].diff(_f6_w)
+            # 스프레드 급등 → 신용경색 → FALLING (채권 선호)
+            # 스프레드 하락 → 리스크온  → RISING  (채권 회피)
+            combined['f6_state'] = np.where(combined['_hy_chg'] > _f6_rise, 'FALLING',
+                                            np.where(combined['_hy_chg'] < _f6_fall, 'RISING', 'NEUTRAL'))
+        else:
+            combined['f6_state'] = 'NEUTRAL'
+
         # ─ 최종 상태 투표 ─
         _f1_weight = int(params.get('f1_weight', 1))
         def vote_state(row):
@@ -1871,6 +1979,9 @@ class StrategyEngine:
             # F5: Breakeven (B그룹, f5_use=True 시)
             if _f5_use:
                 votes.append(row['f5_state'])
+            # F6: HY Spread (f6_use=True 시)
+            if _f6_use:
+                votes.append(row['f6_state'])
             # Dot Score (기존 — dot_hi/dot_lo 설정 시)
             _dot_hi = params.get('dot_hi')
             _dot_lo = params.get('dot_lo')
@@ -2117,6 +2228,11 @@ class StrategyEngine:
         _confirm_count = 0      # FFV/YC 필터 연속 트리거 카운터
         _confirm_target = None  # 확인 대기 중인 전환 대상
         _last_switch_i = -9999  # 마지막 자산 전환 일차 인덱스
+        # Carry 필터 상태 변수
+        _carry_use     = params.get('carry_use', False)
+        _carry_lo      = params.get('carry_lo', -0.50)
+        _carry_confirm = int(params.get('carry_confirm', 0))
+        _carry_count   = 0      # carry 필터 연속 트리거 카운터
 
         for i in range(len(dates)):
             date     = dates[i]
@@ -2188,6 +2304,25 @@ class StrategyEngine:
                 # FFV/YC 미트리거 → 카운터 리셋
                 _confirm_count = 0
                 _confirm_target = None
+
+            # Carry 필터: tnx_val - ff_rate < carry_lo → TLT 보유 시 BIL 강제
+            # (현금이 장기채보다 carry 수익률이 높은 구간에서 TLT 진입/보유 차단)
+            if _carry_use and target == 'TLT':
+                tnx  = row.get('tnx_val', np.nan)
+                ffr  = row.get('ff_rate', np.nan)
+                if not (np.isnan(tnx) or np.isnan(ffr)):
+                    carry_val = tnx - ffr
+                    if carry_val < _carry_lo:
+                        if _carry_confirm <= 0:
+                            target = 'BIL'
+                            _carry_count = 0
+                        else:
+                            _carry_count += 1
+                            if _carry_count >= _carry_confirm:
+                                target = 'BIL'
+                                _carry_count = 0
+                    else:
+                        _carry_count = 0  # 조건 미충족 → 카운터 리셋
 
             # Cooldown: 전환 후 N일 이내 재전환 금지
             if _cooldown_days > 0 and target != current_asset and (i - _last_switch_i) < _cooldown_days:

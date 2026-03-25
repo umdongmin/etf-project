@@ -182,6 +182,17 @@ class PortfolioRealtimeView:
             st.warning("신호 계산 실패. 새로고침 버튼을 누르세요.")
             return
 
+        # ── 전략 신호 유효성 검증 ─────────────────────────────────────────────
+        _strategies = result.get("strategies", {})
+        _failed = [name for name, sig in _strategies.items() if sig is None]
+        if _failed:
+            st.error(
+                f"⚠️ 전략 신호 계산 실패: **{', '.join(_failed)}**\n\n"
+                "데이터 부족 또는 엔진 오류입니다. [🔄 새로고침] 버튼을 눌러 재시도하세요."
+            )
+            # 신호가 없으면 드리프트·리밸런싱 정보가 의미 없으므로 여기서 중단
+            return
+
         # 실잔고 기반 드리프트 사전 계산 (섹션 1, 3 공통 사용)
         rb_enriched = PortfolioRealtimeView._enrich_rb_with_holdings(
             result.get("rebalance", {}), portfolio_manager
@@ -369,18 +380,36 @@ class PortfolioRealtimeView:
         else:  # bond
             asset      = str(sig.get('signal', 'BIL'))
             lev_stage  = int(sig.get('lev_stage', 0))
-            lev_asset  = sig.get('lev_asset') or '없음'
+            lev_asset  = sig.get('lev_asset') or None
             rsi        = sig.get('rsi', 0)
             yc         = sig.get('yc', 0)
             f_state    = sig.get('f_state', 0)
+            gap        = sig.get('gap', 0)
 
-            bg, tc = _bond_asset_color(asset)
-            lev_fracs = {0: "0%", 1: "30%", 2: "70%", 3: "100%"}
-            lev_frac  = lev_fracs.get(lev_stage, f"S{lev_stage}")
+            # 레버리지 비중 레이블 (주식의 lev_labels와 동일 구조)
+            lev_pcts = {0: "0%", 1: "30%", 2: "70%", 3: "100%"}
+            lev_pct  = lev_pcts.get(lev_stage, f"{lev_stage*30}%")
+
+            # 포지션 상태 타이틀 (주식의 "매수중(S2)" 대응)
+            if lev_stage > 0 and lev_asset:
+                position_title = f"레버리지(S{lev_stage})"
+                stage_label    = f"S{lev_stage} ({lev_asset} {lev_pct}+{asset})"
+                sc = _stage_color(lev_stage)
+            else:
+                position_title = f"보유중(S0)"
+                stage_label    = f"S0 ({asset} 100%)"
+                sc = _stage_color(0)
+
+            # F-State 해석 텍스트 (주식 summary 대응)
+            fstate_val = _safe_float(f_state)
+            regime_label = "상승 국면" if fstate_val >= 1.0 else ("중립 국면" if fstate_val >= 0 else "하락 국면")
+            summary_text = f"국면: {regime_label} | FFV Gap: {_safe_float(gap):+.2f} | 10y-2y: {_safe_float(yc):.2f}%"
+
+            bg, tc = _bond_asset_color(asset if lev_stage == 0 else (lev_asset or asset))
 
             # 수익률 색상
             ret_color = "#27ae60" if strategy_ret >= 0 else "#e74c3c"
-            ret_sign = "+" if strategy_ret >= 0 else ""
+            ret_sign  = "+" if strategy_ret >= 0 else ""
 
             st.markdown(f"""
             <div style="background:{bg}; border:2px solid {tc}; border-radius:10px;
@@ -391,17 +420,18 @@ class PortfolioRealtimeView:
                                  border-radius:12px; color:{ret_color}; font-weight:bold;">{ret_sign}{strategy_ret:.2f}%</span>
                 </div>
                 <div style="font-size:18px; font-weight:900; color:{tc}; margin-bottom:10px;">
-                    {asset}
+                    {position_title}
                 </div>
                 <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px; font-size:12px; color:#555;">
-                    <div><b>레버리지:</b>
-                        <span style="color:#8e44ad; font-weight:bold;">{lev_asset} ({lev_frac})</span>
+                    <div><b>Stage:</b>
+                        <span style="color:{sc}; font-weight:bold;">{stage_label}</span>
                     </div>
-                    <div><b>Lev Stage:</b> S{lev_stage}</div>
+                    <div><b>보유 자산:</b> {asset}</div>
                     <div><b>TLT RSI:</b> {_safe_float(rsi):.1f}</div>
                     <div><b>10y-2y:</b> {_safe_float(yc):.2f}%</div>
-                    <div><b>F-State:</b> {_safe_float(f_state):.2f}</div>
                 </div>
+                <div style="margin-top:8px; font-size:11px; color:#777; border-top:1px solid rgba(0,0,0,0.08);
+                            padding-top:6px;">{summary_text}</div>
             </div>
             """, unsafe_allow_html=True)
 
@@ -501,6 +531,12 @@ class PortfolioRealtimeView:
                     prices = {t: float(last_prices[t]) for t in tickers if t in last_prices and not pd.isna(last_prices[t])}
                 except Exception:
                     return rb
+
+            # 가격 조회 실패 티커가 있으면 부분 계산이 되어 비중이 왜곡되므로 enrichment 전체 스킵
+            missing_tickers = [t for t in tickers if t not in prices]
+            if missing_tickers:
+                print(f"[holdings drift] 가격 조회 실패로 enrichment 스킵: {missing_tickers}")
+                return rb
 
             # 전략별 평가금액 집계
             strat_values = {n: 0.0 for n in pm.strategies}

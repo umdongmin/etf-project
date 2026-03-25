@@ -23,6 +23,8 @@ from ui.portfolio_realtime_view import PortfolioRealtimeView
 from ui.asset_view import AssetView
 from ui.tester_view import TesterView
 from ui.simulation_view import SimulationView
+from ui.log_view import LogView
+from ui.trading_history_view import TradingHistoryView
 from utils.metrics import calculate_metrics
 from core.defaults import get_default_equity_params, get_default_bond_params, get_default_bond_lev_params, REBALANCE_PRESET_LABELS
 from core.engine_kwargs_builder import extract_smart_params
@@ -47,8 +49,10 @@ class GoldenStrategyApp:
             "📈 포트폴리오 매니저",
             "📜 주식 전략 설정",
             "📉 채권 전략 설정",
+            "📋 로그 분석",
             "💰 모의투자 시뮬레이터",
-            "🧠 AI 뉴스 분석 리포트"
+            "🧠 AI 뉴스 분석 리포트",
+            "🏦 거래 내역",
         ])
         
         
@@ -372,16 +376,10 @@ class GoldenStrategyApp:
                     st.divider()
                     HistoryLabView.render_yearly_table(res['history'], bh_bond, empty_df, empty_df, b_names=("TLT", "", ""))
  
-                    # [신규 추가] 채권 전략 상세 분석 로그 (주식 전략과 동일한 구성)
-                    BacktestView.render_closed_sets(res['closed_trades'])
-                    BacktestView.render_execution_log(res['history'], 'TLT', is_bond=True)
-                    
-                    st.divider()
-                    BacktestView.render_daily_log(res['history'], res['benchmarks'], 'TLT')
-
                     st.divider()
                     # 상세 분석 결과 렌더링 (차트 및 로그) - 채권 전용 필터 적용
                     BacktestView.render_results(res['history'], res['benchmarks'], res['closed_trades'], 'TLT', 'TLT', smart_params=None, is_bond=True)
+                    st.info("💡 상세 거래 로그는 '📋 로그 분석' 메뉴에서 확인하세요.")
                 else:
                     st.info("시뮬레이션 데이터를 준비 중입니다... (파라미터를 변경해 보세요)")
                     # [신규] 진단 정보 표시 (결과 미출력 원인 파악용)
@@ -400,10 +398,14 @@ class GoldenStrategyApp:
                                 st.rerun()
                         st.write(f"- 최적화 파라미터: {AppState.get_bond_params()}")
 
+        elif menu == "📋 로그 분석":
+            LogView.render()
         elif menu == "💰 모의투자 시뮬레이터":
             SimulationView.render(data_dict, fg_df, vxn_df, macro_df, news_df)
         elif menu == "🧠 AI 뉴스 분석 리포트":
             IntelligenceView.render()
+        elif menu == "🏦 거래 내역":
+            TradingHistoryView.render()
 
 if __name__ == "__main__":
     try:

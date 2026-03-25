@@ -371,6 +371,11 @@ class HistoryLabView:
                 bh_1 = StrategyEngine.run_benchmark(data_dict, b1, start_date, end_date)
                 bh_2 = StrategyEngine.run_benchmark(data_dict, b2, start_date, end_date)
                 bh_3 = StrategyEngine.run_benchmark(data_dict, b3, start_date, end_date)
+            # 로그 분석 메뉴에서 render_daily_log에 전달할 수 있도록 벤치마크 저장
+            if SK.LAST_HISTORY_RESULT in st.session_state:
+                st.session_state[SK.LAST_HISTORY_RESULT]['bh_histories'] = {
+                    b1: bh_1, b2: bh_2, b3: bh_3
+                }
 
         # [수정] 탭 시스템 구현
         tab_list = ["📊 분석 결과 & 상세 로그", "📝 주식 전략 설정"]
@@ -417,13 +422,7 @@ class HistoryLabView:
 
                 HistoryLabView.render_yearly_table(golden_history, bh_1, bh_2, bh_3, b_names=(b1, b2, b3), smart_params=smart_params)
 
-                # [추가] BacktestView에서 이동된 세트 거래 및 매매 체결 내역
-                BacktestView.render_closed_sets(closed_trades)
-                BacktestView.render_execution_log(golden_history, base_asset)
-
-                st.divider()
-                # [추가] BacktestView에서 이동된 일별 상세 로그
-                BacktestView.render_daily_log(golden_history, bh_histories, base_asset)
+                st.info("💡 상세 거래 로그는 '📋 로그 분석' 메뉴에서 확인하세요.")
 
         elif active_tab == tab_list[1]:
             # [신규] 실시간 성과 요약 대시보드 표시

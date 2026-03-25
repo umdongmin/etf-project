@@ -670,31 +670,7 @@ class PortfolioView:
         # 4. 연도별 성과 및 리스크 분석
         PortfolioView.render_annual_analysis(combined, res.get('qqq_df', pd.DataFrame()), standalone_map)
 
-        # 5. 리밸런싱 거래 내역
-        rebalance_events = res.get('rebalance_events', [])
-        if rebalance_events:
-            st.write("---")
-            st.subheader("🔄 리밸런싱 거래 내역")
-            PortfolioView._render_rebalance_log(rebalance_events)
-
-        # 6. 전략별 거래 체결 내역
-        st.write("---")
-        st.subheader("📝 전략별 거래 체결 내역")
-        for name, data in individuals.items():
-            strat_config = next((c for c in configs if c['name'] == name), None)
-            s_type = strat_config.get('type', 'equity') if strat_config else 'equity'
-            icon = "📈" if s_type == 'equity' else "💰"
-            with st.expander(f"{icon} {name} 거래 내역", expanded=False):
-                history_df = data.get('history', pd.DataFrame())
-                if not history_df.empty and 'Trade_Label' in history_df.columns:
-                    if s_type == 'bond':
-                        BacktestView.render_execution_log(history_df, 'TLT', is_bond=True)
-                    else:
-                        base = strat_config.get('params', {}).get('base_asset', 'QQQ') if strat_config else 'QQQ'
-                        BacktestView.render_execution_log(history_df, base)
-                closed = data.get('closed_trades', pd.DataFrame())
-                if isinstance(closed, pd.DataFrame) and not closed.empty:
-                    BacktestView.render_closed_sets(closed)
+        st.info("💡 상세 거래 로그는 '📋 로그 분석' 메뉴에서 확인하세요.")
 
     @staticmethod
     def _render_rebalance_log(events):
