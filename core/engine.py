@@ -47,22 +47,13 @@ class StrategyEngine:
         else:
             combined = base_df[cols_to_use].copy()
         
-        # [신규] 전역 날짜 동기화 - 데이터가 없는 기간은 초기 자본보존을 위해 Reindex
-        if start_date or end_date:
-            # 기준 인덱스 생성 (주말 제외 평일 기준 또는 데이터셋의 합집합)
-            # 여기서는 편의상 base_df의 전체 인덱스를 사용하되, 범위만 제한함
-            full_idx = base_df.index
-            if start_date:
-                if isinstance(start_date, (str, datetime.date)):
-                    sd = pd.Timestamp(start_date)
-                    full_idx = full_idx[full_idx >= sd]
-            if end_date:
-                if isinstance(end_date, (str, datetime.date)):
-                    ed = pd.Timestamp(end_date)
-                    full_idx = full_idx[full_idx <= ed]
-            
-            # Reindex하여 빈 날짜(데이터 시작 전) 확보
-            combined = combined.reindex(full_idx)
+        # [수정] 지표 계산을 위해 combined는 전체 인덱스를 유지.
+        # start_date/end_date 필터링은 지표 계산 완료 후 dates 변수에서만 적용.
+        # (기존: start_date 기준으로 reindex → SMA200 등 장기 지표가 NaN으로 잘리는 버그)
+        if end_date:
+            if isinstance(end_date, (str, datetime.date)):
+                ed = pd.Timestamp(end_date)
+                combined = combined.reindex(base_df.index[base_df.index <= ed])
         
         # [추가] 시가 데이터 확보
         if 'Open' in base_df.columns:
@@ -1294,16 +1285,16 @@ class StrategyEngine:
                         period_s = params.get('atr_period_sell', 20)
                         prev_atr_sell = row.get(f'Prev_ATR_{period_s}', 0)
                         c_mult = float(s3_p.get('chandelier_mult', 3.0))
-                        
+
                         hit_s3_chandelier = False
                         if (current_planned_asset != base_asset) and peak_price > 0:
                             hit_s3_chandelier = (prices[base_asset] <= peak_price - (c_mult * prev_atr_sell))
                         is_s3_chan_ok = hit_s3_chandelier
 
-                    # S3 보호 조건 결합 방식 정교화: 
+                    # S3 보호 조건 결합 방식 정교화:
                     # 1. 보호 신호 1, 2, 3 '내부' 항목들은 모두 만족해야 함 (AND)
                     # 2. 보호 신호 1, 2, 3 '끼리'는 하나라도 만족하면 작동 (OR)
-                    
+
                     active_conditions = []
                     if s3_p.get('use_daily_drop'): active_conditions.append(is_drop_ok)
                     if s3_p.get('use_ma60'): active_conditions.append(is_ma60_ok)
@@ -1312,13 +1303,13 @@ class StrategyEngine:
                     if s3_p.get('use_gap_down'): active_conditions.append(is_gap_ok)
                     if s3_p.get('use_drop_acc'): active_conditions.append(is_acc_ok)
                     if s3_p.get('use_chandelier'): active_conditions.append(is_s3_chan_ok)
-                    
+
                     # 하나라도 체크되어 있고, 체크된 모든 조건이 참(True)인 경우 작동
                     if len(active_conditions) > 0 and all(active_conditions):
                         dr = (price / row['Prev_Close'] - 1) * 100
                         rebalance_needed = True
                         new_planned = base_asset
-                        
+
                         # 로그 상세화 (#N:신호번호, V:VIX, G:Gap, A:Acc, M60:MA60, M200:MA200, C:Chan)
                         detail_log = f"#{idx}"
                         if s3_p.get('use_daily_drop'): detail_log += f" D:{dr:+.1f}%"
@@ -1330,7 +1321,7 @@ class StrategyEngine:
                         if s3_p.get('use_chandelier'): detail_log += f" C:ATR*{s3_p.get('chandelier_mult', 3.0)}"
 
                         s3_detail_val = detail_log
-                        
+
                         if s3_p.get('use_exit_all', False):
                             new_stage = 0
                             target_lev_pct = 0.0

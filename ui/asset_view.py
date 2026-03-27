@@ -606,7 +606,11 @@ class AssetView:
             from core.data import DataService
             from ui.portfolio_view import PortfolioView
 
-            data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data()
+            # 사이드바 데이터 모드에 따라 증분/실시간 분기
+            if st.session_state.get('_data_mode_realtime', False):
+                data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data_realtime()
+            else:
+                data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data()
             if not data_dict:
                 return {}
 

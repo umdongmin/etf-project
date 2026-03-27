@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from core.defaults import REBALANCE_PRESET_CONFIGS
+from core.defaults import REBALANCE_PRESET_CONFIGS, DEFAULT_DRAWDOWN_BOOST
 from core.engine import StrategyEngine
 
 class PortfolioManager:
@@ -10,21 +10,26 @@ class PortfolioManager:
 
     def __init__(self, strategies=None, rebalance_preset='none', total_capital=10000.0,
                  regime_series=None, regime_weights=None, custom_preset_cfg=None, fee_rate=0.0, integer_shares=False,
-                 trend_data=None, trend_defense_weights=None):
+                 trend_data=None, trend_defense_weights=None, monthly_contribution_usd=0.0,
+                 drawdown_boost=None):
         """
-        strategies           : dict { 'strategy_name': { 'weight': 0.7, 'engine_kwargs': dict, 'strat_type': 'equity'/'bond' } }
-        regime_series        : pd.Series indexed by date → regime label ('bull'/'neutral'/'caution'/'bear')
-                               None이면 각 전략의 고정 weight 사용 (기존 동작 유지)
-        regime_weights       : dict { 'bull': {'strategy_name': 0.8, ...}, 'neutral': {...}, ... }
-                               None이면 고정 weight 사용
-        custom_preset_cfg    : dict — REBALANCE_PRESETS에 없는 임시 프리셋을 직접 주입
-                               예: {'method': 'threshold', 'upper_band': 0.12, 'lower_band': 0.07, 'min_interval_days': 21}
-                               설정 시 rebalance_preset 값은 무시됨
-        trend_data           : pd.Series[date] → bool  (True = QQQ > MA200 = 공격 모드)
-                               method='trend' 사용 시 필수. None이면 항상 공격 비중 사용.
-        trend_defense_weights: dict { strategy_name: weight }  방어 모드 비중
-                               예: {'TQQQ': 0.50, 'Bond': 0.50}
-                               None이면 고정 비중 유지 (trend 효과 없음)
+        strategies              : dict { 'strategy_name': { 'weight': 0.7, 'engine_kwargs': dict, 'strat_type': 'equity'/'bond' } }
+        regime_series           : pd.Series indexed by date → regime label ('bull'/'neutral'/'caution'/'bear')
+                                  None이면 각 전략의 고정 weight 사용 (기존 동작 유지)
+        regime_weights          : dict { 'bull': {'strategy_name': 0.8, ...}, 'neutral': {...}, ... }
+                                  None이면 고정 weight 사용
+        custom_preset_cfg       : dict — REBALANCE_PRESETS에 없는 임시 프리셋을 직접 주입
+                                  예: {'method': 'threshold', 'upper_band': 0.12, 'lower_band': 0.07, 'min_interval_days': 21}
+                                  설정 시 rebalance_preset 값은 무시됨
+        trend_data              : pd.Series[date] → bool  (True = QQQ > MA200 = 공격 모드)
+                                  method='trend' 사용 시 필수. None이면 항상 공격 비중 사용.
+        trend_defense_weights   : dict { strategy_name: weight }  방어 모드 비중
+                                  예: {'TQQQ': 0.50, 'Bond': 0.50}
+                                  None이면 고정 비중 유지 (trend 효과 없음)
+        monthly_contribution_usd: float — 매월 첫 거래일에 주입할 적립금(USD). 0이면 비활성 (기존 동작).
+        drawdown_boost          : dict — 패닉 구간 채권→주식 비중 이전 설정
+                                  {'use': bool, 'mdd_threshold': float, 'boost_pct': float, 'recovery': str}
+                                  None이면 비활성 (기존 동작 유지)
         """
         self.strategies = strategies if strategies else {}
         self.rebalance_preset = rebalance_preset
@@ -42,9 +47,19 @@ class PortfolioManager:
         # Trend-Filtered 설정
         self.trend_data            = trend_data             # pd.Series[date] → bool
         self.trend_defense_weights = trend_defense_weights  # dict: name → weight (방어 모드)
+        # DCA 적립식 설정
+        self.monthly_contribution_usd = monthly_contribution_usd
+        self._dca_log: list[dict] = []  # 적립 이력 [{date, amount, portfolio_value_before, contribution_pct}]
+        self._prev_dca_month: int = -1  # 마지막 DCA 주입 월 (-1 = 아직 없음)
+        # Drawdown Boost 설정 (패닉 구간 채권→주식 비중 이전)
+        self.drawdown_boost = drawdown_boost if drawdown_boost else {'use': False}
+        self._boost_active: bool = False
+        self._ytd_peak: float = 0.0
+        self._ytd_peak_year: int | None = None
+        self._boost_log: list[dict] = []
 
-    def _get_target_weight(self, name: str, current_date) -> float:
-        """현재 날짜의 Regime / Trend에 따라 target weight 반환.
+    def _get_base_weight(self, name: str, current_date) -> float:
+        """현재 날짜의 Regime / Trend에 따라 base weight 반환 (Drawdown Boost 미적용).
         우선순위: regime_weights > trend_defense_weights > 고정 weight
         """
         lookup = current_date
@@ -67,6 +82,38 @@ class PortfolioManager:
                     return defense_w
 
         return self.strategies[name]['weight']
+
+    def _get_target_weight(self, name: str, current_date) -> float:
+        """최종 target weight 반환 (Drawdown Boost 포함).
+        부스트 활성 시 채권 비중을 주식으로 이전 (다중 전략 비례 배분).
+        """
+        base_w = self._get_base_weight(name, current_date)
+
+        if not (self._boost_active and self.drawdown_boost.get('use', False)):
+            return base_w
+
+        boost_pct = self.drawdown_boost.get('boost_pct', 0.10)
+        strat_type = self.strategies[name].get('strat_type', 'equity')
+
+        # 주식/채권별 총 베이스 비중 계산
+        total_eq_w = sum(
+            self._get_base_weight(n, current_date)
+            for n, s in self.strategies.items() if s.get('strat_type') == 'equity'
+        )
+        total_bond_w = sum(
+            self._get_base_weight(n, current_date)
+            for n, s in self.strategies.items() if s.get('strat_type') != 'equity'
+        )
+
+        # 이전 가능한 최대치 = 전체 채권 비중
+        actual_boost = min(boost_pct, total_bond_w)
+
+        if strat_type == 'equity' and total_eq_w > 0:
+            return base_w + actual_boost * (base_w / total_eq_w)
+        elif strat_type != 'equity' and total_bond_w > 0:
+            return max(base_w - actual_boost * (base_w / total_bond_w), 0.0)
+
+        return base_w
 
     def register_strategy(self, name, weight, engine_kwargs, strat_type='equity'):
         """시뮬레이션에 참여할 전략 등록"""
@@ -157,9 +204,49 @@ class PortfolioManager:
             current_date = states[active_names[0]]['date']
             portfolio_history.append({'Date': current_date, 'PortfolioValue': current_total_portfolio_value})
 
-            # --- [Hard Rebalancing 계산부] ---
+            # --- [Drawdown Boost: YTD MDD 감지 → 비중 이전] ---
+            if self.drawdown_boost.get('use', False) and current_total_portfolio_value > 0:
+                curr_year = current_date.year if hasattr(current_date, 'year') else current_date.to_pydatetime().year
+                if curr_year != self._ytd_peak_year:
+                    self._ytd_peak = current_total_portfolio_value
+                    self._ytd_peak_year = curr_year
+                else:
+                    self._ytd_peak = max(self._ytd_peak, current_total_portfolio_value)
+
+                ytd_dd = (current_total_portfolio_value / self._ytd_peak) - 1.0
+                mdd_threshold = self.drawdown_boost.get('mdd_threshold', -0.11)
+
+                was_boosted = self._boost_active
+                self._boost_active = (ytd_dd <= mdd_threshold)
+
+                if self._boost_active != was_boosted:
+                    self._boost_log.append({
+                        'date': current_date,
+                        'action': 'boost_on' if self._boost_active else 'boost_off',
+                        'ytd_dd': round(ytd_dd, 4),
+                        'portfolio_value': round(current_total_portfolio_value, 2),
+                    })
+
+            # --- [월별 DCA 적립금 주입] ---
             cash_injections = {n: 0.0 for n in active_names}
-            
+
+            if self.monthly_contribution_usd > 0 and active_names:
+                curr_month = current_date.month if hasattr(current_date, 'month') else current_date.to_pydatetime().month
+                if curr_month != self._prev_dca_month:
+                    self._prev_dca_month = curr_month
+                    total_inject = self.monthly_contribution_usd
+                    for name in active_names:
+                        target_w = self._get_target_weight(name, current_date)
+                        cash_injections[name] += total_inject * target_w
+                    self._dca_log.append({
+                        'date': current_date,
+                        'amount': total_inject,
+                        'portfolio_value_before': current_total_portfolio_value,
+                        'contribution_pct': (total_inject / current_total_portfolio_value * 100)
+                                            if current_total_portfolio_value > 0 else 0.0,
+                    })
+
+            # --- [Hard Rebalancing 계산부] ---
             if rb_method != 'none' and current_total_portfolio_value > 0 and len(active_names) > 1:
                 do_rebalance = False
                 days_since = loop_day_idx - self._last_rebalance_day_idx

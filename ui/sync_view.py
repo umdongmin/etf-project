@@ -186,7 +186,11 @@ class SyncView:
                         from core.data import DataService
                         from core.signal_service import get_cached_signals, extract_signals
                         import datetime
-                        data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data()
+                        # 사이드바 데이터 모드에 따라 증분/실시간 분기
+                        if st.session_state.get('_data_mode_realtime', False):
+                            data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data_realtime()
+                        else:
+                            data_dict, fg_df, vxn_df, macro_df, news_df, _, _ = DataService.load_all_data()
                         result = get_cached_signals(
                             portfolio_name, data_dict, fg_df, vxn_df, macro_df, news_df,
                             datetime.date(2026, 1, 1), cur_prices=None

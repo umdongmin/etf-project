@@ -292,7 +292,7 @@ class DataService:
         return df
 
     @classmethod
-    def fetch_live_data(cls, start_date='2010-01-01'):
+    def fetch_live_data(cls, start_date='2010-01-01', skip_cache=False):
         # KST(UTC+9) 강제 적용
         now_kst = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9)
         # yfinance end는 exclusive → 내일 날짜를 end로 사용해야 오늘 데이터 포함
@@ -300,8 +300,13 @@ class DataService:
         end_date_yf  = (now_kst + datetime.timedelta(days=1)).strftime('%Y-%m-%d')  # yfinance 전달용 (내일)
 
         # ── Parquet 캐시 로드 ──────────────────────────────
-        cache_raw_dict, cache_vxn_raw, cache_last_date = cls._load_price_cache()
-        if cache_last_date:
+        cache_raw_dict, cache_vxn_raw, cache_last_date = {}, pd.DataFrame(), None
+        if skip_cache:
+            print(f"[실시간 모드] Parquet 캐시 무시, yfinance 전량 다운로드 (시작일: {start_date})...")
+        else:
+            cache_raw_dict, cache_vxn_raw, cache_last_date = cls._load_price_cache()
+
+        if not skip_cache and cache_last_date:
             cache_last_dt = pd.to_datetime(cache_last_date)
             incremental_start = (cache_last_dt + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
             if incremental_start <= end_date_yf:
@@ -311,7 +316,7 @@ class DataService:
                 # 캐시가 오늘까지 최신 → yfinance 조회 불필요
                 start_date = None
                 print(f"[Cache] 최신 상태 (마지막: {cache_last_date}). yfinance 스킵.")
-        else:
+        elif not skip_cache:
             print(f"라이브 데이터 수집 시작 (시작일: {start_date})...")
         # ───────────────────────────────────────────────────
 
@@ -787,20 +792,30 @@ class DataService:
 
     @classmethod
     def inject_virtual_close(cls, data_dict, current_prices, vxn_df, fg_df=None):
-        """가상 종가를 주입하여 시뮬레이션을 실시간 데이터 기반으로 수행 (VIX/VXN 포함)"""
+        """가상 종가를 주입하여 시뮬레이션을 실시간 데이터 기반으로 수행 (VIX/VXN 포함)
+
+        [수정] 과거 지표 보존: 가상 종가 주입 후 전체 지표를 재계산하되,
+        기존 행의 지표값은 원본을 유지하고 마지막(가상) 행만 새 지표값을 적용.
+        → pandas_ta의 EWM 정규화/부동소수점 누적 오차로 인한 과거 시그널 오염 방지.
+        """
         cloned_dict = {}
         # [수정] 미 동부 시간(EST) 기준으로 '오늘' 날짜 계산
-        now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5) 
+        now_est = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=5)
         today_ts = pd.Timestamp(now_est.date())
-        
+
+        # 지표 컬럼 식별용 (OHLCV + 날짜 관련은 제외)
+        _OHLCV = {'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close', 'Dividends', 'Stock Splits'}
+
         # 1. 메인 티커 데이터 주입
         for ticker, df in data_dict.items():
             if ticker in current_prices and not df.empty:
                 new_df = df.copy()
                 new_df.index = new_df.index.normalize()
                 price = current_prices[ticker]
-                
-                if new_df.index[-1] == today_ts:
+
+                is_update = (new_df.index[-1] == today_ts)
+
+                if is_update:
                     new_df.loc[today_ts, 'Close'] = price
                 else:
                     last_row = new_df.iloc[-1].copy()
@@ -813,8 +828,22 @@ class DataService:
                     new_row['Close'] = price
                     # 인덱스 이름(Date 등) 유지
                     new_df = pd.concat([new_df, pd.DataFrame([new_row], index=[today_ts])])
-                
+
+                # [수정] 과거 지표 보존: 원본 지표 백업 → 재계산 → 과거 행 복원
+                # 가상 행만 새 지표값을 사용하여 과거 시그널 오염 방지
+                hist_idx = new_df.index[:-1]  # 가상 행 제외한 과거 인덱스
+                indicator_cols = [c for c in new_df.columns if c not in _OHLCV]
+                hist_indicators = new_df.loc[hist_idx, indicator_cols].copy() if len(indicator_cols) > 0 else None
+
                 new_df = cls.calculate_indicators(new_df)
+
+                # 과거 행의 지표값을 원본으로 복원 (마지막 가상 행만 새 값 유지)
+                if hist_indicators is not None and len(hist_idx) > 0:
+                    # 재계산으로 새로 생긴 컬럼은 유지, 기존 컬럼만 복원
+                    restore_cols = [c for c in indicator_cols if c in new_df.columns]
+                    if restore_cols:
+                        new_df.loc[hist_idx, restore_cols] = hist_indicators[restore_cols]
+
                 cloned_dict[ticker] = new_df
             else:
                 cloned_dict[ticker] = df.copy()
@@ -847,3 +876,9 @@ class DataService:
     @st.cache_data(ttl=21600)  # 6시간 캐시 (Rate Limit 방지)
     def load_all_data():
         return DataService.fetch_live_data(start_date='2008-01-01')
+
+    @staticmethod
+    def load_all_data_realtime():
+        """실시간 모드: Parquet 캐시를 무시하고 yfinance에서 전량 다운로드.
+        증분 병합 과정 없이 원본 데이터로 지표를 계산하여 시그널 오차를 방지."""
+        return DataService.fetch_live_data(start_date='2008-01-01', skip_cache=True)

@@ -24,7 +24,7 @@ def run_tqqq_bot(token, chat_id, dry_run=False):
             return DataService.get_price(ticker, price_map=prices)
 
         # ── 1. 포트폴리오 로드 ────────────────────────────────────────
-        PORTFOLIO_NAME = os.environ.get("TELEGRAM_PORTFOLIO", "공격형")
+        PORTFOLIO_NAME = os.environ.get("TELEGRAM_PORTFOLIO", " ")
         portfolio_data = StrategyStorage.load_portfolio(PORTFOLIO_NAME)
         if not portfolio_data:
             print(f"❌ 포트폴리오 '{PORTFOLIO_NAME}' 로드 실패", flush=True)

@@ -376,19 +376,22 @@ class TesterView:
         import datetime
         st.markdown("##### 📅 분석 대상 기간 설정")
         col1, col2 = st.columns([1.5, 2])
-        period_opts = ["전체 (2010~)", "최근 5년", "최근 3년", "최근 1년", "직접 입력"]
-        
+        period_opts = ["사이드바 연동", "전체 (2010~)", "최근 5년", "최근 3년", "최근 1년", "직접 입력"]
+
         state_key = f"period_sel_type_{key_suffix}" if key_suffix else "period_sel_type"
         box_key = f"period_sel_type_box_{key_suffix}" if key_suffix else "period_sel_type_box"
-        
-        if state_key not in st.session_state: 
-            st.session_state[state_key] = "전체 (2010~)"
-            
+
+        if state_key not in st.session_state:
+            st.session_state[state_key] = "사이드바 연동"
+
         sel_type = col1.selectbox("기간 프리셋", period_opts, index=period_opts.index(st.session_state[state_key]), key=box_key)
         st.session_state[state_key] = sel_type
         end_date = datetime.date.today()
         start_date = datetime.date(2010, 1, 1)
-        if sel_type == "최근 5년": start_date = end_date - datetime.timedelta(days=5*365)
+        if sel_type == "사이드바 연동":
+            start_date = st.session_state.get('start_input', datetime.date(datetime.datetime.now().year, 1, 1))
+            end_date = st.session_state.get('end_input', datetime.date.today())
+        elif sel_type == "최근 5년": start_date = end_date - datetime.timedelta(days=5*365)
         elif sel_type == "최근 3년": start_date = end_date - datetime.timedelta(days=3*365)
         elif sel_type == "최근 1년": start_date = end_date - datetime.timedelta(days=1*365)
         elif sel_type == "직접 입력":

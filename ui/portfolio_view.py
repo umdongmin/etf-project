@@ -11,7 +11,7 @@ from ui.history_view import HistoryLabView
 from ui.portfolio_realtime_view import PortfolioRealtimeView
 from ui.backtest_view import BacktestView
 from utils.metrics import calculate_metrics
-from core.defaults import DEFAULT_BOND_PARAMS, REBALANCE_PRESET_LABELS, get_default_bond_lev_params
+from core.defaults import DEFAULT_BOND_PARAMS, REBALANCE_PRESET_LABELS, DEFAULT_DRAWDOWN_BOOST, get_default_bond_lev_params
 from core.engine_kwargs_builder import build_equity_kwargs, build_bond_kwargs, resolve_rebalance_preset, extract_smart_params
 from core.config_loader import load_default_equity_params, load_default_bond_params, load_default_portfolio_name
 
@@ -46,6 +46,7 @@ class PortfolioView:
                 st.session_state.portfolio_configs = copy.deepcopy(_loaded_default['configs'])
                 st.session_state.portfolio_total_capital = _loaded_default['total_capital']
                 st.session_state.portfolio_rebalance_preset = _loaded_default.get('rebalance_preset', 'none')
+                st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST] = _loaded_default.get('drawdown_boost') or copy.deepcopy(DEFAULT_DRAWDOWN_BOOST)
             else:
                 # 2순위: 하드코딩 기본값 (기본 포트폴리오 미지정 시)
                 _default_bond_params = DEFAULT_BOND_PARAMS
@@ -64,6 +65,7 @@ class PortfolioView:
                      'params': copy.deepcopy(_default_bond_loaded or st.session_state.get('current_bond_params', _default_bond_params)),
                      'lev_params': _default_bond_lev_params},
                 ]
+                st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST] = copy.deepcopy(DEFAULT_DRAWDOWN_BOOST)
 
             st.session_state[_SK.PORTFOLIO_INIT_VER] = _PORTFOLIO_INIT_VER
             st.session_state.pop('portfolio_result', None)  # 초기화 시 이전 결과 제거
@@ -103,6 +105,7 @@ class PortfolioView:
                                 st.session_state.portfolio_configs = loaded_configs
                                 st.session_state.portfolio_total_capital = loaded['total_capital']
                                 st.session_state.portfolio_rebalance_preset = loaded.get('rebalance_preset', 'none')
+                                st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST] = loaded.get('drawdown_boost') or copy.deepcopy(DEFAULT_DRAWDOWN_BOOST)
                                 # portfolio_init_ver 동기화 → 재초기화 방지
                                 st.session_state[_SK.PORTFOLIO_INIT_VER] = _PORTFOLIO_INIT_VER
 
@@ -116,7 +119,7 @@ class PortfolioView:
                                     "p_strat_tune_sel", "p_strat_swap_", "strat_detail_"
                                 )
                                 for k in list(st.session_state.keys()):
-                                    if k.startswith(prefixes_to_del):
+                                    if k.startswith(prefixes_to_del) or k.startswith(("boost_use_toggle", "boost_mdd_input", "boost_pct_input")):
                                         del st.session_state[k]
 
                                 st.success(f"✅ '**{selected_p}**' 구성을 성공적으로 불러왔습니다.")
@@ -146,7 +149,8 @@ class PortfolioView:
                                 save_name,
                                 st.session_state.portfolio_configs,
                                 st.session_state.portfolio_total_capital,
-                                st.session_state.get('portfolio_rebalance_preset', 'none')
+                                st.session_state.get('portfolio_rebalance_preset', 'none'),
+                                drawdown_boost=st.session_state.get(_SK.PORTFOLIO_DRAWDOWN_BOOST),
                             )
                             if saved_name:
                                 st.success(f"✅ 현재 배분 상태가 '**{saved_name}**'(으)로 저장되었습니다.")
@@ -172,6 +176,33 @@ class PortfolioView:
                 key='portfolio_rebalance_preset'
             )
             
+            # ── Drawdown Boost 설정 (패닉 구간 채권→주식 비중 이전) ──────────
+            if _SK.PORTFOLIO_DRAWDOWN_BOOST not in st.session_state:
+                st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST] = copy.deepcopy(DEFAULT_DRAWDOWN_BOOST)
+            _boost = st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST]
+
+            _pv = st.session_state.get('p_load_version', 0)
+            with st.expander("🚀 Drawdown Boost (패닉 구간 비중 이전)", expanded=_boost.get('use', False)):
+                st.caption("YTD MDD가 임계값 이하로 하락 시 채권 비중을 주식으로 이전합니다.")
+                bc1, bc2, bc3 = st.columns(3)
+                _boost['use'] = bc1.toggle("부스트 활성화", value=_boost.get('use', False), key=f'boost_use_toggle_{_pv}')
+                _boost['mdd_threshold'] = bc2.number_input(
+                    "MDD 임계값 (%)", min_value=-50.0, max_value=-1.0,
+                    value=float(_boost.get('mdd_threshold', -0.11)) * 100,
+                    step=1.0, format="%.0f", key=f'boost_mdd_input_{_pv}',
+                    disabled=not _boost['use'],
+                ) / 100.0
+                _boost['boost_pct'] = bc3.number_input(
+                    "이전 비중 (%p)", min_value=1.0, max_value=50.0,
+                    value=float(_boost.get('boost_pct', 0.10)) * 100,
+                    step=1.0, format="%.0f", key=f'boost_pct_input_{_pv}',
+                    disabled=not _boost['use'],
+                ) / 100.0
+                _boost['recovery'] = 'immediate'
+                if _boost['use']:
+                    st.info(f"📌 YTD MDD ≤ **{_boost['mdd_threshold']*100:.0f}%** 시 주식 비중 **+{_boost['boost_pct']*100:.0f}%p** (채권에서 차감), 즉시 복귀")
+                st.session_state[_SK.PORTFOLIO_DRAWDOWN_BOOST] = _boost
+
             if col_add.button("➕ 전략 추가", use_container_width=True):
                 from core.dispatcher import Dispatcher, Action
                 from core.state import AppState
@@ -406,6 +437,9 @@ class PortfolioView:
 
         trend_def_weights = st.session_state.get('portfolio_trend_defense_weights', None)
 
+        # Drawdown Boost: DB에서 로드된 설정 적용
+        _boost_cfg = portfolio_data.get('drawdown_boost')
+
         pm = PortfolioManager(
             total_capital=total_cap,
             rebalance_preset=std_preset,
@@ -414,6 +448,7 @@ class PortfolioView:
             integer_shares=integer_shares,
             trend_data=trend_data,
             trend_defense_weights=trend_def_weights,
+            drawdown_boost=_boost_cfg,
         )
 
         # 전략 등록
@@ -462,9 +497,11 @@ class PortfolioView:
         rebalance_preset_key = st.session_state.get('portfolio_rebalance_preset', 'quarterly')
         std_preset, custom_cfg = resolve_rebalance_preset(rebalance_preset_key)
         from core.state import AppState as _AppState
+        from core.session_keys import SK as _SK
         fee_rate = _AppState.get_fee_rate()
         integer_shares = _AppState.get_integer_shares()
-        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=std_preset, custom_preset_cfg=custom_cfg, fee_rate=fee_rate, integer_shares=integer_shares)
+        drawdown_boost = st.session_state.get(_SK.PORTFOLIO_DRAWDOWN_BOOST)
+        pm = PortfolioManager(total_capital=total_cap, rebalance_preset=std_preset, custom_preset_cfg=custom_cfg, fee_rate=fee_rate, integer_shares=integer_shares, drawdown_boost=drawdown_boost)
         
         # 전략 등록
         for config in configs:
@@ -555,6 +592,7 @@ class PortfolioView:
                     'qqq_df': qqq_df,
                     'fee_rate': st.session_state.get('global_fee_rate', 0.0),
                     'rebalance_events': rebalance_events,
+                    'boost_log': pm._boost_log,
                 }
                 st.toast("✅ 통합 시뮬레이션 완료!", icon="📈")
             except Exception as e:

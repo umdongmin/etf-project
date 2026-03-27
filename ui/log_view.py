@@ -35,6 +35,9 @@ class LogView:
     # ── 주식 전략 로그 ────────────────────────────────────────────────────
     @staticmethod
     def _render_stock_log():
+        _mode = "실시간" if st.session_state.get('_data_mode_realtime', False) else "증분"
+        st.caption(f"📡 데이터 모드: **{_mode}** — 모드 변경 후 '주식 전략 설정'에서 시뮬레이션을 다시 실행하면 로그에 반영됩니다.")
+
         result = st.session_state.get(SK.LAST_HISTORY_RESULT)
         if not result:
             st.info("주식 전략 시뮬레이션 결과가 없습니다. '주식 전략 설정' 메뉴에서 먼저 시뮬레이션을 실행하세요.")

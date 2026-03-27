@@ -190,6 +190,16 @@ REBALANCE_PRESET_LABELS = {
 }
 
 
+# ── Drawdown Boost 기본값 (패닉 구간 채권→주식 비중 이전) ──────────────────
+# F6~F9 검증 완료: B안 MDD≤-11%, +10%p, 즉시복귀 (9 에피소드, OOS 안정)
+DEFAULT_DRAWDOWN_BOOST = {
+    'use': False,               # 부스트 활성화 여부
+    'mdd_threshold': -0.11,     # YTD MDD 임계값 (-11%)
+    'boost_pct': 0.10,          # 주식 비중 추가 폭 (+10%p, 채권에서 차감)
+    'recovery': 'immediate',    # 복귀 전략: MDD 회복 시 즉시 원래 비중
+}
+
+
 # ── Helper: 딥카피 반환 (외부에서 원본을 직접 수정하지 못하도록 보호) ────────────
 def get_default_equity_params():
     return copy.deepcopy(DEFAULT_EQUITY_PARAMS)
@@ -199,3 +209,6 @@ def get_default_bond_params():
 
 def get_default_bond_lev_params():
     return copy.deepcopy(DEFAULT_BOND_LEV_PARAMS)
+
+def get_default_drawdown_boost():
+    return copy.deepcopy(DEFAULT_DRAWDOWN_BOOST)

@@ -80,9 +80,26 @@ class GoldenStrategyApp:
             
         cp = AppState.get_equity_params()
 
-        # 데이터 로딩 (st.cache_data 활용, TTL 1시간)
-        with st.spinner('실시간 데이터를 가져오는 중...'):
-            data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time = DataService.load_all_data()
+        # 데이터 로딩 (모드 전환 감지 → 관련 캐시 자동 무효화)
+        _data_mode = st.session_state.get('_data_mode_realtime', False)
+        _prev_mode = st.session_state.get('_data_mode_prev', None)
+        if _prev_mode is not None and _prev_mode != _data_mode:
+            # 모드 전환됨 → 모니터링/자산관리/시그널 캐시 전부 삭제
+            for _k in [SK.PORTFOLIO_REALTIME_RESULT, SK.CURRENT_SIGNALS,
+                       SK.CURRENT_SIGNALS_PORTFOLIO, SK.LAST_HISTORY_RESULT]:
+                st.session_state.pop(_k, None)
+            # sig_cache 키들도 삭제 (패턴 기반)
+            _to_del = [k for k in st.session_state if isinstance(k, str) and ('sig_cache' in k)]
+            for _k in _to_del:
+                st.session_state.pop(_k, None)
+        st.session_state['_data_mode_prev'] = _data_mode
+
+        if _data_mode:
+            with st.spinner('실시간 데이터를 전량 다운로드 중... (1~2분 소요)'):
+                data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time = DataService.load_all_data_realtime()
+        else:
+            with st.spinner('증분 데이터를 가져오는 중...'):
+                data_dict, fg_df, vxn_df, macro_df, news_df, fetch_status, fetch_time = DataService.load_all_data()
 
         if not data_dict:
             st.error("데이터 로드 실패")
@@ -109,11 +126,18 @@ class GoldenStrategyApp:
             # 데이터 수집 상태 표시
             st.sidebar.divider()
             st.sidebar.subheader("📡 데이터 상태")
+            st.sidebar.toggle(
+                "실시간 데이터 모드",
+                value=st.session_state.get('_data_mode_realtime', False),
+                key='_data_mode_realtime',
+                help="ON: yfinance 전량 다운로드 (시그널 정확, 느림)\nOFF: 증분 캐시 (빠름, 지표 오차 가능)"
+            )
+            _mode_label = "🔴 실시간" if st.session_state.get('_data_mode_realtime') else "🟢 증분"
             status_labels = {'FRED': 'FRED 매크로', 'VXN': 'VXN 변동성'}
             all_ok = all(v == 'Success' for v in fetch_status.values())
             data_warnings = fetch_status.get('DataWarnings', [])
             if all_ok and not data_warnings:
-                st.sidebar.success(f"모든 데이터 정상 · {fetch_time}")
+                st.sidebar.success(f"모든 데이터 정상 ({_mode_label}) · {fetch_time}")
             else:
                 for key, label in status_labels.items():
                     s = fetch_status.get(key, 'Pending')
@@ -243,12 +267,17 @@ class GoldenStrategyApp:
             st.session_state.trigger_preview = False
                 
         # 메뉴별 렌더링
+        # 사이드바 위젯 렌더링 전에도 start_date를 참조할 수 있도록 session_state에서 직접 조회
+        _effective_start = start_d or st.session_state.get('start_input') or (
+            data_dict['QQQ'].index.min().date() if 'QQQ' in data_dict else None
+        )
+
         if menu == "💼 자산 관리":
             AssetView().render()
         elif menu == "🛰️ 실시간 모니터링":
             st.title("🛰️ 실시간 포트폴리오 모니터링")
             PortfolioView.render_realtime_tab(data_dict, fg_df, vxn_df, macro_df, news_df,
-                                              start_d or data_dict['QQQ'].index.min().date(),
+                                              _effective_start,
                                               datetime.date.today())
         elif menu == "📈 포트폴리오 매니저":
             PortfolioView.render(data_dict, fg_df, vxn_df, macro_df, news_df, start_d, end_d)

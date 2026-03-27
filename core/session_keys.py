@@ -47,6 +47,7 @@ class SK:
     PORTFOLIO_LOAD_VERSION         = 'p_load_version'
     PORTFOLIO_REALTIME_RESULT      = 'portfolio_realtime_result'
     PORTFOLIO_SELECTED_NAME        = 'portfolio_selected_name'
+    PORTFOLIO_DRAWDOWN_BOOST       = 'portfolio_drawdown_boost'
 
     # ── 자산 관리 뷰 (asset_view) ─────────────────────────────────────
     CURRENT_SIGNALS           = 'current_signals'
@@ -68,6 +69,12 @@ class SK:
     # ── 차트 / 비교 뷰 ───────────────────────────────────────────────
     SHOW_COMP_MANAGER = 'show_comp_manager'
     COMPARISON_LIST   = 'comparison_list'
+
+    # ── 모의투자 DCA (적립식) 설정 ───────────────────────────────────
+    SIM_DCA_USE       = 'sim_dca_use'
+    SIM_DCA_KRW       = 'sim_dca_krw'
+    SIM_DCA_USD       = 'sim_dca_usd'
+    SIM_DCA_THRESHOLD = 'sim_dca_threshold_pct'
 
     # ── 초기 로드 플래그 ─────────────────────────────────────────────
     INITIAL_BOND_LOAD_V28 = 'initial_bond_load_v28'

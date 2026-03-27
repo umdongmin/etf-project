@@ -172,6 +172,12 @@ class PortfolioRealtimeView:
         with col_btn:
             if st.button("🔄 새로고침", use_container_width=True):
                 st.session_state.pop(SK.PORTFOLIO_REALTIME_RESULT, None)
+                # signal_service 캐시도 함께 삭제
+                for _m in ('closing', 'realtime'):
+                    st.session_state.pop(SK.sig_cache(portfolio_name, _m), None)
+                    st.session_state.pop(SK.sig_cache_ts(portfolio_name, _m), None)
+                    st.session_state.pop(SK.sig_cache(portfolio_name, f"{_m}_{start_date}"), None)
+                    st.session_state.pop(SK.sig_cache_ts(portfolio_name, f"{_m}_{start_date}"), None)
                 st.rerun()
 
         with col_status:

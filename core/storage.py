@@ -271,6 +271,11 @@ class StrategyStorage:
             cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='portfolios' AND column_name='is_default'")
             if not cursor.fetchone():
                 cursor.execute("ALTER TABLE portfolios ADD COLUMN is_default BOOLEAN DEFAULT FALSE")
+
+            # [Migration] drawdown_boost JSONB 컬럼 추가 (패닉 구간 채권→주식 비중 이전)
+            cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='portfolios' AND column_name='drawdown_boost'")
+            if not cursor.fetchone():
+                cursor.execute("ALTER TABLE portfolios ADD COLUMN drawdown_boost JSONB DEFAULT NULL")
             
             # [Migration] UNIQUE 제약 조건 강제 적용 (이미 테이블이 있는 경우 대비)
             # 중복 데이터가 있으면 제약 조건 추가가 실패하므로 우선 중복 제거
@@ -299,26 +304,30 @@ class StrategyStorage:
             print(f"Portfolio DB Init Error: {e}")
 
     @classmethod
-    def save_portfolio(cls, name, configs, total_capital, rebalance_preset='none'):
+    def save_portfolio(cls, name, configs, total_capital, rebalance_preset='none', drawdown_boost=None):
         """포트폴리오 정보를 정규화하여 저장"""
         cls._init_portfolio_db()
         # [Security] 공백 등 트리밍
         name = name.strip() if name else "Untitled"
-        
+
         try:
             conn = cls._get_connection()
             cursor = conn.cursor()
-            
+
+            # drawdown_boost JSON 직렬화
+            boost_json = json.dumps(drawdown_boost) if drawdown_boost else None
+
             # 1. portfolios 테이블 저장 (Upsert)
             sql_p = '''
-                INSERT INTO portfolios (name, total_capital, rebalance_preset)
-                VALUES (%s, %s, %s)
+                INSERT INTO portfolios (name, total_capital, rebalance_preset, drawdown_boost)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT (name) DO UPDATE SET
                 total_capital = EXCLUDED.total_capital,
                 rebalance_preset = EXCLUDED.rebalance_preset,
+                drawdown_boost = EXCLUDED.drawdown_boost,
                 updated_at = CURRENT_TIMESTAMP
             '''
-            cursor.execute(sql_p, (name, total_capital, rebalance_preset))
+            cursor.execute(sql_p, (name, total_capital, rebalance_preset, boost_json))
             
             # 2. 기존 아이템 삭제 후 재삽입 (정규화된 테이블의 원칙)
             cursor.execute("DELETE FROM portfolio_items WHERE portfolio_name = %s", (name,))
@@ -347,13 +356,14 @@ class StrategyStorage:
             cursor = conn.cursor()
             
             # 1. 메인 정보 조회
-            cursor.execute("SELECT total_capital, rebalance_preset FROM portfolios WHERE name = %s", (name,))
+            cursor.execute("SELECT total_capital, rebalance_preset, drawdown_boost FROM portfolios WHERE name = %s", (name,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return None
-                
-            total_capital, rb_preset = row
+
+            total_capital, rb_preset, boost_raw = row
+            drawdown_boost = json.loads(boost_raw) if isinstance(boost_raw, str) else (boost_raw or None)
             
             # 2. 아이템 및 연관된 전략 정보 JOIN 조회
             # strategies 테이블의 최신 params/lev_params를 가져옴으로써 자동 동기화 실현
@@ -392,7 +402,8 @@ class StrategyStorage:
             return {
                 'total_capital': total_capital,
                 'rebalance_preset': rb_preset,
-                'configs': configs
+                'configs': configs,
+                'drawdown_boost': drawdown_boost,
             }
         except Exception as e:
             print(f"Load Portfolio Error (Normalized): {e}")

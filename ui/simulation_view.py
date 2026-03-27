@@ -5,8 +5,9 @@ import pandas as pd
 from core.engine import StrategyEngine
 from core.storage import StrategyStorage
 from ui.tester_view import TesterView
-from utils.metrics import calculate_metrics
+from utils.metrics import calculate_metrics, calculate_xirr
 from utils.tax_calculator import calculate_tax, estimate_unrealized_tax
+from core.session_keys import SK
 from core.defaults import DEFAULT_BOND_PARAMS
 from core.engine_kwargs_builder import build_equity_kwargs, build_bond_kwargs, extract_smart_params
 
@@ -131,11 +132,82 @@ class SimulationView:
             st.session_state.sim_krw, st.session_state.sim_usd, exchange_rate
         )
 
+        # ④ 적립식 투자 설정 (DCA)
+        st.divider()
+        st.subheader("④ 적립식 투자 설정 (선택)")
+
+        # 세션 초기화
+        if SK.SIM_DCA_USE not in st.session_state:
+            st.session_state[SK.SIM_DCA_USE] = False
+        if SK.SIM_DCA_KRW not in st.session_state:
+            st.session_state[SK.SIM_DCA_KRW] = 500_000.0
+        if SK.SIM_DCA_USD not in st.session_state:
+            st.session_state[SK.SIM_DCA_USD] = round(500_000.0 / SimulationView.DEFAULT_EXCHANGE_RATE, 2)
+        if SK.SIM_DCA_THRESHOLD not in st.session_state:
+            st.session_state[SK.SIM_DCA_THRESHOLD] = 1.0
+
+        dca_use = st.toggle(
+            "매월 정액 적립 투자 사용",
+            value=st.session_state[SK.SIM_DCA_USE],
+            key="sim_dca_toggle",
+            help="매월 첫 거래일에 설정한 금액을 추가 투자합니다."
+        )
+        st.session_state[SK.SIM_DCA_USE] = dca_use
+
+        dca_monthly_usd = 0.0
+        dca_threshold = st.session_state[SK.SIM_DCA_THRESHOLD]
+
+        if dca_use:
+            col_dca1, col_dca2, col_dca3 = st.columns([3, 3, 2])
+            with col_dca1:
+                if st.session_state.sim_input_mode == "원화 (KRW)":
+                    dca_krw = st.number_input(
+                        "월 적립금 (원화)", min_value=0.0, max_value=100_000_000.0,
+                        value=st.session_state[SK.SIM_DCA_KRW], step=100_000.0,
+                        format="%.0f", key="sim_dca_krw_input"
+                    )
+                    st.session_state[SK.SIM_DCA_KRW] = dca_krw
+                    dca_monthly_usd = round(dca_krw / exchange_rate, 2)
+                    st.session_state[SK.SIM_DCA_USD] = dca_monthly_usd
+                else:
+                    dca_usd = st.number_input(
+                        "월 적립금 (달러)", min_value=0.0, max_value=100_000.0,
+                        value=st.session_state[SK.SIM_DCA_USD], step=100.0,
+                        format="%.2f", key="sim_dca_usd_input"
+                    )
+                    st.session_state[SK.SIM_DCA_USD] = dca_usd
+                    dca_monthly_usd = dca_usd
+                    st.session_state[SK.SIM_DCA_KRW] = round(dca_usd * exchange_rate, 0)
+            with col_dca2:
+                if st.session_state.sim_input_mode == "원화 (KRW)":
+                    st.metric("달러 환산 월 적립금", f"$ {dca_monthly_usd:,.2f}")
+                else:
+                    st.metric("원화 환산 월 적립금", f"₩ {st.session_state[SK.SIM_DCA_KRW]:,.0f}")
+            with col_dca3:
+                dca_threshold = st.number_input(
+                    "기여도 임계값 (%)",
+                    min_value=0.1, max_value=10.0,
+                    value=st.session_state[SK.SIM_DCA_THRESHOLD],
+                    step=0.1, format="%.1f",
+                    key="sim_dca_threshold_input",
+                    help="월 적립금이 포트폴리오 가치의 X% 이하가 되는 시점을 '적립 효과 희박화 시점'으로 표시합니다."
+                )
+                st.session_state[SK.SIM_DCA_THRESHOLD] = dca_threshold
+            st.caption(
+                f"📌 월 **{st.session_state[SK.SIM_DCA_KRW]:,.0f}원** ($ {dca_monthly_usd:,.2f}) 적립 | "
+                f"기여도 **{dca_threshold:.1f}%** 이하 시점을 희박화 기준으로 표시"
+            )
+
         return {
             "allocated_capital": st.session_state.sim_usd,
             "krw": st.session_state.sim_krw,
             "usd": st.session_state.sim_usd,
             "exchange_rate": exchange_rate,
+            "dca": {
+                "use": dca_use,
+                "monthly_usd": dca_monthly_usd,
+                "threshold_pct": dca_threshold,
+            },
         }
 
     @staticmethod
@@ -166,7 +238,7 @@ class SimulationView:
     # ──────────────────────────────────────────────────────────────────────
     @staticmethod
     def _render_strategy_section(invest_cfg, data_dict, fg_df, vxn_df, macro_df, news_df):
-        st.subheader("④ 전략 선택")
+        st.subheader("⑤ 전략 선택")
 
         # ── 전략 모드 ──────────────────────────────────────────────────
         MODE_OPTIONS = {
@@ -272,7 +344,7 @@ class SimulationView:
         st.divider()
 
         # ── 기간 선택 ──────────────────────────────────────────────────
-        st.subheader("⑤ 분석 기간")
+        st.subheader("⑥ 분석 기간")
         start_date, end_date = TesterView.render_period_selector(key_suffix="sim")
         st.caption(f"📅 선택 기간: **{start_date} ~ {end_date}**")
 
@@ -325,50 +397,102 @@ class SimulationView:
                       p_data=None, configs=None):
         total_usd = invest_cfg["allocated_capital"]
 
+        dca_cfg        = invest_cfg.get("dca", {"use": False, "monthly_usd": 0.0, "threshold_pct": 1.0})
+        fee_rate       = st.session_state.get("global_fee_rate", 0.0)
+        integer_shares = st.session_state.get("global_integer_shares", False)
+        rebalance_preset = "none"
+
         with st.spinner("시뮬레이션 실행 중..."):
             try:
+                from core.portfolio_manager import PortfolioManager
+
                 if mode == "equity":
-                    history, closed_trades, _ = StrategyEngine.run_golden_strategy(
-                        **build_equity_kwargs(
-                            data_dict=data_dict, fg_df=fg_df, vxn_df=vxn_df, news_df=news_df,
-                            params=eq_params, start_date=start_date, end_date=end_date,
-                            allocated_capital=total_usd,
-                            fee_rate=st.session_state.get("global_fee_rate", 0.0),
-                            integer_shares=st.session_state.get("global_integer_shares", False),
-                        )
+                    eq_kwargs = build_equity_kwargs(
+                        data_dict=data_dict, fg_df=fg_df, vxn_df=vxn_df, news_df=news_df,
+                        params=eq_params, start_date=start_date, end_date=end_date,
+                        allocated_capital=total_usd,
+                        fee_rate=fee_rate,
+                        integer_shares=integer_shares,
                     )
+                    if dca_cfg["use"]:
+                        # DCA 활성: PortfolioManager로 래핑하여 월별 적립 주입
+                        pm = PortfolioManager(
+                            total_capital=total_usd, rebalance_preset='none',
+                            fee_rate=fee_rate, integer_shares=integer_shares,
+                            monthly_contribution_usd=dca_cfg["monthly_usd"],
+                        )
+                        pm.register_strategy(name="Equity", weight=1.0, engine_kwargs=eq_kwargs, strat_type='equity')
+                        combined, individual_results, _ = pm.run_portfolio()
+                        history = individual_results.get("Equity", {}).get("history", pd.DataFrame())
+                        closed_trades = individual_results.get("Equity", {}).get("closed_trades", pd.DataFrame())
+                        dca_log = pm._dca_log
+                        # 거치식 비교용 시뮬레이션
+                        pm_ls = PortfolioManager(
+                            total_capital=total_usd, rebalance_preset='none',
+                            fee_rate=fee_rate, integer_shares=integer_shares,
+                        )
+                        pm_ls.register_strategy(name="Equity", weight=1.0, engine_kwargs=eq_kwargs, strat_type='equity')
+                        ls_combined, ls_individual, _ = pm_ls.run_portfolio()
+                        lump_sum_history = ls_individual.get("Equity", {}).get("history", pd.DataFrame())
+                    else:
+                        history, closed_trades, _ = StrategyEngine.run_golden_strategy(**eq_kwargs)
+                        dca_log = []
+                        lump_sum_history = pd.DataFrame()
                     metrics = calculate_metrics(history)
                     st.session_state.sim_result = {
-                        "mode": mode,
-                        "history": history,
-                        "closed_trades": closed_trades,
-                        "metrics": metrics,
-                        "eq_weight": 1.0,
-                        "bond_weight": 0.0,
+                        "mode": mode, "history": history, "closed_trades": closed_trades,
+                        "metrics": metrics, "eq_weight": 1.0, "bond_weight": 0.0,
+                        "dca_use": dca_cfg["use"], "dca_monthly_usd": dca_cfg["monthly_usd"],
+                        "dca_log": dca_log, "dca_threshold_pct": dca_cfg["threshold_pct"],
+                        "lump_sum_history": lump_sum_history,
+                        "fee_rate": fee_rate, "integer_shares": integer_shares,
+                        "rebalance_preset": rebalance_preset,
                     }
 
                 elif mode == "bond":
                     if macro_df is None or macro_df.empty:
                         st.error("⚠️ 채권 전략은 FRED 매크로 데이터가 필요합니다.")
                         return
-                    history, closed_trades, _ = StrategyEngine.run_bond_strategy(
-                        **build_bond_kwargs(
-                            data_dict=data_dict, macro_df=macro_df,
-                            params=bond_params, start_date=start_date, end_date=end_date,
-                            lev_params=lev_params,
-                            allocated_capital=total_usd,
-                            fee_rate=st.session_state.get("global_fee_rate", 0.0),
-                            integer_shares=st.session_state.get("global_integer_shares", False),
-                        )
+                    bond_kwargs = build_bond_kwargs(
+                        data_dict=data_dict, macro_df=macro_df,
+                        params=bond_params, start_date=start_date, end_date=end_date,
+                        lev_params=lev_params,
+                        allocated_capital=total_usd,
+                        fee_rate=fee_rate,
+                        integer_shares=integer_shares,
                     )
+                    if dca_cfg["use"]:
+                        pm = PortfolioManager(
+                            total_capital=total_usd, rebalance_preset='none',
+                            fee_rate=fee_rate, integer_shares=integer_shares,
+                            monthly_contribution_usd=dca_cfg["monthly_usd"],
+                        )
+                        pm.register_strategy(name="Bond", weight=1.0, engine_kwargs=bond_kwargs, strat_type='bond')
+                        combined, individual_results, _ = pm.run_portfolio()
+                        history = individual_results.get("Bond", {}).get("history", pd.DataFrame())
+                        closed_trades = individual_results.get("Bond", {}).get("closed_trades", pd.DataFrame())
+                        dca_log = pm._dca_log
+                        # 거치식 비교용 시뮬레이션
+                        pm_ls = PortfolioManager(
+                            total_capital=total_usd, rebalance_preset='none',
+                            fee_rate=fee_rate, integer_shares=integer_shares,
+                        )
+                        pm_ls.register_strategy(name="Bond", weight=1.0, engine_kwargs=bond_kwargs, strat_type='bond')
+                        ls_combined, ls_individual, _ = pm_ls.run_portfolio()
+                        lump_sum_history = ls_individual.get("Bond", {}).get("history", pd.DataFrame())
+                    else:
+                        history, closed_trades, _ = StrategyEngine.run_bond_strategy(**bond_kwargs)
+                        dca_log = []
+                        lump_sum_history = pd.DataFrame()
                     metrics = calculate_metrics(history)
                     st.session_state.sim_result = {
-                        "mode": mode,
-                        "history": history,
-                        "closed_trades": closed_trades,
-                        "metrics": metrics,
-                        "eq_weight": 0.0,
-                        "bond_weight": 1.0,
+                        "mode": mode, "history": history, "closed_trades": closed_trades,
+                        "metrics": metrics, "eq_weight": 0.0, "bond_weight": 1.0,
+                        "dca_use": dca_cfg["use"], "dca_monthly_usd": dca_cfg["monthly_usd"],
+                        "dca_log": dca_log, "dca_threshold_pct": dca_cfg["threshold_pct"],
+                        "lump_sum_history": lump_sum_history,
+                        "fee_rate": fee_rate, "integer_shares": integer_shares,
+                        "rebalance_preset": rebalance_preset,
                     }
 
                 else:  # portfolio — PortfolioManager로 포트폴리오 매니저와 동일한 결과 산출
@@ -376,10 +500,6 @@ class SimulationView:
                         st.error("⚠️ 포트폴리오 통합 모드는 FRED 매크로 데이터가 필요합니다.")
                         return
 
-                    from core.portfolio_manager import PortfolioManager
-
-                    fee_rate       = st.session_state.get("global_fee_rate", 0.0)
-                    integer_shares = st.session_state.get("global_integer_shares", False)
                     # 포트폴리오 매니저 탭과 동일하게 session_state 우선, 없으면 저장값 사용
                     rebalance_preset = st.session_state.get(
                         "portfolio_rebalance_preset",
@@ -393,50 +513,56 @@ class SimulationView:
                     f_macro = macro_df.loc[start_date:end_date] if not macro_df.empty else pd.DataFrame()
                     f_news  = news_df.loc[start_date:end_date]  if news_df is not None and not news_df.empty else None
 
-
-                    pm = PortfolioManager(
-                        total_capital=total_usd,
-                        rebalance_preset=rebalance_preset,
-                        fee_rate=fee_rate,
-                        integer_shares=integer_shares,
-                    )
-
-                    # 포트폴리오 매니저와 동일한 전략 등록 방식
-                    for cfg in configs:
-                        s_type = cfg.get("type", "equity")
-                        kwargs = {
-                            "data_dict": filtered_data,
-                            "start_date": start_date,
-                            "end_date":   end_date,
-                            "allocated_capital": total_usd * cfg["weight"],
-                        }
-                        if s_type == "equity":
-                            live_p = st.session_state.get("current_params", cfg["params"])
-                            kwargs["params"] = live_p
-                            kwargs.update({
-                                "fg_df":          f_fg,
-                                "vxn_df":         f_vxn,
-                                "news_df":        f_news,
-                                "leverage_asset": live_p.get("leverage_asset", "TQQQ"),
-                                "base_asset":     live_p.get("base_asset", "QQQ"),
-                                "smart_params":   live_p,
-                            })
-                        else:
-                            bond_p     = cfg.get("params", DEFAULT_BOND_PARAMS)
-                            bond_lev_p = cfg.get("lev_params")
-                            kwargs["params"]     = bond_p
-                            kwargs["lev_params"] = bond_lev_p
-                            kwargs["macro_df"]   = f_macro
-
-                        pm.register_strategy(
-                            name=cfg["name"],
-                            weight=cfg["weight"],
-                            engine_kwargs=kwargs,
-                            strat_type=s_type,
+                    def _build_pm(monthly_usd: float = 0.0) -> PortfolioManager:
+                        pm = PortfolioManager(
+                            total_capital=total_usd,
+                            rebalance_preset=rebalance_preset,
+                            fee_rate=fee_rate,
+                            integer_shares=integer_shares,
+                            monthly_contribution_usd=monthly_usd,
                         )
+                        for cfg in configs:
+                            s_type = cfg.get("type", "equity")
+                            kwargs = {
+                                "data_dict": filtered_data,
+                                "start_date": start_date,
+                                "end_date":   end_date,
+                                "allocated_capital": total_usd * cfg["weight"],
+                            }
+                            if s_type == "equity":
+                                live_p = st.session_state.get("current_params", cfg["params"])
+                                kwargs["params"] = live_p
+                                kwargs.update({
+                                    "fg_df":          f_fg,
+                                    "vxn_df":         f_vxn,
+                                    "news_df":        f_news,
+                                    "leverage_asset": live_p.get("leverage_asset", "TQQQ"),
+                                    "base_asset":     live_p.get("base_asset", "QQQ"),
+                                    "smart_params":   live_p,
+                                })
+                            else:
+                                bond_p     = cfg.get("params", DEFAULT_BOND_PARAMS)
+                                bond_lev_p = cfg.get("lev_params")
+                                kwargs["params"]     = bond_p
+                                kwargs["lev_params"] = bond_lev_p
+                                kwargs["macro_df"]   = f_macro
+                            pm.register_strategy(
+                                name=cfg["name"], weight=cfg["weight"],
+                                engine_kwargs=kwargs, strat_type=s_type,
+                            )
+                        return pm
 
+                    pm = _build_pm(dca_cfg["monthly_usd"] if dca_cfg["use"] else 0.0)
                     combined, individual_results, rebalance_events = pm.run_portfolio()
+                    dca_log = pm._dca_log
                     metrics = calculate_metrics(combined)
+
+                    # 거치식 비교용 시뮬레이션 (DCA 활성 시)
+                    lump_sum_history = pd.DataFrame()
+                    if dca_cfg["use"]:
+                        pm_ls = _build_pm(0.0)
+                        ls_combined, _, _ = pm_ls.run_portfolio()
+                        lump_sum_history = ls_combined
 
                     # 개별 전략 히스토리 추출 (차트 overlay용)
                     eq_cfg_name   = next((c["name"] for c in configs if c["type"] == "equity"), None)
@@ -466,14 +592,22 @@ class SimulationView:
                         "fee_rate":          fee_rate,
                         "integer_shares":    integer_shares,
                         "rebalance_events":  rebalance_events,
+                        "dca_use":           dca_cfg["use"],
+                        "dca_monthly_usd":   dca_cfg["monthly_usd"],
+                        "dca_log":           dca_log,
+                        "dca_threshold_pct": dca_cfg["threshold_pct"],
+                        "lump_sum_history":  lump_sum_history,
                     }
 
                 st.success("✅ 시뮬레이션 완료!")
                 # 사용된 설정 확인용
+                dca_info = (f" | 적립: **${dca_cfg['monthly_usd']:,.0f}/월**"
+                            if dca_cfg["use"] else "")
                 st.caption(
                     f"⚙️ 적용 설정 — 리밸런싱: **{rebalance_preset}** | "
                     f"수수료: **{fee_rate*100:.3f}%** | "
                     f"정수주식: **{'ON' if integer_shares else 'OFF'}**"
+                    + dca_info
                 )
 
             except Exception as e:
@@ -540,35 +674,68 @@ class SimulationView:
             return
 
         st.divider()
-        st.subheader("⑥ 시뮬레이션 결과 요약")
+        st.subheader("⑦ 시뮬레이션 결과 요약")
 
-        # 최종 자산 (USD)
+        # 최종 자산 (USD) — DCA 활성 시 총 투자금(초기 + 적립) 기준으로 수익 계산
+        total_invested_usd = usd_in
+        if res.get("dca_use"):
+            total_invested_usd += sum(d["amount"] for d in res.get("dca_log", []))
+
         final_usd = history[val_col].iloc[-1]
-        profit_usd = final_usd - usd_in
+        profit_usd = final_usd - total_invested_usd
         final_krw  = final_usd * rate
         profit_krw = profit_usd * rate
-        total_return_pct = (final_usd / usd_in - 1) * 100 if usd_in > 0 else 0.0
+        total_return_pct = (final_usd / total_invested_usd - 1) * 100 if total_invested_usd > 0 else 0.0
 
         # 핵심 지표 카드
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("투자 원금 (USD)",   f"$ {usd_in:,.0f}")
+        invest_label = "총 투자 원금 (USD)" if res.get("dca_use") else "투자 원금 (USD)"
+        c1.metric(invest_label, f"$ {total_invested_usd:,.0f}")
         c2.metric("최종 자산 (USD)",   f"$ {final_usd:,.0f}",
                   delta=f"$ {profit_usd:+,.0f}")
-        c3.metric("누적 수익률",       f"{total_return_pct:+.1f}%")
-        c4.metric("연평균 (CAGR)",     f"{metrics.get('CAGR', metrics.get('cagr', 0))*100:.1f}%")
+        c3.metric("누적 수익률",       f"{total_return_pct:+.1f}%",
+                  help="(최종자산 - 총투자금) / 총투자금 × 100" if res.get("dca_use") else None)
+
+        # DCA 활성 시: CAGR 대신 XIRR 표시 (CAGR은 초기원금만 분모로 사용해 과장됨)
+        if res.get("dca_use"):
+            dca_log = res.get("dca_log", [])
+            if dca_log and not history.empty:
+                _xirr_cf = [{"date": history.index[0].date(), "amount": -usd_in}]
+                for _d in dca_log:
+                    import datetime as _dt
+                    _date = _d["date"].date() if hasattr(_d["date"], "date") else _d["date"]
+                    _xirr_cf.append({"date": _date, "amount": -_d["amount"]})
+                _xirr_cf.append({"date": history.index[-1].date(), "amount": final_usd})
+                _xirr = calculate_xirr(_xirr_cf)
+                c4.metric("연평균 (XIRR)",
+                          f"{_xirr*100:.1f}%" if _xirr is not None else "계산불가",
+                          help="적립식 내부수익률 — 각 납입 시점과 금액을 정확히 반영한 연환산 실질 수익률")
+            else:
+                c4.metric("연평균 (XIRR)", "-")
+        else:
+            c4.metric("연평균 (CAGR)",     f"{metrics.get('CAGR', metrics.get('cagr', 0))*100:.1f}%")
         c5.metric("최대 낙폭 (MDD)",   f"{metrics.get('MDD', metrics.get('mdd', 0))*100:.1f}%")
 
         st.divider()
 
         # 원화 환산 결과
+        total_invested_krw = total_invested_usd * rate
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("투자 원금 (KRW)",   f"₩ {krw_in:,.0f}")
+        c1.metric(invest_label.replace("USD", "KRW"), f"₩ {total_invested_krw:,.0f}")
         c2.metric("최종 자산 (KRW)",   f"₩ {final_krw:,.0f}",
                   delta=f"₩ {profit_krw:+,.0f}")
         c3.metric("칼마 지수",         f"{metrics.get('MAR', metrics.get('calmar', 0)):.3f}")
         c4.metric("샤프 지수",         f"{metrics.get('Sharpe', metrics.get('sharpe', 0)):.3f}")
 
         st.caption(f"📌 원화 환산 기준 환율: {rate:,.0f} 원/달러 (입력값 고정 — 실제 환차손익 미반영)")
+        if res.get("dca_use"):
+            st.warning(
+                "⚠️ **DCA(적립식) 수익률 주의**: 연평균은 XIRR(내부수익률)로 표시됩니다. "
+                "CAGR은 초기 투자금만 분모로 사용해 월 적립금을 무시하므로 과장될 수 있습니다. "
+                "칼마·샤프 지수는 포트폴리오 가치 시계열 기반으로, 적립에 의한 가치 상승이 일부 포함됩니다. "
+                "정확한 수익률은 **📊 DCA 효과 분석** 탭의 XIRR을 참고하세요.",
+                icon="📊"
+            )
 
         # 모드별 비중 정보
         if res["mode"] == "portfolio":
@@ -590,7 +757,7 @@ class SimulationView:
         rate          = invest_cfg["exchange_rate"]
         usd_in        = invest_cfg["usd"]
 
-        st.subheader("⑦ 양도소득세 계산")
+        st.subheader("⑧ 양도소득세 계산")
         st.caption("한국 거주자 기준 — 연간 250만원 기본공제 후 초과분 과세")
 
         # ── 세율 입력 ─────────────────────────────────────────────────
@@ -777,9 +944,14 @@ class SimulationView:
         st.markdown("##### 📊 미실현손익 예상 세금 (참고용)")
         st.caption("현재 보유 중인 포지션을 지금 전량 매도한다고 가정한 추정치입니다.")
 
+        # DCA 활성 시 코스트 베이시스 = 초기 투자금 + 누적 적립금
+        cost_basis_usd = usd_in
+        if res.get("dca_use"):
+            cost_basis_usd += sum(d["amount"] for d in res.get("dca_log", []))
+
         unrealized = estimate_unrealized_tax(
             current_value_usd=final_usd,
-            cost_basis_usd=usd_in,
+            cost_basis_usd=cost_basis_usd,
             exchange_rate=rate,
             tax_rate=tax_rate,
             basic_deduction_krw=deduction_krw,
@@ -822,7 +994,7 @@ class SimulationView:
         if history.empty or _val_col is None:
             return
 
-        st.subheader("⑧ 성과 대시보드")
+        st.subheader("⑨ 성과 대시보드")
 
         # ── 히스토리 인덱스 통일 ─────────────────────────────────────
         hist = history.copy()
@@ -842,9 +1014,14 @@ class SimulationView:
             bench_krw = qqq_norm
 
         # ── Tab 레이아웃 ──────────────────────────────────────────────
-        tab_chart, tab_yearly, tab_trades = st.tabs([
-            "📈 자산성장 곡선", "📅 연도별 성과", "📋 거래 내역"
-        ])
+        tab_labels = ["📈 자산성장 곡선", "📅 연도별 성과", "📋 거래 내역"]
+        if res.get("dca_use"):
+            tab_labels.append("📊 DCA 효과 분석")
+        tab_results = st.tabs(tab_labels)
+        tab_chart  = tab_results[0]
+        tab_yearly = tab_results[1]
+        tab_trades = tab_results[2]
+        tab_dca    = tab_results[3] if res.get("dca_use") else None
 
         # ════════════════════════════════════════════════════════════════
         # Tab 1: 자산성장 곡선 + 드로우다운
@@ -1101,6 +1278,188 @@ class SimulationView:
                     st.subheader("🔄 리밸런싱 이벤트")
                     from ui.portfolio_view import PortfolioView
                     PortfolioView._render_rebalance_log(rebalance_events)
+
+        # ════════════════════════════════════════════════════════════════
+        # Tab 4: DCA 효과 분석 (DCA 활성 시만 표시)
+        # ════════════════════════════════════════════════════════════════
+        if tab_dca is not None:
+            with tab_dca:
+                SimulationView._render_dca_analysis_tab(invest_cfg, hist, _val_col)
+
+    # ──────────────────────────────────────────────────────────────────────
+    # DCA 효과 분석 탭
+    # ──────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _render_dca_analysis_tab(invest_cfg: dict, hist: pd.DataFrame, val_col: str):
+        import plotly.graph_objects as go
+        import datetime
+
+        res            = st.session_state.sim_result
+        rate           = invest_cfg["exchange_rate"]
+        initial_usd    = invest_cfg["usd"]
+        dca_log        = res.get("dca_log", [])
+        threshold_pct  = res.get("dca_threshold_pct", 1.0)
+        dca_monthly    = res.get("dca_monthly_usd", 0.0)
+        lump_hist      = res.get("lump_sum_history", pd.DataFrame())
+
+        if not dca_log:
+            st.info("적립 이력이 없습니다. (백테스트 기간이 너무 짧을 수 있습니다.)")
+            return
+
+        dca_df = pd.DataFrame(dca_log)
+        dca_df["date"] = pd.to_datetime(dca_df["date"])
+        dca_df = dca_df.sort_values("date").reset_index(drop=True)
+
+        total_dca_usd = dca_df["amount"].sum()
+        total_invested_usd = initial_usd + total_dca_usd
+        total_invested_krw = total_invested_usd * rate
+
+        final_usd = hist[val_col].iloc[-1] if not hist.empty else 0.0
+
+        # XIRR 계산
+        xirr_cashflows = [{"date": hist.index[0].date(), "amount": -initial_usd}]
+        for _, row in dca_df.iterrows():
+            xirr_cashflows.append({"date": row["date"].date(), "amount": -row["amount"]})
+        xirr_cashflows.append({"date": hist.index[-1].date(), "amount": final_usd})
+        xirr_val = calculate_xirr(xirr_cashflows)
+
+        # 적립 효과 희박화 시점
+        below_threshold = dca_df[dca_df["contribution_pct"] < threshold_pct]
+        inflection_date = below_threshold["date"].iloc[0] if not below_threshold.empty else None
+
+        # ── 요약 지표 ─────────────────────────────────────────────────
+        st.markdown("##### 💡 DCA 효과 요약")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("총 투자 원금", f"$ {total_invested_usd:,.0f}",
+                  delta=f"₩ {total_invested_krw:,.0f}")
+        c2.metric("XIRR (내부수익률)",
+                  f"{xirr_val*100:.2f}%" if xirr_val is not None else "계산 불가",
+                  help="모든 현금흐름(초기투자 + 월 적립)을 반영한 연환산 실질 수익률")
+        c3.metric("총 적립 횟수 / 금액",
+                  f"{len(dca_df)}회",
+                  delta=f"$ {total_dca_usd:,.0f} 적립")
+        if inflection_date is not None:
+            c4.metric("적립 효과 희박화 시점",
+                      inflection_date.strftime("%Y-%m"),
+                      help=f"월 적립금이 포트폴리오 가치의 {threshold_pct:.1f}% 이하가 된 첫 달")
+        else:
+            c4.metric("적립 효과 희박화 시점", "미도달",
+                      help=f"아직 {threshold_pct:.1f}% 임계에 도달하지 않았습니다.")
+
+        st.divider()
+
+        # ── 거치식 vs 적립식 비교 ─────────────────────────────────────
+        if not lump_hist.empty:
+            st.markdown("##### 📊 거치식 vs 적립식 성과 비교")
+            ls_val_col = "Value" if "Value" in lump_hist.columns else \
+                         "PortfolioValue" if "PortfolioValue" in lump_hist.columns else None
+            if ls_val_col:
+                ls_metrics = calculate_metrics(lump_hist)
+                dca_metrics = res.get("metrics", {})
+                ls_final = lump_hist[ls_val_col].iloc[-1]
+
+                col_ls, col_dca = st.columns(2)
+                with col_ls:
+                    st.markdown("**거치식 (일시불)**")
+                    st.metric("최종 자산", f"$ {ls_final:,.0f}")
+                    st.metric("CAGR", f"{ls_metrics.get('CAGR', 0)*100:.2f}%")
+                    st.metric("MDD",  f"{ls_metrics.get('MDD', 0)*100:.2f}%")
+                with col_dca:
+                    st.markdown("**적립식 (DCA)**")
+                    st.metric("최종 자산", f"$ {final_usd:,.0f}",
+                              delta=f"$ {final_usd - ls_final:+,.0f} vs 거치식")
+                    st.metric("CAGR (XIRR 기준)",
+                              f"{xirr_val*100:.2f}%" if xirr_val else "-")
+                    st.metric("MDD",  f"{dca_metrics.get('MDD', 0)*100:.2f}%",
+                              delta=f"{(dca_metrics.get('MDD', 0) - ls_metrics.get('MDD', 0))*100:.2f}%p")
+
+            st.divider()
+
+        # ── 적립 기여도 추이 차트 ────────────────────────────────────
+        st.markdown("##### 📉 적립 기여도 추이 (기여도 희박화 분석)")
+        st.caption(f"월 적립금이 그 시점 포트폴리오 가치의 몇 %인지 나타냅니다. "
+                   f"**{threshold_pct:.1f}%** 이하를 적립 효과 희박화 시점으로 판단합니다.")
+
+        fig_decay = go.Figure()
+        fig_decay.add_trace(go.Scatter(
+            x=dca_df["date"], y=dca_df["contribution_pct"],
+            mode="lines+markers", name="기여도 (%)",
+            line=dict(color="#4CAF50", width=2),
+            marker=dict(size=5),
+        ))
+        fig_decay.add_hline(
+            y=threshold_pct, line_dash="dash", line_color="orange",
+            annotation_text=f"임계선 {threshold_pct:.1f}%",
+            annotation_position="top right",
+        )
+        if inflection_date is not None:
+            _vx = inflection_date.strftime("%Y-%m-%d")
+            fig_decay.add_shape(
+                type="line", x0=_vx, x1=_vx, y0=0, y1=1, yref="paper",
+                line=dict(dash="dot", color="red", width=2),
+            )
+            fig_decay.add_annotation(
+                x=_vx, y=0.95, yref="paper",
+                text=f"희박화 시점<br>{inflection_date.strftime('%Y-%m')}",
+                showarrow=False, xanchor="left",
+                bgcolor="rgba(255,100,100,0.15)", font=dict(color="red", size=11),
+            )
+        fig_decay.update_layout(
+            xaxis_title="날짜", yaxis_title="기여도 (%)",
+            height=350, margin=dict(t=20, b=20),
+            legend=dict(orientation="h"),
+        )
+        st.plotly_chart(fig_decay, use_container_width=True)
+
+        st.divider()
+
+        # ── 누적 투자금 vs 자산가치 차트 ────────────────────────────
+        st.markdown("##### 📈 누적 투자금 vs 포트폴리오 가치")
+
+        dca_df["cumulative_dca"] = dca_df["amount"].cumsum()
+        # 포트폴리오 가치 시리즈 (월별 DCA 날짜에 매핑)
+        hist_pv = hist[val_col].copy()
+        dca_df["portfolio_value"] = dca_df["date"].apply(
+            lambda d: hist_pv.asof(d) if d in hist_pv.index or hist_pv.index.min() <= d <= hist_pv.index.max() else None
+        )
+
+        fig_stack = go.Figure()
+        fig_stack.add_trace(go.Scatter(
+            x=dca_df["date"],
+            y=[initial_usd] * len(dca_df),
+            fill='tozeroy', name="초기 투자금",
+            line=dict(color="#2196F3"), fillcolor="rgba(33,150,243,0.15)",
+        ))
+        fig_stack.add_trace(go.Scatter(
+            x=dca_df["date"],
+            y=initial_usd + dca_df["cumulative_dca"],
+            fill='tonexty', name="+ 누적 적립금",
+            line=dict(color="#4CAF50"), fillcolor="rgba(76,175,80,0.15)",
+        ))
+        fig_stack.add_trace(go.Scatter(
+            x=dca_df["date"],
+            y=dca_df["portfolio_value"],
+            name="포트폴리오 총 가치", mode="lines",
+            line=dict(color="#FF9800", width=2),
+        ))
+        fig_stack.update_layout(
+            xaxis_title="날짜", yaxis_title="자산 가치 (USD)",
+            height=350, margin=dict(t=20, b=20),
+            legend=dict(orientation="h"),
+        )
+        st.plotly_chart(fig_stack, use_container_width=True)
+
+        st.divider()
+
+        # ── 월별 적립 상세 로그 ──────────────────────────────────────
+        st.markdown("##### 📋 월별 적립 상세 로그")
+        log_display = dca_df[["date", "amount", "portfolio_value_before", "contribution_pct"]].copy()
+        log_display.columns = ["날짜", "적립금(USD)", "적립 전 자산(USD)", "기여도(%)"]
+        log_display["적립금(KRW)"] = (log_display["적립금(USD)"] * rate).map(lambda x: f"₩ {x:,.0f}")
+        log_display["기여도(%)"]   = log_display["기여도(%)"].map(lambda x: f"{x:.2f}%")
+        log_display["적립금(USD)"] = log_display["적립금(USD)"].map(lambda x: f"$ {x:,.2f}")
+        log_display["적립 전 자산(USD)"] = log_display["적립 전 자산(USD)"].map(lambda x: f"$ {x:,.0f}")
+        st.dataframe(log_display, use_container_width=True, height=min(80 + len(log_display) * 35, 400))
 
     # ──────────────────────────────────────────────────────────────────────
     # 보조: 전략 뱃지

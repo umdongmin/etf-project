@@ -1,5 +1,73 @@
+import datetime
 import pandas as pd
 import numpy as np
+
+
+def calculate_xirr(cashflows: list[dict]) -> float | None:
+    """연속 현금흐름 기반 내부수익률(XIRR) 계산 — Newton-Raphson, scipy 불필요.
+
+    Args:
+        cashflows: [{'date': datetime.date | pd.Timestamp, 'amount': float}, ...]
+                   음수 = 투자(outflow), 양수 = 회수(inflow / 최종 가치)
+
+    Returns:
+        연간 내부수익률 (decimal, e.g. 0.15 = 15%). 계산 불가 시 None.
+    """
+    if not cashflows or len(cashflows) < 2:
+        return None
+
+    amounts = [cf['amount'] for cf in cashflows]
+    # 부호 변환 확인 — XIRR은 음수/양수가 모두 있어야 수렴
+    has_neg = any(a < 0 for a in amounts)
+    has_pos = any(a > 0 for a in amounts)
+    if not (has_neg and has_pos):
+        return None
+
+    # 기준일 = 첫 번째 현금흐름 날짜
+    base_date = cashflows[0]['date']
+    if isinstance(base_date, pd.Timestamp):
+        base_date = base_date.date()
+
+    def _year_fraction(d) -> float:
+        if isinstance(d, pd.Timestamp):
+            d = d.date()
+        return (d - base_date).days / 365.25
+
+    def _npv(rate: float) -> float:
+        return sum(
+            cf['amount'] / ((1 + rate) ** _year_fraction(cf['date']))
+            for cf in cashflows
+        )
+
+    def _dnpv(rate: float) -> float:
+        """NPV의 rate에 대한 1차 도함수"""
+        result = 0.0
+        for cf in cashflows:
+            t = _year_fraction(cf['date'])
+            if t == 0:
+                continue
+            result -= t * cf['amount'] / ((1 + rate) ** (t + 1))
+        return result
+
+    # Newton-Raphson 반복
+    rate = 0.1  # 초기 추정값 10%
+    for _ in range(100):
+        npv = _npv(rate)
+        dnpv = _dnpv(rate)
+        if abs(dnpv) < 1e-12:
+            break
+        new_rate = rate - npv / dnpv
+        if abs(new_rate - rate) < 1e-7:
+            return new_rate
+        rate = new_rate
+        if rate <= -1:  # 발산 방지
+            return None
+
+    # 최종 수렴 확인
+    if abs(_npv(rate)) < 1e-3:
+        return rate
+    return None
+
 
 def calculate_metrics(history):
     """성과 지표 계산 함수 (MDD, CAGR 등)"""

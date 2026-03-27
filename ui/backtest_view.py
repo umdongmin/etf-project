@@ -163,6 +163,34 @@ class BacktestView:
     def render_daily_log(golden_history, bh_histories, base_asset):
         """전체 일별 상세 로그 리스트"""
         with st.expander("📄 전체 일별 상세로그 확인", expanded=False):
+            # ── 기간 필터 (사이드바 조회 기간 연동) ─────────────────────
+            _all_dates = golden_history.index.date if hasattr(golden_history.index, 'date') else golden_history.index
+            _min_date, _max_date = min(_all_dates), max(_all_dates)
+
+            # 사이드바 start_input/end_input을 기본값으로 사용
+            _sidebar_start = st.session_state.get('start_input', _min_date)
+            _sidebar_end = st.session_state.get('end_input', _max_date)
+            _default_start = max(_min_date, _sidebar_start) if _sidebar_start else _min_date
+            _default_end = min(_max_date, _sidebar_end) if _sidebar_end else _max_date
+
+            _fc1, _fc2, _fc3 = st.columns([2, 2, 1])
+            with _fc1:
+                _log_start = st.date_input(
+                    "시작일", value=_default_start,
+                    min_value=_min_date, max_value=_max_date, key="log_daily_start"
+                )
+            with _fc2:
+                _log_end = st.date_input(
+                    "종료일", value=_default_end,
+                    min_value=_min_date, max_value=_max_date, key="log_daily_end"
+                )
+            with _fc3:
+                st.write("")
+                if st.button("전체 기간", key="log_daily_reset", use_container_width=True):
+                    st.session_state['log_daily_start'] = _min_date
+                    st.session_state['log_daily_end'] = _max_date
+                    st.rerun()
+
             def style_signal(row):
                 sig = str(row['Trade_Label']) if 'Trade_Label' in row else ""
                 status = str(row.get('Trade_Status', ""))
@@ -174,6 +202,9 @@ class BacktestView:
                 return [''] * len(row)
 
             log_df = golden_history.copy()
+            # 기간 필터 적용
+            _date_idx = log_df.index.date if hasattr(log_df.index, 'date') else log_df.index
+            log_df = log_df[(_date_idx >= _log_start) & (_date_idx <= _log_end)]
             if 'QQQ' in bh_histories:
                 log_df = log_df.join(bh_histories['QQQ']['Value'].rename('QQQ_Value'), how='left')
             log_df.index = log_df.index.date
